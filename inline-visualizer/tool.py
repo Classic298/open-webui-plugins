@@ -1,7 +1,7 @@
 """
 title: Inline Visualizer
 author: Classic298
-version: 1.4.1
+version: 1.4.2
 description: Renders interactive HTML/SVG visualizations inline in chat. For design system instructions, the model should call view_skill("visualize").
 """
 
