@@ -374,6 +374,13 @@ new MutationObserver(function() {
   cancelAnimationFrame(_rh_mutRaf);
   _rh_mutRaf = requestAnimationFrame(reportHeight);
 }).observe(document.body, { childList: true, subtree: true });
+// Reset loop detector on click — covers custom expand/collapse (style.display
+// toggles, class changes) that MutationObserver childList doesn't catch.
+document.addEventListener('click', function() {
+  _rh_consecutive = 0;
+  cancelAnimationFrame(_rh_mutRaf);
+  _rh_mutRaf = requestAnimationFrame(reportHeight);
+}, true);
 
 // --- Post-render fixes (theme defaults, overlap prevention) ---
 window.addEventListener('load', function() {
