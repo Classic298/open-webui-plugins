@@ -366,8 +366,14 @@ document.addEventListener('toggle', function() {
   _rh_consecutive = 0;
   setTimeout(reportHeight, 50);
 }, true);
-// Reset loop detector on user interaction (clicks may change content height)
-document.addEventListener('click', function() { _rh_consecutive = 0; }, true);
+// Watch for DOM mutations (SPA page swaps via innerHTML, dynamic content).
+// ResizeObserver misses these when content changes inside overflow:auto containers.
+var _rh_mutRaf = 0;
+new MutationObserver(function() {
+  _rh_consecutive = 0;
+  cancelAnimationFrame(_rh_mutRaf);
+  _rh_mutRaf = requestAnimationFrame(reportHeight);
+}).observe(document.body, { childList: true, subtree: true });
 
 // --- Post-render fixes (theme defaults, overlap prevention) ---
 window.addEventListener('load', function() {
