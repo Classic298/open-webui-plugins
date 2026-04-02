@@ -1,7 +1,7 @@
 """
 title: Inline Visualizer
 author: Classic298
-version: 1.4.0
+version: 1.4.1
 description: Renders interactive HTML/SVG visualizations inline in chat. For design system instructions, the model should call view_skill("visualize").
 """
 
@@ -358,6 +358,8 @@ document.addEventListener('toggle', function() {
   _rh_consecutive = 0;
   setTimeout(reportHeight, 50);
 }, true);
+// Reset loop detector on user interaction (clicks may change content height)
+document.addEventListener('click', function() { _rh_consecutive = 0; }, true);
 
 // --- Post-render fixes (theme defaults, overlap prevention) ---
 window.addEventListener('load', function() {
