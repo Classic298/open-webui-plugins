@@ -46,24 +46,48 @@ THEME_CSS = """
   --ramp-green-fill:#EAF3DE;  --ramp-green-stroke:#3B6D11;  --ramp-green-th:#27500A;  --ramp-green-ts:#3B6D11;
   --ramp-amber-fill:#FAEEDA;  --ramp-amber-stroke:#854F0B;  --ramp-amber-th:#633806;  --ramp-amber-ts:#854F0B;
   --ramp-red-fill:#FCEBEB;    --ramp-red-stroke:#A32D2D;    --ramp-red-th:#791F1F;    --ramp-red-ts:#A32D2D;
-  /* --- Common aliases (catch hallucinated variable names from shadcn/Tailwind) --- */
+  /* --- Common aliases (catch hallucinated variable names) --- */
+  /* Text */
+  --text: var(--color-text-primary);
   --foreground: var(--color-text-primary);
-  --background: var(--color-bg-primary);
+  --text-primary: var(--color-text-primary);
+  --text-color: var(--color-text-primary);
+  --color-text: var(--color-text-primary);
+  --body-color: var(--color-text-primary);
+  --muted: var(--color-text-secondary);
   --muted-foreground: var(--color-text-secondary);
-  --border: var(--color-border-tertiary);
+  --text-muted: var(--color-text-secondary);
+  --text-secondary: var(--color-text-secondary);
+  --secondary: var(--color-text-secondary);
+  --subtle: var(--color-text-tertiary);
+  --text-tertiary: var(--color-text-tertiary);
+  /* Backgrounds */
+  --bg: var(--color-bg-primary);
+  --background: var(--color-bg-primary);
+  --bg-primary: var(--color-bg-primary);
+  --body-bg: var(--color-bg-primary);
+  --color-bg: var(--color-bg-primary);
+  --surface: var(--color-bg-secondary);
   --surface-1: var(--color-bg-secondary);
   --surface-2: var(--color-bg-tertiary);
   --card: var(--color-bg-secondary);
+  --card-bg: var(--color-bg-secondary);
   --card-foreground: var(--color-text-primary);
-  --primary: #6c2eb9;
-  --primary-foreground: #ffffff;
-  --accent: var(--color-bg-tertiary);
-  --accent-foreground: var(--color-text-primary);
-  --muted: var(--color-bg-tertiary);
+  --card-background: var(--color-bg-secondary);
   --popover: var(--color-bg-secondary);
   --popover-foreground: var(--color-text-primary);
+  --accent: var(--color-bg-tertiary);
+  --accent-foreground: var(--color-text-primary);
+  /* Borders */
+  --border: var(--color-border-tertiary);
+  --border-color: var(--color-border-tertiary);
+  --divider: var(--color-border-tertiary);
+  --separator: var(--color-border-tertiary);
   --input: var(--color-border-tertiary);
   --ring: var(--color-border-secondary);
+  /* Accent */
+  --primary: #6c2eb9;
+  --primary-foreground: #ffffff;
 }
 :root[data-theme="dark"] {
   --color-text-primary: #E5E7EB;
@@ -89,23 +113,43 @@ THEME_CSS = """
   --ramp-amber-fill:#633806;  --ramp-amber-stroke:#EF9F27;  --ramp-amber-th:#FAC775;  --ramp-amber-ts:#EF9F27;
   --ramp-red-fill:#791F1F;    --ramp-red-stroke:#F09595;    --ramp-red-th:#F7C1C1;    --ramp-red-ts:#F09595;
   /* --- Common aliases (dark overrides) --- */
+  --text: var(--color-text-primary);
   --foreground: var(--color-text-primary);
-  --background: var(--color-bg-primary);
+  --text-primary: var(--color-text-primary);
+  --text-color: var(--color-text-primary);
+  --color-text: var(--color-text-primary);
+  --body-color: var(--color-text-primary);
+  --muted: var(--color-text-secondary);
   --muted-foreground: var(--color-text-secondary);
-  --border: var(--color-border-tertiary);
+  --text-muted: var(--color-text-secondary);
+  --text-secondary: var(--color-text-secondary);
+  --secondary: var(--color-text-secondary);
+  --subtle: var(--color-text-tertiary);
+  --text-tertiary: var(--color-text-tertiary);
+  --bg: var(--color-bg-primary);
+  --background: var(--color-bg-primary);
+  --bg-primary: var(--color-bg-primary);
+  --body-bg: var(--color-bg-primary);
+  --color-bg: var(--color-bg-primary);
+  --surface: var(--color-bg-secondary);
   --surface-1: var(--color-bg-secondary);
   --surface-2: var(--color-bg-tertiary);
   --card: var(--color-bg-secondary);
+  --card-bg: var(--color-bg-secondary);
   --card-foreground: var(--color-text-primary);
-  --primary: #a78bfa;
-  --primary-foreground: #1A1A1A;
-  --accent: var(--color-bg-tertiary);
-  --accent-foreground: var(--color-text-primary);
-  --muted: var(--color-bg-tertiary);
+  --card-background: var(--color-bg-secondary);
   --popover: var(--color-bg-secondary);
   --popover-foreground: var(--color-text-primary);
+  --accent: var(--color-bg-tertiary);
+  --accent-foreground: var(--color-text-primary);
+  --border: var(--color-border-tertiary);
+  --border-color: var(--color-border-tertiary);
+  --divider: var(--color-border-tertiary);
+  --separator: var(--color-border-tertiary);
   --input: var(--color-border-tertiary);
   --ring: var(--color-border-secondary);
+  --primary: #a78bfa;
+  --primary-foreground: #1A1A1A;
 }
 """
 
@@ -271,21 +315,32 @@ function reportHeight() {
       }
     } catch(e) {}
   });
-  // Temporarily collapse body so scrollHeight reflects actual content,
-  // not the iframe's previously set height (fixes shrink-on-collapse).
+
+  // Neutralize viewport-relative heights (100vh etc.) during measurement.
+  // In an auto-sizing iframe, vh tracks iframe height → creates feedback loops.
+  // Force all direct body children to height:auto so we measure true content.
+  var saved = [];
+  Array.from(b.children).forEach(function(el) {
+    if (el.nodeType !== 1) return;
+    saved.push({ el: el, css: el.style.cssText });
+    el.style.setProperty('height', 'auto', 'important');
+    el.style.setProperty('max-height', 'none', 'important');
+    el.style.setProperty('min-height', '0', 'important');
+  });
   b.style.height = '0';
   var h = b.scrollHeight + svgOverflow;
   b.style.height = '';
+  // Restore original inline styles
+  saved.forEach(function(s) { s.el.style.cssText = s.css; });
 
-  // Guard against feedback loops (e.g. content using 100vh + body padding).
-  // Each cycle the iframe grows by a small fixed delta (typically body padding).
-  // Detect 3+ consecutive small monotonic increases and stop reporting.
+  // Safety net: detect residual feedback loops (e.g. nested vh elements).
+  // 3+ consecutive small monotonic increases → stop reporting.
   var delta = h - _rh_last;
   if (_rh_last > 0 && delta > 0 && delta < 50) {
     _rh_consecutive++;
-    if (_rh_consecutive >= 3) return;   // feedback loop — stop
+    if (_rh_consecutive >= 3) return;
   } else {
-    _rh_consecutive = 0;                // large jump or shrink — legitimate change
+    _rh_consecutive = 0;
   }
 
   _rh_last = h;
@@ -300,11 +355,9 @@ new ResizeObserver(function() {
 }).observe(document.body);
 // Explicitly handle <details> toggle — ResizeObserver misses this in some browsers
 document.addEventListener('toggle', function() {
-  _rh_consecutive = 0;     // user interaction — reset loop detector
+  _rh_consecutive = 0;
   setTimeout(reportHeight, 50);
 }, true);
-// Reset loop detector on user interaction (clicks may change content height)
-document.addEventListener('click', function() { _rh_consecutive = 0; }, true);
 
 // --- Post-render fixes (theme defaults, overlap prevention) ---
 window.addEventListener('load', function() {
