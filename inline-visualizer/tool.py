@@ -76,8 +76,7 @@ THEME_CSS = """
   --card-background: var(--color-bg-secondary);
   --popover: var(--color-bg-secondary);
   --popover-foreground: var(--color-text-primary);
-  --accent: var(--color-bg-tertiary);
-  --accent-foreground: var(--color-text-primary);
+  --hover: rgba(0,0,0,0.04);
   /* Borders */
   --border: var(--color-border-tertiary);
   --border-color: var(--color-border-tertiary);
@@ -85,9 +84,11 @@ THEME_CSS = """
   --separator: var(--color-border-tertiary);
   --input: var(--color-border-tertiary);
   --ring: var(--color-border-secondary);
-  /* Accent */
+  /* Accent / Primary (AI uses --accent as brand color, not surface) */
   --primary: #6c2eb9;
   --primary-foreground: #ffffff;
+  --accent: #6c2eb9;
+  --accent-foreground: #ffffff;
 }
 :root[data-theme="dark"] {
   --color-text-primary: #E5E7EB;
@@ -140,8 +141,7 @@ THEME_CSS = """
   --card-background: var(--color-bg-secondary);
   --popover: var(--color-bg-secondary);
   --popover-foreground: var(--color-text-primary);
-  --accent: var(--color-bg-tertiary);
-  --accent-foreground: var(--color-text-primary);
+  --hover: rgba(255,255,255,0.06);
   --border: var(--color-border-tertiary);
   --border-color: var(--color-border-tertiary);
   --divider: var(--color-border-tertiary);
@@ -150,6 +150,8 @@ THEME_CSS = """
   --ring: var(--color-border-secondary);
   --primary: #a78bfa;
   --primary-foreground: #1A1A1A;
+  --accent: #a78bfa;
+  --accent-foreground: #ffffff;
 }
 """
 
@@ -318,7 +320,11 @@ function reportHeight() {
 
   // Neutralize viewport-relative heights (100vh etc.) during measurement.
   // In an auto-sizing iframe, vh tracks iframe height → creates feedback loops.
-  // Force all direct body children to height:auto so we measure true content.
+  // Force body and all direct children to height:auto so we measure true content.
+  var savedBody = b.style.cssText;
+  b.style.setProperty('height', 'auto', 'important');
+  b.style.setProperty('overflow', 'visible', 'important');
+  b.style.setProperty('display', 'block', 'important');
   var saved = [];
   Array.from(b.children).forEach(function(el) {
     if (el.nodeType !== 1) return;
@@ -326,11 +332,11 @@ function reportHeight() {
     el.style.setProperty('height', 'auto', 'important');
     el.style.setProperty('max-height', 'none', 'important');
     el.style.setProperty('min-height', '0', 'important');
+    el.style.setProperty('overflow', 'visible', 'important');
   });
-  b.style.height = '0';
   var h = b.scrollHeight + svgOverflow;
-  b.style.height = '';
   // Restore original inline styles
+  b.style.cssText = savedBody;
   saved.forEach(function(s) { s.el.style.cssText = s.css; });
 
   // Safety net: detect residual feedback loops (e.g. nested vh elements).
