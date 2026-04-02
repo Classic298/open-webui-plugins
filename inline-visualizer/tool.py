@@ -48,11 +48,13 @@ THEME_CSS = """
   --ramp-red-fill:#FCEBEB;    --ramp-red-stroke:#A32D2D;    --ramp-red-th:#791F1F;    --ramp-red-ts:#A32D2D;
   /* --- Common aliases (catch hallucinated variable names) --- */
   /* Text */
+  --fg: var(--color-text-primary);
   --text: var(--color-text-primary);
   --foreground: var(--color-text-primary);
   --text-primary: var(--color-text-primary);
   --text-color: var(--color-text-primary);
   --color-text: var(--color-text-primary);
+  --color-foreground: var(--color-text-primary);
   --body-color: var(--color-text-primary);
   --muted: var(--color-text-secondary);
   --muted-foreground: var(--color-text-secondary);
