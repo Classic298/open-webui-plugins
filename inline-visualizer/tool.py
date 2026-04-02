@@ -46,6 +46,24 @@ THEME_CSS = """
   --ramp-green-fill:#EAF3DE;  --ramp-green-stroke:#3B6D11;  --ramp-green-th:#27500A;  --ramp-green-ts:#3B6D11;
   --ramp-amber-fill:#FAEEDA;  --ramp-amber-stroke:#854F0B;  --ramp-amber-th:#633806;  --ramp-amber-ts:#854F0B;
   --ramp-red-fill:#FCEBEB;    --ramp-red-stroke:#A32D2D;    --ramp-red-th:#791F1F;    --ramp-red-ts:#A32D2D;
+  /* --- Common aliases (catch hallucinated variable names from shadcn/Tailwind) --- */
+  --foreground: var(--color-text-primary);
+  --background: var(--color-bg-primary);
+  --muted-foreground: var(--color-text-secondary);
+  --border: var(--color-border-tertiary);
+  --surface-1: var(--color-bg-secondary);
+  --surface-2: var(--color-bg-tertiary);
+  --card: var(--color-bg-secondary);
+  --card-foreground: var(--color-text-primary);
+  --primary: #6c2eb9;
+  --primary-foreground: #ffffff;
+  --accent: var(--color-bg-tertiary);
+  --accent-foreground: var(--color-text-primary);
+  --muted: var(--color-bg-tertiary);
+  --popover: var(--color-bg-secondary);
+  --popover-foreground: var(--color-text-primary);
+  --input: var(--color-border-tertiary);
+  --ring: var(--color-border-secondary);
 }
 :root[data-theme="dark"] {
   --color-text-primary: #E5E7EB;
@@ -70,6 +88,24 @@ THEME_CSS = """
   --ramp-green-fill:#27500A;  --ramp-green-stroke:#97C459;  --ramp-green-th:#C0DD97;  --ramp-green-ts:#97C459;
   --ramp-amber-fill:#633806;  --ramp-amber-stroke:#EF9F27;  --ramp-amber-th:#FAC775;  --ramp-amber-ts:#EF9F27;
   --ramp-red-fill:#791F1F;    --ramp-red-stroke:#F09595;    --ramp-red-th:#F7C1C1;    --ramp-red-ts:#F09595;
+  /* --- Common aliases (dark overrides) --- */
+  --foreground: var(--color-text-primary);
+  --background: var(--color-bg-primary);
+  --muted-foreground: var(--color-text-secondary);
+  --border: var(--color-border-tertiary);
+  --surface-1: var(--color-bg-secondary);
+  --surface-2: var(--color-bg-tertiary);
+  --card: var(--color-bg-secondary);
+  --card-foreground: var(--color-text-primary);
+  --primary: #a78bfa;
+  --primary-foreground: #1A1A1A;
+  --accent: var(--color-bg-tertiary);
+  --accent-foreground: var(--color-text-primary);
+  --muted: var(--color-bg-tertiary);
+  --popover: var(--color-bg-secondary);
+  --popover-foreground: var(--color-text-primary);
+  --input: var(--color-border-tertiary);
+  --ring: var(--color-border-secondary);
 }
 """
 
@@ -213,6 +249,10 @@ BODY_SCRIPTS = """
 <script>
 
 // --- Height reporting ---
+var _rh_last = 0;          // last reported height
+var _rh_consecutive = 0;   // consecutive small-growth reports
+var _rh_raf = 0;           // rAF id for debouncing ResizeObserver
+
 function reportHeight() {
   var b = document.body;
   // Measure SVG overflow (content beyond viewBox) before collapsing body,
@@ -236,15 +276,35 @@ function reportHeight() {
   b.style.height = '0';
   var h = b.scrollHeight + svgOverflow;
   b.style.height = '';
+
+  // Guard against feedback loops (e.g. content using 100vh + body padding).
+  // Each cycle the iframe grows by a small fixed delta (typically body padding).
+  // Detect 3+ consecutive small monotonic increases and stop reporting.
+  var delta = h - _rh_last;
+  if (_rh_last > 0 && delta > 0 && delta < 50) {
+    _rh_consecutive++;
+    if (_rh_consecutive >= 3) return;   // feedback loop — stop
+  } else {
+    _rh_consecutive = 0;                // large jump or shrink — legitimate change
+  }
+
+  _rh_last = h;
   parent.postMessage({ type: 'iframe:height', height: h }, '*');
 }
 window.addEventListener('load', reportHeight);
 window.addEventListener('resize', reportHeight);
-new ResizeObserver(reportHeight).observe(document.body);
+// Debounce ResizeObserver through rAF to avoid tight synchronous loops
+new ResizeObserver(function() {
+  cancelAnimationFrame(_rh_raf);
+  _rh_raf = requestAnimationFrame(reportHeight);
+}).observe(document.body);
 // Explicitly handle <details> toggle — ResizeObserver misses this in some browsers
 document.addEventListener('toggle', function() {
+  _rh_consecutive = 0;     // user interaction — reset loop detector
   setTimeout(reportHeight, 50);
 }, true);
+// Reset loop detector on user interaction (clicks may change content height)
+document.addEventListener('click', function() { _rh_consecutive = 0; }, true);
 
 // --- Post-render fixes (theme defaults, overlap prevention) ---
 window.addEventListener('load', function() {
