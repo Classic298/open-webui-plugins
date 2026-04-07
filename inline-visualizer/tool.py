@@ -1,7 +1,7 @@
 """
 title: Inline Visualizer
 author: Classic298
-version: 1.4.3
+version: 1.5.0
 description: Renders interactive HTML/SVG visualizations inline in chat. For design system instructions, the model should call view_skill("visualize").
 """
 
@@ -233,6 +233,12 @@ code {
   font-family: var(--font-mono); font-size: 13px; background: var(--color-bg-tertiary);
   padding: 2px 6px; border-radius: 4px;
 }
+#iv-dl-wrap{position:fixed;top:4px;right:4px;z-index:9999}
+#iv-dl-btn{width:26px;height:26px;padding:0;display:flex;align-items:center;justify-content:center;
+  opacity:0.3;border-color:var(--color-border-tertiary);background:var(--color-bg-primary)}
+#iv-dl-btn:hover{opacity:0.9;background:var(--color-bg-secondary)}
+#iv-dl-btn svg{width:14px;height:14px;stroke:var(--color-text-secondary);fill:none;
+  stroke-width:1.5;stroke-linecap:round;stroke-linejoin:round}
 """
 
 # ---------------------------------------------------------------------------
@@ -487,6 +493,25 @@ function openLink(url) {
   try { parent.window.open(url, '_blank'); }
   catch(e) { window.open(url, '_blank'); }
 }
+
+// --- Download visualization as self-contained HTML ---
+function _ivDownload() {
+  var w = document.getElementById('iv-dl-wrap');
+  if (w) w.remove();
+  var html = '<!DOCTYPE html>\n' + document.documentElement.outerHTML;
+  if (w) document.body.appendChild(w);
+  var fname = (document.title || 'visualization').replace(/[<>:"\\/|?*]+/g, '-').replace(/\s+/g, ' ').trim();
+  if (!fname) fname = 'visualization';
+  fname += '.html';
+  var blob = new Blob([html], {type: 'text/html;charset=utf-8'});
+  var url = URL.createObjectURL(blob);
+  var a = document.createElement('a');
+  a.href = url; a.download = fname; a.target = '_blank';
+  a.style.display = 'none';
+  document.body.appendChild(a);
+  a.click();
+  setTimeout(function() { a.remove(); URL.revokeObjectURL(url); }, 30000);
+}
 </script>
 """
 
@@ -533,6 +558,13 @@ STRICT_SECURITY_SCRIPT = """
 
 # Kept for backwards compatibility in case anything references the old name
 INJECTED_SCRIPTS = BODY_SCRIPTS
+
+DOWNLOAD_BUTTON = (
+    '<div id="iv-dl-wrap">'
+    '<button id="iv-dl-btn" onclick="_ivDownload()" title="Download">'
+    '<svg viewBox="0 0 16 16"><path d="M8 2v8M5 7l3 3 3-3"/><path d="M3 12h10"/></svg>'
+    '</button></div>'
+)
 
 
 _WRAPPER_TAG_RE = re.compile(
@@ -598,17 +630,20 @@ def _build_csp_tag(level: str) -> str:
     )
 
 
-def _build_html(content: str, security_level: str = "strict") -> str:
+def _build_html(content: str, security_level: str = "strict", title: str = "Visualization") -> str:
     """Wrap a user-provided HTML/SVG fragment in the full Rich UI shell."""
     content = _sanitize_content(content)
     csp_tag = _build_csp_tag(security_level)
     strict_script = STRICT_SECURITY_SCRIPT if security_level == "strict" else ""
+    safe_title = (title.replace('&', '&amp;').replace('<', '&lt;')
+                       .replace('>', '&gt;').replace('"', '&quot;'))
     return (
         "<!DOCTYPE html><html><head>"
+        f"<title>{safe_title}</title>"
         f"{csp_tag}"
         f"<style>{THEME_CSS}\n{SVG_CLASSES}\n{BASE_STYLES}</style>"
         f"{THEME_DETECTION_SCRIPT}"
-        f"</head><body>\n{content}\n{BODY_SCRIPTS}{strict_script}</body></html>"
+        f"</head><body>\n{content}\n{DOWNLOAD_BUTTON}\n{BODY_SCRIPTS}{strict_script}</body></html>"
     )
 
 
@@ -683,7 +718,7 @@ class Tools:
         :return: Interactive rich embed rendered in the chat, with LLM context.
         """
         response = HTMLResponse(
-            content=_build_html(html_code, self.valves.security_level),
+            content=_build_html(html_code, self.valves.security_level, title),
             headers={"Content-Disposition": "inline"},
         )
         result_context = (
