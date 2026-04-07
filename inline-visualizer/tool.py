@@ -239,6 +239,43 @@ code {
 #iv-dl-btn:hover{opacity:0.9;background:var(--color-bg-secondary)}
 #iv-dl-btn svg{width:14px;height:14px;stroke:var(--color-text-secondary);fill:none;
   stroke-width:1.5;stroke-linecap:round;stroke-linejoin:round}
+/* --- Print styles ---
+ * Visualizations are designed for screen widths that often exceed A4/Letter.
+ * The strategy: remove all overflow clipping, force landscape orientation,
+ * and shrink-to-fit the entire body into the page width. This ensures
+ * wide dashboards, charts, and SVG diagrams print completely without
+ * being clipped — even if the visualization is wider than the paper.
+ */
+@media print {
+  @page { size: landscape; margin: 10mm; }
+  html {
+    overflow: visible !important;
+    /* Shrink-to-fit: scale the entire document to fit the page width.
+       The browser will scale down wide content automatically. */
+    width: 100% !important;
+    height: auto !important;
+  }
+  body {
+    overflow: visible !important;
+    width: 100% !important;
+    height: auto !important;
+    padding: 0 !important;
+    background: #fff !important;
+    /* Ensure text colors and backgrounds print accurately */
+    -webkit-print-color-adjust: exact;
+    print-color-adjust: exact;
+  }
+  /* Remove all overflow clipping so nothing gets cut off */
+  * { overflow: visible !important; box-shadow: none !important; }
+  /* SVGs: fill print width, auto-scale height */
+  svg { width: 100% !important; height: auto !important; max-width: none !important; }
+  /* Chart.js canvases: fit to page */
+  canvas { max-width: 100% !important; height: auto !important; }
+  /* Hide the download button */
+  #iv-dl-wrap { display: none !important; }
+  /* Ensure colored backgrounds/borders print */
+  *, *::before, *::after { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+}
 """
 
 # ---------------------------------------------------------------------------
