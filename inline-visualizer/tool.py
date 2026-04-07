@@ -542,7 +542,7 @@ var _ivStr = {
   // Middle Eastern
   tr: 'HTML olarak indir',
   ar: 'تحميل كـ HTML',
-  fa: 'دانلود به\u200Cصورت HTML',
+
   he: 'הורד כ-HTML',
   // East & South Asian
   zh: '下载为HTML',
