@@ -517,6 +517,33 @@ function openLink(url) {
   catch(e) { window.open(url, '_blank'); }
 }
 
+// --- Print fix for Chart.js canvases ---
+// Chart.js sets explicit pixel widths as inline styles on canvas and its
+// container div at render time (e.g. style="width: 1400px"). CSS max-width
+// from a stylesheet can't reliably override this in Chrome's print engine.
+// Fix: directly mutate inline styles before print, restore after.
+(function() {
+  window.addEventListener('beforeprint', function() {
+    document.querySelectorAll('canvas').forEach(function(c) {
+      c.setAttribute('data-print-style', c.style.cssText);
+      c.style.setProperty('width', '100%', 'important');
+      c.style.setProperty('max-width', '100%', 'important');
+      c.style.setProperty('height', 'auto', 'important');
+      var p = c.parentElement;
+      if (p) {
+        p.setAttribute('data-print-style', p.style.cssText);
+        p.style.setProperty('width', '100%', 'important');
+        p.style.setProperty('max-width', '100%', 'important');
+      }
+    });
+  });
+  window.addEventListener('afterprint', function() {
+    document.querySelectorAll('[data-print-style]').forEach(function(el) {
+      el.style.cssText = el.getAttribute('data-print-style');
+      el.removeAttribute('data-print-style');
+    });
+  });
+})();
 
 // --- Download visualization as self-contained HTML ---
 var _ivLang = 'en';
