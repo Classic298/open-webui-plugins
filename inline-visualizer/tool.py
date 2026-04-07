@@ -240,41 +240,20 @@ code {
 #iv-dl-btn svg{width:14px;height:14px;stroke:var(--color-text-secondary);fill:none;
   stroke-width:1.5;stroke-linecap:round;stroke-linejoin:round}
 /* --- Print styles ---
- * Visualizations are designed for screen widths that often exceed A4/Letter.
- * The strategy: remove all overflow clipping, force landscape orientation,
- * and shrink-to-fit the entire body into the page width. This ensures
- * wide dashboards, charts, and SVG diagrams print completely without
- * being clipped — even if the visualization is wider than the paper.
+ * The only thing preventing visualizations from printing correctly is
+ * overflow:hidden on html/body (needed on screen to prevent iframe
+ * scroll). Remove it and let the browser's print engine handle layout.
+ * Don't force widths or scale — the browser reflows responsive content
+ * (grids, flexbox, %) to the page width automatically.
  */
 @media print {
-  @page { size: landscape; margin: 10mm; }
-  html {
-    overflow: visible !important;
-    /* Shrink-to-fit: scale the entire document to fit the page width.
-       The browser will scale down wide content automatically. */
-    width: 100% !important;
-    height: auto !important;
-  }
-  body {
-    overflow: visible !important;
-    width: 100% !important;
-    height: auto !important;
-    padding: 0 !important;
-    background: #fff !important;
-    /* Ensure text colors and backgrounds print accurately */
-    -webkit-print-color-adjust: exact;
-    print-color-adjust: exact;
-  }
-  /* Remove all overflow clipping so nothing gets cut off */
-  * { overflow: visible !important; box-shadow: none !important; }
-  /* SVGs: fill print width, auto-scale height */
-  svg { width: 100% !important; height: auto !important; max-width: none !important; }
-  /* Chart.js canvases: fit to page */
-  canvas { max-width: 100% !important; height: auto !important; }
-  /* Hide the download button */
+  @page { margin: 12mm; }
+  html, body { overflow: visible !important; height: auto !important;
+    background: #fff !important; }
+  body { padding: 4px !important; }
   #iv-dl-wrap { display: none !important; }
-  /* Ensure colored backgrounds/borders print */
-  *, *::before, *::after { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+  *, *::before, *::after { -webkit-print-color-adjust: exact;
+    print-color-adjust: exact; box-shadow: none !important; }
 }
 """
 
@@ -532,50 +511,6 @@ function openLink(url) {
   catch(e) { window.open(url, '_blank'); }
 }
 
-// --- Print scaling ---
-// Visualizations use responsive CSS (grids, %, flexbox) that will
-// naturally reflow to the print page width. The problem is elements
-// with fixed pixel widths (Chart.js canvases, wide SVGs) that
-// exceed the page. Strategy:
-//   1. Temporarily constrain body to the print page width
-//   2. Let responsive content reflow naturally
-//   3. Check if anything STILL overflows (fixed-width elements)
-//   4. Only then apply transform:scale to shrink-to-fit
-// This avoids the naive approach of scaling based on viewport width
-// (which makes everything tiny on wide monitors).
-(function() {
-  var _origStyles = '';
-  var _scaled = false;
-  window.addEventListener('beforeprint', function() {
-    var b = document.body;
-    _origStyles = b.style.cssText;
-    // A4 landscape at 96 dpi minus 10mm margins = ~1015px
-    var pageW = 1015;
-    // Step 1: constrain to page width and let content reflow
-    b.style.width = pageW + 'px';
-    b.style.maxWidth = pageW + 'px';
-    b.style.overflow = 'visible';
-    b.style.padding = '0';
-    // Step 2: force reflow, then measure if anything overflows
-    void b.offsetWidth;
-    var overflow = b.scrollWidth - pageW;
-    if (overflow > 10) {
-      // Something has a fixed width wider than the page — scale down
-      var scale = pageW / b.scrollWidth;
-      b.style.width = b.scrollWidth + 'px';
-      b.style.maxWidth = 'none';
-      b.style.transform = 'scale(' + scale + ')';
-      b.style.transformOrigin = 'top left';
-    }
-    _scaled = true;
-  });
-  window.addEventListener('afterprint', function() {
-    if (_scaled) {
-      document.body.style.cssText = _origStyles;
-      _scaled = false;
-    }
-  });
-})();
 
 // --- Download visualization as self-contained HTML ---
 var _ivLang = 'en';
