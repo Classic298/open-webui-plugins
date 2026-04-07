@@ -301,7 +301,6 @@ THEME_DETECTION_SCRIPT = """
 
 BODY_SCRIPTS = """
 <script>
-console.log('[IV] BODY_SCRIPTS start');
 // --- Height reporting ---
 var _rh_last = 0;          // last reported height
 var _rh_consecutive = 0;   // consecutive small-growth reports
@@ -497,7 +496,6 @@ function openLink(url) {
 }
 
 // --- Download visualization as self-contained HTML ---
-console.log('[IV] before _ivStr');
 var _ivLang = 'en';
 var _ivStr = {
   // Required languages
@@ -558,7 +556,6 @@ var _ivStr = {
   // African
   sw: 'Pakua kama HTML'
 };
-console.log('[IV] after _ivStr, before detectLang');
 (function() {
   function detectLang() {
     // 1. Pre-detected via __event_call__ (baked into HTML by the tool)
@@ -618,7 +615,6 @@ console.log('[IV] after _ivStr, before detectLang');
 // maxTouchPoints > 1 heuristic catches iPadOS (reports as desktop Mac).
 // ---------------------------------------------------------------------------
 
-console.log('[IV] before _ivIsIOS + _ivDownload');
 var _ivIsIOS = /iPad|iPhone|iPod/.test(navigator.userAgent)
   || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
 
@@ -627,7 +623,7 @@ function _ivDownload() {
   // serialized HTML — the saved file should be a clean visualization.
   var w = document.getElementById('iv-dl-wrap');
   if (w) w.remove();
-  var html = '<!DOCTYPE html>\n' + document.documentElement.outerHTML;
+  var html = '<!DOCTYPE html>\\n' + document.documentElement.outerHTML;
   if (w) document.body.appendChild(w);
 
   var fname = (document.title || 'visualization').replace(/[<>:"\\/|?*]+/g, '-').replace(/\s+/g, ' ').trim();
