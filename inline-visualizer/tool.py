@@ -201,6 +201,7 @@ SVG_CLASSES = """
 
 BASE_STYLES = """
 * { box-sizing: border-box; margin: 0; font-family: var(--font-sans); }
+html, body { overflow: hidden; }
 body { background: transparent; color: var(--color-text-primary); line-height: 1.5; padding: 8px; }
 svg { overflow: visible; }
 svg text { fill: var(--color-text-primary); }
@@ -263,17 +264,6 @@ code {
 # Also sets up a MutationObserver to react to live theme switches.
 THEME_DETECTION_SCRIPT = """
 <script>
-// overflow:hidden prevents scrollbars inside the iframe (height reporting
-// auto-sizes the iframe to fit). But when the HTML is opened standalone
-// in a browser, there's no parent iframe — content gets clipped instead.
-// Detect: if we're in an iframe, hide overflow. Otherwise allow scrolling.
-if (window !== window.parent) {
-  document.documentElement.style.overflow = 'hidden';
-  document.addEventListener('DOMContentLoaded', function() {
-    document.body.style.overflow = 'hidden';
-  });
-}
-
 (function() {
   function detectTheme(root) {
     return root.classList.contains('dark')
@@ -671,12 +661,14 @@ var _ivIsIOS = /iPad|iPhone|iPod/.test(navigator.userAgent)
   || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
 
 function _ivDownload() {
-  // Temporarily remove the download button so it doesn't appear in the
-  // serialized HTML — the saved file should be a clean visualization.
+  // Clean up the serialized HTML for standalone use:
+  // - Remove download button (not needed in saved file)
+  // - Strip overflow:hidden so the file is scrollable in a browser
   var w = document.getElementById('iv-dl-wrap');
   if (w) w.remove();
   var html = '<!DOCTYPE html>\\n' + document.documentElement.outerHTML;
   if (w) document.body.appendChild(w);
+  html = html.replace('html, body { overflow: hidden; }', '');
 
   var fname = (document.title || 'visualization').replace(/[<>:"\\/|?*]+/g, '-').replace(/\s+/g, ' ').trim();
   if (!fname) fname = 'visualization';
