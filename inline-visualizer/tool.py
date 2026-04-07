@@ -239,27 +239,19 @@ code {
 #iv-dl-btn:hover{opacity:0.9;background:var(--color-bg-secondary)}
 #iv-dl-btn svg{width:14px;height:14px;stroke:var(--color-text-secondary);fill:none;
   stroke-width:1.5;stroke-linecap:round;stroke-linejoin:round}
-/* --- Print styles ---
- * Two problems to solve for print:
- * 1. overflow:hidden on html/body clips content (needed on screen for iframe sizing)
- * 2. Chart.js canvases and other elements are rendered at screen width and
- *    don't shrink for narrower paper (e.g. A4 portrait ~760px vs 1400px screen)
- * Fix: remove overflow clipping + force max-width:100% so canvases/SVGs/containers
- * scale down to fit the page. Responsive grids/flexbox reflow automatically.
+/* --- Print ---
+ * overflow:hidden on html/body clips content in print (needed on screen
+ * for iframe sizing). Chart.js canvas scaling is handled by JS beforeprint
+ * handler in BODY_SCRIPTS — it directly mutates inline styles that CSS
+ * cannot reliably override in Chrome's print engine.
  */
 @media print {
   @page { margin: 12mm; }
   html, body { overflow: visible !important; height: auto !important;
     background: #fff !important; }
   body { padding: 4px !important; }
-  /* Nuclear option: NOTHING gets to be wider than the page. This
-     catches deeply nested containers, Chart.js wrappers, inline-styled
-     divs, and anything else that was laid out at screen width.
-     Aggressive for screen CSS, but exactly right for print. */
-  * { max-width: 100% !important; box-sizing: border-box !important;
-    -webkit-print-color-adjust: exact; print-color-adjust: exact; }
-  canvas, svg, img { height: auto !important; }
   #iv-dl-wrap { display: none !important; }
+  * { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
 }
 """
 
