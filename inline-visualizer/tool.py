@@ -497,12 +497,63 @@ function openLink(url) {
 // --- Download visualization as self-contained HTML ---
 var _ivLang = 'en';
 var _ivStr = {
-  en: 'Download as HTML', de: 'Als HTML herunterladen',
-  hu: 'Letöltés HTML-ként', cs: 'Stáhnout jako HTML', hr: 'Preuzmi kao HTML',
-  fr: 'Télécharger en HTML', es: 'Descargar como HTML', it: 'Scarica come HTML',
-  pt: 'Baixar como HTML', nl: 'Downloaden als HTML', pl: 'Pobierz jako HTML',
-  ja: 'HTMLでダウンロード', ko: 'HTML로 다운로드', zh: '下载为HTML',
-  ru: 'Скачать как HTML', tr: 'HTML olarak indir', ar: 'تحميل كـ HTML'
+  // Required languages
+  en: 'Download as HTML',
+  de: 'Als HTML herunterladen',
+  cs: 'Stáhnout jako HTML',
+  hu: 'Letöltés HTML-ként',
+  hr: 'Preuzmi kao HTML',
+  pl: 'Pobierz jako HTML',
+  fr: 'Télécharger en HTML',
+  nl: 'Downloaden als HTML',
+  // Western & Southern European
+  es: 'Descargar como HTML',
+  pt: 'Baixar como HTML',
+  it: 'Scarica come HTML',
+  ca: 'Baixa com a HTML',
+  gl: 'Descargar como HTML',
+  eu: 'Deskargatu HTML gisa',
+  // Northern European
+  da: 'Download som HTML',
+  sv: 'Ladda ner som HTML',
+  no: 'Last ned som HTML',
+  fi: 'Lataa HTML-tiedostona',
+  is: 'Hlaða niður sem HTML',
+  // Eastern European & Slavic
+  sk: 'Stiahnuť ako HTML',
+  sl: 'Prenesi kot HTML',
+  sr: 'Преузми као HTML',
+  bs: 'Preuzmi kao HTML',
+  bg: 'Изтегли като HTML',
+  mk: 'Преземи како HTML',
+  uk: 'Завантажити як HTML',
+  ru: 'Скачать как HTML',
+  be: 'Спампаваць як HTML',
+  // Baltic
+  lt: 'Atsisiųsti kaip HTML',
+  lv: 'Lejupielādēt kā HTML',
+  et: 'Laadi alla HTML-ina',
+  // Other European
+  ro: 'Descarcă ca HTML',
+  el: 'Λήψη ως HTML',
+  sq: 'Shkarko si HTML',
+  // Middle Eastern
+  tr: 'HTML olarak indir',
+  ar: 'تحميل كـ HTML',
+  fa: 'دانلود به‌صورت HTML',
+  he: 'הורד כ-HTML',
+  // East & South Asian
+  zh: '下载为HTML',
+  ja: 'HTMLでダウンロード',
+  ko: 'HTML로 다운로드',
+  vi: 'Tải xuống dạng HTML',
+  th: 'ดาวน์โหลดเป็น HTML',
+  id: 'Unduh sebagai HTML',
+  ms: 'Muat turun sebagai HTML',
+  hi: 'HTML के रूप में डाउनलोड करें',
+  bn: 'HTML হিসেবে ডাউনলোড করুন',
+  // African
+  sw: 'Pakua kama HTML'
 };
 (function() {
   function detectLang() {
