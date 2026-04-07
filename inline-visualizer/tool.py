@@ -240,17 +240,23 @@ code {
 #iv-dl-btn svg{width:14px;height:14px;stroke:var(--color-text-secondary);fill:none;
   stroke-width:1.5;stroke-linecap:round;stroke-linejoin:round}
 /* --- Print styles ---
- * The only thing preventing visualizations from printing correctly is
- * overflow:hidden on html/body (needed on screen to prevent iframe
- * scroll). Remove it and let the browser's print engine handle layout.
- * Don't force widths or scale — the browser reflows responsive content
- * (grids, flexbox, %) to the page width automatically.
+ * Two problems to solve for print:
+ * 1. overflow:hidden on html/body clips content (needed on screen for iframe sizing)
+ * 2. Chart.js canvases and other elements are rendered at screen width and
+ *    don't shrink for narrower paper (e.g. A4 portrait ~760px vs 1400px screen)
+ * Fix: remove overflow clipping + force max-width:100% so canvases/SVGs/containers
+ * scale down to fit the page. Responsive grids/flexbox reflow automatically.
  */
 @media print {
   @page { margin: 12mm; }
   html, body { overflow: visible !important; height: auto !important;
     background: #fff !important; }
-  body { padding: 4px !important; }
+  body { padding: 4px !important; max-width: 100% !important; }
+  /* Constrain everything to page width — canvas rasters scale down,
+     grids and flexbox reflow, fixed-width elements shrink to fit */
+  body > *, canvas, svg, img, table, pre, div {
+    max-width: 100% !important; box-sizing: border-box !important; }
+  canvas, svg, img { height: auto !important; }
   #iv-dl-wrap { display: none !important; }
   *, *::before, *::after { -webkit-print-color-adjust: exact;
     print-color-adjust: exact; box-shadow: none !important; }
