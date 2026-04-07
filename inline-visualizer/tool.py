@@ -415,8 +415,10 @@ window.addEventListener('load', function() {
   }
 
   // SVG axis-label overlap — stagger only labels in a tight horizontal band
-  // (skips complex diagrams where text is scattered across the full canvas)
+  // (skips complex diagrams where text is scattered across the full canvas).
+  // Opt-out: add data-no-stagger to any <svg> to disable for that element.
   document.querySelectorAll('svg').forEach(function(svg) {
+    if (svg.hasAttribute('data-no-stagger')) return;
     var texts = Array.from(svg.querySelectorAll('text'));
     if (texts.length < 4) return;
     // Collect bounding info for all visible texts
@@ -689,7 +691,12 @@ function _ivDownload() {
 """
 
 # ---------------------------------------------------------------------------
-# STRICT-mode script — strips query params from all navigation and links
+# STRICT-mode script — query-parameter hygiene for link navigation.
+# Strips search params from openLink(), window.open(), and <a href>.
+# This is supplementary hygiene, NOT a hard exfiltration control —
+# data can still appear in URL paths/fragments, and location.assign/
+# replace are not intercepted. The primary exfil blocker is the CSP
+# connect-src directive.
 # ---------------------------------------------------------------------------
 
 STRICT_SECURITY_SCRIPT = """
@@ -740,15 +747,29 @@ DOWNLOAD_BUTTON = (
 )
 
 
-_WRAPPER_TAG_RE = re.compile(
-    r'<!DOCTYPE[^>]*>|</?html[^>]*>|</?head[^>]*>|</?body[^>]*>|<meta[^>]*/?>',
+# Only match wrapper tags at document boundaries — not globally — so that
+# legitimate occurrences inside JS strings or template literals survive.
+# Leading pattern: optional whitespace then any mix of DOCTYPE/html/head/
+# body-open/meta tags (models hallucinate full document wrappers).
+# Trailing pattern: </body> and </html> close tags at the end.
+_LEADING_WRAPPER_RE = re.compile(
+    r'^(\s*(?:<!DOCTYPE[^>]*>|</?html[^>]*>|</?head[^>]*>|<body[^>]*>|<meta[^>]*/?>)\s*)+',
+    re.IGNORECASE,
+)
+_TRAILING_WRAPPER_RE = re.compile(
+    r'(\s*(?:</body\s*>|</html\s*>)\s*)+$',
     re.IGNORECASE,
 )
 
 
 def _sanitize_content(content: str) -> str:
-    """Strip document wrapper tags that models sometimes include."""
-    content = _WRAPPER_TAG_RE.sub('', content)
+    """Strip document wrapper tags that models sometimes include.
+
+    Only removes tags at the start and end of the content so that identical
+    tokens appearing inside script strings or template literals are preserved.
+    """
+    content = _LEADING_WRAPPER_RE.sub('', content)
+    content = _TRAILING_WRAPPER_RE.sub('', content)
     # Collapse runs of 3+ blank lines into a single blank line
     content = re.sub(r'\n{3,}', '\n\n', content)
     return content.strip()
@@ -830,31 +851,47 @@ def _build_html(content: str, security_level: str = "strict",
 
 # Developer reference for security levels:
 #
-#   STRICT   — Blocks all outbound requests, form submissions, external images,
-#              embedded objects, and base-URI hijacking. Injects a script that
-#              strips URL query parameters from all navigation. Recommended default.
+#   STRICT   — Containment-oriented default. Blocks outbound fetch/XHR
+#              (connect-src 'none'), form submissions, external images,
+#              embedded objects, and base-URI hijacking. Injects a script
+#              that strips URL query parameters from link navigation as
+#              additional hygiene (query-only; does not cover path or
+#              fragment, and does not intercept location.assign/replace).
+#              Script execution within the visualization is intentionally
+#              allowed ('unsafe-inline' + CDN allowlist) — this is
+#              required for Chart.js, D3, and interactive visualizations.
 #
 #   BALANCED — Same as STRICT but allows external image loading (img-src *).
-#              No URL parameter stripping.
+#              No URL parameter stripping. Note: img-src * permits
+#              tracking pixels — this is an accepted privacy tradeoff
+#              for visualizations that need external images.
 #
-#   NONE     — No CSP applied. Visualization can make arbitrary network requests.
+#   NONE     — No CSP applied. Visualization can make arbitrary network
+#              requests. Use only for visualizations that fetch live API
+#              data (CORS restrictions still apply).
 #
-# None of these levels can prevent parent document access when iframe
-# Same-Origin is enabled — that is controlled at the platform level.
+# Limitations that apply to ALL levels:
+# - Script execution is always permitted (required for core features).
+# - When iframe Same-Origin is enabled at the platform level, JS inside
+#   the visualization can access the parent Open WebUI page. No CSP
+#   level can prevent this — it is controlled by the platform setting.
 
 
 class Tools:
     """Inline Visualizer — renders interactive HTML/SVG in chat.
 
     Security is controlled via the ``security_level`` valve, which applies
-    a Content Security Policy to the rendered iframe. Defaults to STRICT,
-    blocking all silent data exfiltration vectors.
+    a Content Security Policy to the rendered iframe.  Defaults to STRICT,
+    which blocks outbound network requests (fetch/XHR) and form submissions.
+    Script execution is always permitted — it is required for interactive
+    visualizations, Chart.js, and D3.  See the developer reference above
+    for the full security model and its limitations.
     """
 
     class Valves(BaseModel):
         security_level: Literal["strict", "balanced", "none"] = Field(
             default="strict",
-            description="Strict (default): blocks outbound requests, images, and forms. Balanced: allows external images. None: no restrictions.",
+            description="Strict (default): blocks outbound fetch/XHR, images, and forms; scripts always allowed. Balanced: also allows external images. None: no restrictions.",
         )
 
     def __init__(self):
