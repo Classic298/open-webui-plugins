@@ -532,6 +532,42 @@ function openLink(url) {
   catch(e) { window.open(url, '_blank'); }
 }
 
+// --- Print scaling ---
+// Visualizations are designed for screen widths that often exceed paper.
+// On beforeprint, measure actual content width vs available page width
+// and apply a CSS transform to shrink-to-fit. This avoids the user
+// having to manually set the browser's print zoom to 20-30% (which
+// makes text unreadable). On afterprint, restore original layout.
+(function() {
+  var _printScaled = false;
+  var _origStyles = '';
+  window.addEventListener('beforeprint', function() {
+    // Temporarily unlock overflow to get the true content width
+    var b = document.body;
+    var savedOverflow = b.style.overflow;
+    b.style.overflow = 'visible';
+    var contentW = Math.max(b.scrollWidth, b.offsetWidth);
+    b.style.overflow = savedOverflow;
+    // A4 landscape at 96 dpi minus 10mm margins each side = ~1015px.
+    // Use a conservative page width that works for most paper sizes.
+    var pageW = 1015;
+    if (contentW > pageW + 20) {
+      var scale = pageW / contentW;
+      _origStyles = b.style.cssText;
+      b.style.transform = 'scale(' + scale + ')';
+      b.style.transformOrigin = 'top left';
+      b.style.width = (100 / scale) + '%';
+      _printScaled = true;
+    }
+  });
+  window.addEventListener('afterprint', function() {
+    if (_printScaled) {
+      document.body.style.cssText = _origStyles;
+      _printScaled = false;
+    }
+  });
+})();
+
 // --- Download visualization as self-contained HTML ---
 var _ivLang = 'en';
 var _ivStr = {
