@@ -579,22 +579,63 @@ var _ivStr = {
   if (btn) btn.title = _ivStr[_ivLang] || _ivStr.en;
 })();
 
+// Download strategy — why blob <a download> and not window.open / new tab:
+//
+// We always use Blob + <a download> because it is the only approach that
+// works reliably across all platforms:
+//
+//   Desktop / Android:
+//     Blob <a download> triggers the browser's native "Save As" dialog.
+//     target="_blank" is added as a safety net: if the iframe sandbox lacks
+//     the allow-downloads permission, the click gracefully opens the HTML
+//     in a new tab instead of navigating the iframe itself. The user can
+//     then save from the new tab. This is a non-destructive fallback.
+//
+//   iOS (Safari AND PWA / standalone):
+//     Blob <a download> triggers the iOS share sheet / download manager.
+//     target="_blank" MUST NOT be set on iOS:
+//       - In PWA / standalone mode, opening a new tab navigates the entire
+//         PWA away from the chat with NO back button — the user is stuck
+//         on the blob page and has to re-launch the app.
+//       - In Safari, it would open a new tab showing raw HTML instead of
+//         triggering the download sheet.
+//     Since iOS WebKit (which both Safari and PWA use under the hood)
+//     handles blob <a download> natively, the plain click is sufficient.
+//
+// iOS detection uses the standard UA + touch-point heuristic to catch
+// both iPhone/iPad (including iPadOS which reports as "MacIntel").
+
+var _ivIsIOS = /iPad|iPhone|iPod/.test(navigator.userAgent)
+  || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+
 function _ivDownload() {
+  // Temporarily remove the download button so it doesn't appear in the
+  // serialized HTML — the saved file should be a clean visualization.
   var w = document.getElementById('iv-dl-wrap');
   if (w) w.remove();
   var html = '<!DOCTYPE html>\n' + document.documentElement.outerHTML;
   if (w) document.body.appendChild(w);
+
   var fname = (document.title || 'visualization').replace(/[<>:"\\/|?*]+/g, '-').replace(/\s+/g, ' ').trim();
   if (!fname) fname = 'visualization';
   fname += '.html';
+
   var blob = new Blob([html], {type: 'text/html;charset=utf-8'});
   var url = URL.createObjectURL(blob);
   var a = document.createElement('a');
-  a.href = url; a.download = fname; a.target = '_blank';
+  a.href = url;
+  a.download = fname;
+  // On non-iOS: target="_blank" is a safety net so that if the iframe
+  // sandbox blocks the download, the HTML opens in a new tab instead of
+  // replacing the visualization inside the iframe. On iOS this MUST be
+  // omitted — see comment block above.
+  if (!_ivIsIOS) a.target = '_blank';
   a.style.display = 'none';
   document.body.appendChild(a);
   a.click();
-  setTimeout(function() { a.remove(); URL.revokeObjectURL(url); }, 30000);
+  // Keep blob URL alive long enough for the download to complete,
+  // especially on slow connections or large visualizations.
+  setTimeout(function() { a.remove(); URL.revokeObjectURL(url); }, 60000);
 }
 </script>
 """
