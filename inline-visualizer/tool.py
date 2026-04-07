@@ -201,7 +201,6 @@ SVG_CLASSES = """
 
 BASE_STYLES = """
 * { box-sizing: border-box; margin: 0; font-family: var(--font-sans); }
-html, body { overflow: hidden; }
 body { background: transparent; color: var(--color-text-primary); line-height: 1.5; padding: 8px; }
 svg { overflow: visible; }
 svg text { fill: var(--color-text-primary); }
@@ -264,6 +263,17 @@ code {
 # Also sets up a MutationObserver to react to live theme switches.
 THEME_DETECTION_SCRIPT = """
 <script>
+// overflow:hidden prevents scrollbars inside the iframe (height reporting
+// auto-sizes the iframe to fit). But when the HTML is opened standalone
+// in a browser, there's no parent iframe — content gets clipped instead.
+// Detect: if we're in an iframe, hide overflow. Otherwise allow scrolling.
+if (window !== window.parent) {
+  document.documentElement.style.overflow = 'hidden';
+  document.addEventListener('DOMContentLoaded', function() {
+    document.body.style.overflow = 'hidden';
+  });
+}
+
 (function() {
   function detectTheme(root) {
     return root.classList.contains('dark')
