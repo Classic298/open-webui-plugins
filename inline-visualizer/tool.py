@@ -495,6 +495,34 @@ function openLink(url) {
 }
 
 // --- Download visualization as self-contained HTML ---
+var _ivLang = 'en';
+var _ivStr = {
+  en: 'Download as HTML', de: 'Als HTML herunterladen',
+  hu: 'Letöltés HTML-ként', cs: 'Stáhnout jako HTML', hr: 'Preuzmi kao HTML',
+  fr: 'Télécharger en HTML', es: 'Descargar como HTML', it: 'Scarica come HTML',
+  pt: 'Baixar como HTML', nl: 'Downloaden als HTML', pl: 'Pobierz jako HTML',
+  ja: 'HTMLでダウンロード', ko: 'HTML로 다운로드', zh: '下载为HTML',
+  ru: 'Скачать как HTML', tr: 'HTML olarak indir', ar: 'تحميل كـ HTML'
+};
+(function() {
+  function detectLang() {
+    try {
+      var s = parent.localStorage.getItem('locale')
+           || parent.localStorage.getItem('language')
+           || parent.localStorage.getItem('i18nextLng');
+      if (s) { var l = s.split('-')[0].toLowerCase(); if (_ivStr[l]) return l; }
+    } catch(e) {}
+    try {
+      var bl = (navigator.language || navigator.userLanguage || 'en').split('-')[0].toLowerCase();
+      if (_ivStr[bl]) return bl;
+    } catch(e) {}
+    return 'en';
+  }
+  _ivLang = detectLang();
+  var btn = document.getElementById('iv-dl-btn');
+  if (btn) btn.title = _ivStr[_ivLang] || _ivStr.en;
+})();
+
 function _ivDownload() {
   var w = document.getElementById('iv-dl-wrap');
   if (w) w.remove();
