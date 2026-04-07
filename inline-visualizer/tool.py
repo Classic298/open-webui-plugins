@@ -533,37 +533,46 @@ function openLink(url) {
 }
 
 // --- Print scaling ---
-// Visualizations are designed for screen widths that often exceed paper.
-// On beforeprint, measure actual content width vs available page width
-// and apply a CSS transform to shrink-to-fit. This avoids the user
-// having to manually set the browser's print zoom to 20-30% (which
-// makes text unreadable). On afterprint, restore original layout.
+// Visualizations use responsive CSS (grids, %, flexbox) that will
+// naturally reflow to the print page width. The problem is elements
+// with fixed pixel widths (Chart.js canvases, wide SVGs) that
+// exceed the page. Strategy:
+//   1. Temporarily constrain body to the print page width
+//   2. Let responsive content reflow naturally
+//   3. Check if anything STILL overflows (fixed-width elements)
+//   4. Only then apply transform:scale to shrink-to-fit
+// This avoids the naive approach of scaling based on viewport width
+// (which makes everything tiny on wide monitors).
 (function() {
-  var _printScaled = false;
   var _origStyles = '';
+  var _scaled = false;
   window.addEventListener('beforeprint', function() {
-    // Temporarily unlock overflow to get the true content width
     var b = document.body;
-    var savedOverflow = b.style.overflow;
-    b.style.overflow = 'visible';
-    var contentW = Math.max(b.scrollWidth, b.offsetWidth);
-    b.style.overflow = savedOverflow;
-    // A4 landscape at 96 dpi minus 10mm margins each side = ~1015px.
-    // Use a conservative page width that works for most paper sizes.
+    _origStyles = b.style.cssText;
+    // A4 landscape at 96 dpi minus 10mm margins = ~1015px
     var pageW = 1015;
-    if (contentW > pageW + 20) {
-      var scale = pageW / contentW;
-      _origStyles = b.style.cssText;
+    // Step 1: constrain to page width and let content reflow
+    b.style.width = pageW + 'px';
+    b.style.maxWidth = pageW + 'px';
+    b.style.overflow = 'visible';
+    b.style.padding = '0';
+    // Step 2: force reflow, then measure if anything overflows
+    void b.offsetWidth;
+    var overflow = b.scrollWidth - pageW;
+    if (overflow > 10) {
+      // Something has a fixed width wider than the page — scale down
+      var scale = pageW / b.scrollWidth;
+      b.style.width = b.scrollWidth + 'px';
+      b.style.maxWidth = 'none';
       b.style.transform = 'scale(' + scale + ')';
       b.style.transformOrigin = 'top left';
-      b.style.width = (100 / scale) + '%';
-      _printScaled = true;
     }
+    _scaled = true;
   });
   window.addEventListener('afterprint', function() {
-    if (_printScaled) {
+    if (_scaled) {
       document.body.style.cssText = _origStyles;
-      _printScaled = false;
+      _scaled = false;
     }
   });
 })();
