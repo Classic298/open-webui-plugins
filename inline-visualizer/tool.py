@@ -506,12 +506,17 @@ var _ivStr = {
 };
 (function() {
   function detectLang() {
+    // 1. Pre-detected via __event_call__ (baked into HTML by the tool)
+    var pre = document.documentElement.getAttribute('data-iv-lang');
+    if (pre && _ivStr[pre]) return pre;
+    // 2. Fallback: parent localStorage (needs same-origin)
     try {
       var s = parent.localStorage.getItem('locale')
            || parent.localStorage.getItem('language')
            || parent.localStorage.getItem('i18nextLng');
       if (s) { var l = s.split('-')[0].toLowerCase(); if (_ivStr[l]) return l; }
     } catch(e) {}
+    // 3. Fallback: browser language (standalone HTML / no same-origin)
     try {
       var bl = (navigator.language || navigator.userLanguage || 'en').split('-')[0].toLowerCase();
       if (_ivStr[bl]) return bl;
@@ -658,15 +663,18 @@ def _build_csp_tag(level: str) -> str:
     )
 
 
-def _build_html(content: str, security_level: str = "strict", title: str = "Visualization") -> str:
+def _build_html(content: str, security_level: str = "strict",
+                title: str = "Visualization", lang: str = "en") -> str:
     """Wrap a user-provided HTML/SVG fragment in the full Rich UI shell."""
     content = _sanitize_content(content)
     csp_tag = _build_csp_tag(security_level)
     strict_script = STRICT_SECURITY_SCRIPT if security_level == "strict" else ""
     safe_title = (title.replace('&', '&amp;').replace('<', '&lt;')
                        .replace('>', '&gt;').replace('"', '&quot;'))
+    # Sanitize lang to a simple lowercase token (防止 injection)
+    safe_lang = re.sub(r'[^a-z]', '', lang[:5]) or "en"
     return (
-        "<!DOCTYPE html><html><head>"
+        f'<!DOCTYPE html><html data-iv-lang="{safe_lang}"><head>'
         f"<title>{safe_title}</title>"
         f"{csp_tag}"
         f"<style>{THEME_CSS}\n{SVG_CLASSES}\n{BASE_STYLES}</style>"
@@ -711,10 +719,11 @@ class Tools:
     def __init__(self):
         self.valves = self.Valves()
 
-    def render_visualization(
+    async def render_visualization(
         self,
         html_code: str,
         title: str = "Visualization",
+        __event_call__=None,
     ) -> tuple:
         """
         Render an interactive HTML or SVG visualization inline in the chat.
@@ -745,8 +754,39 @@ class Tools:
         :param title: Short descriptive title for the visualization.
         :return: Interactive rich embed rendered in the chat, with LLM context.
         """
+        # Detect UI language via parent page JS (same pattern as PDF/Gamma actions)
+        lang = "en"
+        if __event_call__:
+            try:
+                lang_result = await __event_call__({
+                    "type": "execute",
+                    "data": {
+                        "code": """
+return (() => {
+  try {
+    const stored = localStorage.getItem('locale')
+                || localStorage.getItem('language')
+                || localStorage.getItem('i18nextLng');
+    if (stored) {
+      const l = stored.split('-')[0].toLowerCase();
+      if (l) return l;
+    }
+  } catch (e) {}
+  try {
+    return (navigator.language || navigator.userLanguage || 'en').split('-')[0].toLowerCase();
+  } catch (e) {}
+  return 'en';
+})();
+"""
+                    },
+                })
+                if isinstance(lang_result, str) and lang_result.strip():
+                    lang = lang_result.strip()
+            except Exception:
+                pass
+
         response = HTMLResponse(
-            content=_build_html(html_code, self.valves.security_level, title),
+            content=_build_html(html_code, self.valves.security_level, title, lang),
             headers={"Content-Disposition": "inline"},
         )
         result_context = (
