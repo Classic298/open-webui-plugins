@@ -579,31 +579,40 @@ var _ivStr = {
   if (btn) btn.title = _ivStr[_ivLang] || _ivStr.en;
 })();
 
-// Download strategy — why blob <a download> and not window.open / new tab:
+// ---------------------------------------------------------------------------
+// Download as self-contained HTML
+// ---------------------------------------------------------------------------
 //
-// We always use Blob + <a download> because it is the only approach that
-// works reliably across all platforms:
+// Strategy — why blob <a download>, and why iOS needs special handling:
 //
 //   Desktop / Android:
-//     Blob <a download> triggers the browser's native "Save As" dialog.
+//     Blob + <a download> triggers the browser's native "Save As" dialog.
 //     target="_blank" is added as a safety net: if the iframe sandbox lacks
 //     the allow-downloads permission, the click gracefully opens the HTML
-//     in a new tab instead of navigating the iframe itself. The user can
-//     then save from the new tab. This is a non-destructive fallback.
+//     in a new tab instead of navigating (and destroying) the iframe. The
+//     user can then save from the new tab. Non-destructive fallback.
 //
 //   iOS (Safari AND PWA / standalone):
-//     Blob <a download> triggers the iOS share sheet / download manager.
-//     target="_blank" MUST NOT be set on iOS:
-//       - In PWA / standalone mode, opening a new tab navigates the entire
-//         PWA away from the chat with NO back button — the user is stuck
-//         on the blob page and has to re-launch the app.
-//       - In Safari, it would open a new tab showing raw HTML instead of
+//     Blob + <a download> triggers the iOS share sheet / download manager.
+//     This is the ONLY approach that works reliably on iOS:
+//       - target="_blank" MUST NOT be set. In PWA / standalone mode it
+//         navigates the entire app away from the chat with NO back button —
+//         the user is stuck on the blob page and must re-launch the app.
+//         In Safari it opens a new tab showing raw HTML source instead of
 //         triggering the download sheet.
-//     Since iOS WebKit (which both Safari and PWA use under the hood)
-//     handles blob <a download> natively, the plain click is sufficient.
+//       - The blob click is deferred via setTimeout(0) so the calling
+//         function returns cleanly before WebKit processes the navigation.
+//         Without this, iOS WebKit can throw a synchronous "Load failed"
+//         TypeError that propagates as an error toast in Open WebUI.
+//       - window.onerror and unhandledrejection listeners suppress the
+//         "Load failed" error for 60 s, then restore the original handlers.
+//         This is the same pattern used by the PDF export and Gamma
+//         presentation actions, which discovered these iOS quirks through
+//         extensive production testing.
 //
-// iOS detection uses the standard UA + touch-point heuristic to catch
-// both iPhone/iPad (including iPadOS which reports as "MacIntel").
+// iOS detection: UA string catches iPhone/iPod; the MacIntel +
+// maxTouchPoints > 1 heuristic catches iPadOS (reports as desktop Mac).
+// ---------------------------------------------------------------------------
 
 var _ivIsIOS = /iPad|iPhone|iPod/.test(navigator.userAgent)
   || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
@@ -622,20 +631,56 @@ function _ivDownload() {
 
   var blob = new Blob([html], {type: 'text/html;charset=utf-8'});
   var url = URL.createObjectURL(blob);
-  var a = document.createElement('a');
-  a.href = url;
-  a.download = fname;
-  // On non-iOS: target="_blank" is a safety net so that if the iframe
-  // sandbox blocks the download, the HTML opens in a new tab instead of
-  // replacing the visualization inside the iframe. On iOS this MUST be
-  // omitted — see comment block above.
-  if (!_ivIsIOS) a.target = '_blank';
-  a.style.display = 'none';
-  document.body.appendChild(a);
-  a.click();
-  // Keep blob URL alive long enough for the download to complete,
-  // especially on slow connections or large visualizations.
-  setTimeout(function() { a.remove(); URL.revokeObjectURL(url); }, 60000);
+
+  if (_ivIsIOS) {
+    // iOS path — deferred blob download with "Load failed" error
+    // suppression. Mirrors the battle-tested approach from the PDF
+    // export and Gamma presentation actions.
+    setTimeout(function() {
+      // Suppress iOS WebKit "Load failed" TypeError that fires on
+      // blob <a> clicks. Without this, Open WebUI shows an error toast.
+      var _origOnerror = window.onerror;
+      window.onerror = function(msg) {
+        if (typeof msg === 'string' && msg.indexOf('Load failed') !== -1) return true;
+        if (_origOnerror) return _origOnerror.apply(this, arguments);
+      };
+      var _sup = function(ev) {
+        var m = ev && (ev.message || (ev.reason && ev.reason.message) || '');
+        if (m.indexOf('Load failed') !== -1) { ev.preventDefault(); ev.stopImmediatePropagation(); return true; }
+      };
+      window.addEventListener('error', _sup, true);
+      window.addEventListener('unhandledrejection', _sup, true);
+
+      var a = document.createElement('a');
+      a.style.display = 'none';
+      a.href = url;
+      a.download = fname;
+      // No target="_blank" — see comment block above.
+      document.body.appendChild(a);
+      a.click();
+
+      // Restore original error handlers and clean up after 60 s.
+      setTimeout(function() {
+        window.onerror = _origOnerror;
+        window.removeEventListener('error', _sup, true);
+        window.removeEventListener('unhandledrejection', _sup, true);
+        URL.revokeObjectURL(url);
+        a.remove();
+      }, 60000);
+    }, 0);
+  } else {
+    // Desktop / Android path — straightforward blob download.
+    var a = document.createElement('a');
+    a.href = url;
+    a.download = fname;
+    // Safety net: if the iframe sandbox blocks the download,
+    // open in a new tab rather than navigating the iframe.
+    a.target = '_blank';
+    a.style.display = 'none';
+    document.body.appendChild(a);
+    a.click();
+    setTimeout(function() { a.remove(); URL.revokeObjectURL(url); }, 60000);
+  }
 }
 </script>
 """
