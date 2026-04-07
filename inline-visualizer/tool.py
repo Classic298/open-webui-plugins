@@ -251,15 +251,15 @@ code {
   @page { margin: 12mm; }
   html, body { overflow: visible !important; height: auto !important;
     background: #fff !important; }
-  body { padding: 4px !important; max-width: 100% !important; }
-  /* Constrain everything to page width — canvas rasters scale down,
-     grids and flexbox reflow, fixed-width elements shrink to fit */
-  body > *, canvas, svg, img, table, pre, div {
-    max-width: 100% !important; box-sizing: border-box !important; }
+  body { padding: 4px !important; }
+  /* Nuclear option: NOTHING gets to be wider than the page. This
+     catches deeply nested containers, Chart.js wrappers, inline-styled
+     divs, and anything else that was laid out at screen width.
+     Aggressive for screen CSS, but exactly right for print. */
+  * { max-width: 100% !important; box-sizing: border-box !important;
+    -webkit-print-color-adjust: exact; print-color-adjust: exact; }
   canvas, svg, img { height: auto !important; }
   #iv-dl-wrap { display: none !important; }
-  *, *::before, *::after { -webkit-print-color-adjust: exact;
-    print-color-adjust: exact; box-shadow: none !important; }
 }
 """
 
