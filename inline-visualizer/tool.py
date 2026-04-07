@@ -627,6 +627,9 @@ function _ivDownload() {
 
   var fname = (document.title || 'visualization').replace(/[<>:"\\/|?*]+/g, '-').replace(/\s+/g, ' ').trim();
   if (!fname) fname = 'visualization';
+  // Cap at 200 chars to stay within Windows 255-char filename limit
+  // (leaves room for the .html extension and filesystem overhead).
+  if (fname.length > 200) fname = fname.substring(0, 200).trim();
   fname += '.html';
 
   var blob = new Blob([html], {type: 'text/html;charset=utf-8'});
@@ -808,8 +811,9 @@ def _build_html(content: str, security_level: str = "strict",
     strict_script = STRICT_SECURITY_SCRIPT if security_level == "strict" else ""
     safe_title = (title.replace('&', '&amp;').replace('<', '&lt;')
                        .replace('>', '&gt;').replace('"', '&quot;'))
-    # Sanitize lang to a simple lowercase token (防止 injection)
-    safe_lang = re.sub(r'[^a-z]', '', lang[:5]) or "en"
+    # Sanitize lang to a simple lowercase BCP-47 primary subtag.
+    # Split on '-' first so "zh-CN" → "zh", not "zhcn".
+    safe_lang = re.sub(r'[^a-z]', '', lang.split('-')[0].lower()[:5]) or "en"
     return (
         f'<!DOCTYPE html><html data-iv-lang="{safe_lang}"><head>'
         f"<title>{safe_title}</title>"
