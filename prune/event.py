@@ -3,7 +3,7 @@ title: Prune
 author: classic298
 author_url: https://github.com/Classic298
 funding_url: https://github.com/Classic298/prune-open-webui
-version: 0.10.0
+version: 0.10.1
 required_open_webui_version: 0.10.2
 description: Automatic, throttled database and storage cleanup. Configure retention via Valves (0 = disabled); pruning runs event-driven on one worker only, slowly, so a live instance stays responsive.
 """
@@ -419,11 +419,17 @@ def collect_file_ids_from_text(text_val, out: Set[str], valid_ids: Set[str], odd
     """Collect referenced file ids from a JSON column's raw text."""
     if not text_val:
         return
+    if isinstance(text_val, (bytes, bytearray)):
+        text_val = text_val.decode("utf-8", "ignore")  # some drivers CAST json to bytes
+    elif not isinstance(text_val, str):
+        text_val = str(text_val)
     out.update(valid_ids.intersection(UUID_ANYWHERE_PATTERN.findall(text_val)))
-    # Non-UUID file ids (never produced by Open WebUI itself) still match
-    for fid in odd_ids:
-        if fid in text_val:
-            out.add(fid)
+    # A non-UUID id with special chars stores escaped in json, raw in jsonb; match
+    # both forms. Over-matching only ever preserves a file.
+    for odd_id in odd_ids:
+        json_escaped_id = json.dumps(odd_id)[1:-1]
+        if odd_id in text_val or json_escaped_id in text_val:
+            out.add(odd_id)
 
 
 # Open WebUI stores one metadata embedding per knowledge base (its name +
@@ -1611,6 +1617,11 @@ class MilvusDatabaseCleaner(VectorDatabaseCleaner):
         return expected_collections
 
 
+# Milvus delete filters are interpolated strings with no parameter binding; only
+# ids matching Open WebUI's own resource_id charset may reach one. Mirrors core.
+_MILVUS_RESOURCE_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,255}$")
+
+
 class MilvusMultitenancyDatabaseCleaner(VectorDatabaseCleaner):
     """
     Milvus multitenancy database cleanup implementation.
@@ -1653,6 +1664,11 @@ class MilvusMultitenancyDatabaseCleaner(VectorDatabaseCleaner):
         )
         log.debug(f"Shared collections: {self.shared_collections}")
 
+    def _skip_shared_collection(self, collection_name, active_user_ids) -> bool:
+        # Memory tenants can't be classified orphaned without the active-user set,
+        # so protect them all when it is unknown rather than wiping every memory.
+        return active_user_ids is None and collection_name.endswith("_memories")
+
     def count_orphaned_collections(
         self,
         active_file_ids: Set[str],
@@ -1674,6 +1690,8 @@ class MilvusMultitenancyDatabaseCleaner(VectorDatabaseCleaner):
 
             # Import pymilvus utilities
             for shared_collection_name in self.shared_collections:
+                if self._skip_shared_collection(shared_collection_name, active_user_ids):
+                    continue
                 if not utility.has_collection(shared_collection_name):
                     continue
 
@@ -1744,6 +1762,8 @@ class MilvusMultitenancyDatabaseCleaner(VectorDatabaseCleaner):
             )
 
             for shared_collection_name in self.shared_collections:
+                if self._skip_shared_collection(shared_collection_name, active_user_ids):
+                    continue
                 if not utility.has_collection(shared_collection_name):
                     continue
 
@@ -1799,6 +1819,8 @@ class MilvusMultitenancyDatabaseCleaner(VectorDatabaseCleaner):
 
             # Import pymilvus utilities
             for shared_collection_name in self.shared_collections:
+                if self._skip_shared_collection(shared_collection_name, active_user_ids):
+                    continue
                 if not utility.has_collection(shared_collection_name):
                     continue
 
@@ -1850,6 +1872,11 @@ class MilvusMultitenancyDatabaseCleaner(VectorDatabaseCleaner):
 
                     # Delete each orphaned resource_id
                     for resource_id in orphaned_ids:
+                        if not _MILVUS_RESOURCE_ID_RE.match(str(resource_id)):
+                            log.warning(
+                                f"Skipping unsafe resource_id in {shared_collection_name}: {resource_id!r}"
+                            )
+                            continue
                         try:
                             # Delete by resource_id filter expression
                             expr = f"resource_id == '{resource_id}'"
@@ -1898,6 +1925,10 @@ class MilvusMultitenancyDatabaseCleaner(VectorDatabaseCleaner):
             # Use the reference implementation's _get_collection_and_resource_id logic
             # to determine which shared collection contains this resource_id
             resource_id = collection_name
+
+            if not _MILVUS_RESOURCE_ID_RE.match(str(resource_id)):
+                log.warning(f"Refusing unsafe Milvus resource_id: {resource_id!r}")
+                return False
 
             # Determine which shared collection based on naming pattern
             if collection_name.startswith("user-memory-"):
@@ -3137,7 +3168,8 @@ async def count_old_knowledge_bases(
     age_field selects the timestamp: 'created_at' (default) or 'updated_at'.
     This is a retention policy: it targets live, owned, in-use KBs, not orphans.
     """
-    if days is None:
+    # days<=0 would set the cutoff to now and match every KB; never retention-all
+    if not days or days <= 0:
         return 0
 
     cutoff_time = int(time.time()) - (days * 86400)
@@ -3204,7 +3236,8 @@ async def delete_old_knowledge_bases(
     KB from any model's meta.knowledge. The KB's now-unreferenced files are
     reclaimed by the normal orphan sweep that runs afterwards.
     """
-    if days is None:
+    # days<=0 would delete every KB (see count_old_knowledge_bases)
+    if not days or days <= 0:
         return 0
 
     cutoff_time = int(time.time()) - (days * 86400)
@@ -3281,14 +3314,10 @@ async def count_orphaned_records(
 
     try:
         async with get_async_db_context() as db:
-            # Count orphaned files.
-            # A file is orphaned when it is not in the active_file_ids set OR
-            # its owner is not in active_user_ids.
-            #
-            # Stream id+user_id and check membership in Python to avoid any
-            # SQL IN() clauses — active_file_ids can be 100K+ entries and
-            # active_user_ids can exceed SQLite's ~999 parameter limit on
-            # large instances.
+            # Reference-only and grace-aware, byte-for-byte matching the execute
+            # sweep (owner ignored: a departed uploader's still-referenced file
+            # is kept). Streamed + filtered in Python to avoid SQL IN() blowing
+            # past SQLite's ~999-parameter limit on large instances.
             _prog_stage("Counting orphaned files", await _count_rows(db, File))
             orphaned_file_count = 0
             grace_cutoff = int(time.time()) - max(
@@ -4225,6 +4254,15 @@ async def get_active_file_ids(
         else:
             log.debug("Note.data attribute not present — skipping note scan")
 
+        # chat_message mirror (v0.6.41+): redundant with Chat.chat today, cheap
+        # insurance should a future version stop mirroring into Chat.chat.
+        chat_message_cols = [c for c in (getattr(ChatMessage, "files", None),
+                                         getattr(ChatMessage, "content", None)) if c is not None]
+        if chat_message_cols:
+            await scan_text_refs(
+                "Scanning chat messages", ChatMessage, ChatMessage.id, chat_message_cols
+            )
+
     except Exception:
         # Do NOT return an empty set — callers use this for deletion decisions.
         # An empty preservation set would mark ALL files as orphaned.
@@ -4243,7 +4281,9 @@ async def safe_delete_file_by_id(
     This function mirrors the cleanup logic from Open WebUI's delete_file_by_id endpoint:
     1. Cleans KB vector embeddings (filter by file_id and hash)
     2. Deletes the standalone file-{id} vector collection
-    3. Deletes the file record from DB (CASCADE handles chat_file, channel_file, knowledge_file)
+    3. Deletes the file record from DB (Postgres CASCADEs chat_file/channel_file/
+       knowledge_file; SQLite does not enforce FKs, so cleanup_dangling_junction_rows
+       sweeps those strays separately)
     4. Deletes the physical file from storage
 
     Args:
@@ -4289,14 +4329,16 @@ async def safe_delete_file_by_id(
             except Exception as e:
                 log.debug(f"Error getting knowledges for file {file_id}: {e}")
 
-            # Delete standalone file vector collection
-            collection_name = f"file-{file_id}"
-            await asyncio.to_thread(vector_cleaner.delete_collection, collection_name)
+            # Delete the row FIRST, then reclaim bytes/vectors only if it stuck
+            # (Files.delete_file_by_id swallows errors and returns False); the
+            # reverse order could strand a live row over missing content. Matches
+            # Open WebUI's own delete_file_by_id endpoint.
+            row_deleted = await Files.delete_file_by_id(file_id, db=session)
+            if not row_deleted:
+                log.warning(f"File row {file_id} not deleted; keeping its bytes and vectors")
+                return False
 
-            # Delete from DB - CASCADE handles chat_file, channel_file, knowledge_file
-            await Files.delete_file_by_id(file_id, db=session)
-
-            # Delete physical file from storage
+            await asyncio.to_thread(vector_cleaner.delete_collection, f"file-{file_id}")
             if file_record.path:
                 try:
                     await asyncio.to_thread(Storage.delete_file, file_record.path)
@@ -4308,42 +4350,6 @@ async def safe_delete_file_by_id(
     except Exception as e:
         log.error(f"Error deleting file {file_id}: {e}")
         return False
-
-
-async def delete_user_files(
-    user_id: str, vector_cleaner, db: Optional[AsyncSession] = None
-) -> int:
-    """
-    Delete all files owned by a user.
-
-    This should be called before deleting an inactive user to ensure proper cleanup
-    of file-related data (vector embeddings, physical storage, etc.).
-
-    Args:
-        user_id: The user ID whose files should be deleted
-        vector_cleaner: Vector database cleaner instance
-        db: Optional database session to reuse
-
-    Returns:
-        Number of files successfully deleted
-    """
-    deleted_count = 0
-    try:
-        files = await Files.get_files_by_user_id(user_id, db=db)
-        log.debug(f"Found {len(files)} files for user {user_id}")
-
-        for file in files:
-            if await safe_delete_file_by_id(file.id, vector_cleaner, db=db):
-                deleted_count += 1
-            await _pace()
-
-        if deleted_count > 0:
-            log.info(f"Deleted {deleted_count} files for user {user_id}")
-
-    except Exception as e:
-        log.error(f"Error deleting files for user {user_id}: {e}")
-
-    return deleted_count
 
 
 async def cleanup_orphaned_uploads(active_file_ids: Set[str]) -> int:
@@ -5119,21 +5125,27 @@ async def run_prune(form_data: PruneDataForm) -> dict:
                 # Stream ids — get_knowledge_bases() paginates (limit=30) and
                 # eager-loads file payloads, silently masking orphans past page 1
                 orphan_kb_ids = []
-                async for okb_id, okb_uid in stream_rows(
+                async for kb_id, owner_id in stream_rows(
                     db, Knowledge.id, Knowledge.user_id
                 ):
-                    # Preserved covers live owners, the off-flag and the
-                    # shared exemption; anything outside it is deletable
-                    if str(okb_id) not in active_kb_ids:
-                        orphan_kb_ids.append(str(okb_id))
+                    # active_kb_ids folds in live owners, the off-flag and the
+                    # shared exemption. The owner_id re-check mirrors the sibling
+                    # loops and the count path and closes a TOCTOU window: the
+                    # snapshot predates the (long, throttled) file sweep, so a KB
+                    # a live user creates mid-pass would otherwise be deleted.
+                    if (
+                        str(kb_id) not in active_kb_ids
+                        and str(owner_id) not in active_user_ids
+                    ):
+                        orphan_kb_ids.append(str(kb_id))
                 _prog_tick(0, len(orphan_kb_ids))
-                for okb_id in orphan_kb_ids:
+                for kb_id in orphan_kb_ids:
                     _prog_tick()
                     if await asyncio.to_thread(
-                        vector_cleaner.delete_collection, okb_id
+                        vector_cleaner.delete_collection, kb_id
                     ):
-                        await Knowledges.delete_knowledge_by_id(okb_id, db=db)
-                        deleted_kb_ids.append(okb_id)
+                        await Knowledges.delete_knowledge_by_id(kb_id, db=db)
+                        deleted_kb_ids.append(kb_id)
                         deleted_kbs += 1
                         await db.commit()
                         await _pace()
@@ -5476,7 +5488,7 @@ async def run_prune(form_data: PruneDataForm) -> dict:
 # manual admin UI + API (same deletion engine as the automatic passes)
 # ============================================================================
 
-PLUGIN_VERSION = "0.10.0"
+PLUGIN_VERSION = "0.10.1"
 MAX_RUN_LOG_LINES = 4000
 MAX_RUNS_KEPT = 20
 
