@@ -3,7 +3,7 @@ title: Prune
 author: classic298
 author_url: https://github.com/Classic298
 funding_url: https://github.com/Classic298/prune-open-webui
-version: 0.9.0
+version: 0.10.0
 required_open_webui_version: 0.10.2
 description: Automatic, throttled database and storage cleanup. Configure retention via Valves (0 = disabled); pruning runs event-driven on one worker only, slowly, so a live instance stays responsive.
 """
@@ -19,16 +19,75 @@ from pydantic import BaseModel, Field
 from fastapi import APIRouter, BackgroundTasks, Depends, Request, Response
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 
-# Global deletion throttle, set from the deletion_rows_per_second valve on every
-# event dispatch. Every deletion site awaits _pace() so a large cleanup trickles
-# instead of saturating the database writer on a live instance.
-_PACE = {"rows_per_second": 50}
+# Global throttles, set from the valves on every event dispatch. Deletion sites
+# await _pace(), row scans await _scan_pace(), so a pass trickles instead of
+# saturating the database or the event loop on a live instance. Manual runs may
+# set the run_* overrides for their duration.
+_PACE = {
+    "rows_per_second": 50,
+    "scan_rows_per_second": 0,
+    "run_rows_per_second": None,
+    "run_scan_rows_per_second": None,
+}
 
 
 async def _pace(rows: int = 1):
-    rate = _PACE["rows_per_second"]
+    rate = _PACE["run_rows_per_second"]
+    if rate is None:
+        rate = _PACE["rows_per_second"]
     if rate > 0:
         await asyncio.sleep(min(rows / rate, 30.0))
+
+
+async def _scan_pace(rows: int = 1):
+    # Read-side throttle; at minimum yields the loop so other requests run
+    rate = _PACE["run_scan_rows_per_second"]
+    if rate is None:
+        rate = _PACE["scan_rows_per_second"]
+    if rate > 0:
+        await asyncio.sleep(min(rows / rate, 30.0))
+    else:
+        await asyncio.sleep(0)
+
+
+# Live progress of the current pass, read by the manual UI. Plain dict writes
+# only, so vector/storage worker threads can update it too.
+_PROGRESS = {"active": False}
+
+
+def _prog_begin(mode):
+    _PROGRESS.update(
+        active=True,
+        mode=mode,
+        stage="Starting",
+        stages_done=0,
+        done=0,
+        total=None,
+        started_at=int(time.time()),
+    )
+
+
+def _prog_stage(stage, total=None):
+    if not _PROGRESS.get("active"):
+        return
+    _PROGRESS.update(
+        stage=stage,
+        stages_done=_PROGRESS.get("stages_done", 0) + 1,
+        done=0,
+        total=total,
+    )
+
+
+def _prog_tick(n=1, total=None):
+    if not _PROGRESS.get("active"):
+        return
+    _PROGRESS["done"] = _PROGRESS.get("done", 0) + n
+    if total is not None:
+        _PROGRESS["total"] = total
+
+
+def _prog_end():
+    _PROGRESS["active"] = False
 
 
 
@@ -342,117 +401,29 @@ class PruneLock:
             log.error(f"Error releasing prune lock: {e}")
 
 
-class JSONFileIDExtractor:
-    """
-    Utility for extracting and validating file IDs from JSON content.
-
-    Replaces duplicated regex compilation and validation logic used throughout
-    the file scanning functions. Compiles patterns once for better performance.
-    """
-
-    # Compile patterns once at class level for performance
-    _FILE_ID_PATTERN = re.compile(
-        r'"id":\s*"([a-fA-F0-9]{8}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{12})"'
-    )
-    _URL_PATTERN = re.compile(
-        r"/api/v1/files/([a-fA-F0-9]{8}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{12})"
-    )
-
-    @classmethod
-    def extract_file_ids(cls, json_string: str) -> Set[str]:
-        """
-        Extract file IDs from JSON string WITHOUT database validation.
-
-        Args:
-            json_string: JSON content as string (or any string to scan)
-
-        Returns:
-            Set of extracted file IDs (not validated against database)
-
-        Note:
-            Use this method when you have a preloaded set of valid file IDs
-            to validate against, avoiding N database queries.
-        """
-        potential_ids = []
-        potential_ids.extend(cls._FILE_ID_PATTERN.findall(json_string))
-        potential_ids.extend(cls._URL_PATTERN.findall(json_string))
-        return set(potential_ids)
-
-
-# UUID pattern for direct dict traversal (Phase 1.5 optimization)
 UUID_PATTERN = re.compile(
     r"^[a-fA-F0-9]{8}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{12}$"
 )
 
-# URL-style file references: legacy generated images are stored in chat JSON as
-# {"type": "image", "url": "/api/v1/files/{id}/content"} with no "id" key, so
-# id-field matching alone misses them and live chats would lose their images.
-URL_FILE_REF_PATTERN = re.compile(
-    r"/api/v1/files/([a-fA-F0-9]{8}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{12})"
+# Any UUID-shaped substring. JSON columns are scanned as raw text and the
+# matches intersected with the real file ids: a strict superset of the old
+# per-field dict walk (id/file_id/fileId/file_ids/fileIds/url/src), an order
+# of magnitude cheaper than json-decoding every row, and any overmatch only
+# PRESERVES a file, never deletes one.
+UUID_ANYWHERE_PATTERN = re.compile(
+    r"[a-fA-F0-9]{8}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{12}"
 )
 
 
-def collect_file_ids_from_dict(
-    obj, out: Set[str], valid_ids: Set[str], _depth: int = 0
-) -> None:
-    """
-    Recursively traverse dict/list structures and collect file IDs.
-
-    This function replaces json.dumps() + regex approach with direct dict traversal,
-    reducing memory usage by ~75% on large chat databases.
-
-    Args:
-        obj: Dict, list, or any value to traverse
-        out: Set to accumulate found file IDs into
-        valid_ids: Set of known valid file IDs (for O(1) validation)
-        _depth: Current recursion depth (safety limit)
-
-    Patterns detected:
-        - {"id": "uuid"}
-        - {"file_id": "uuid"}
-        - {"fileId": "uuid"}
-        - {"file_ids": ["uuid1", "uuid2"]}
-        - {"fileIds": ["uuid1", "uuid2"]}
-    """
-    # Safety: Prevent excessive recursion
-    if _depth > 100:
+def collect_file_ids_from_text(text_val, out: Set[str], valid_ids: Set[str], odd_ids=()):
+    """Collect referenced file ids from a JSON column's raw text."""
+    if not text_val:
         return
-
-    if isinstance(obj, dict):
-        # Check individual file ID fields
-        # valid_ids only contains real UUIDs from the database, so set lookup
-        # alone is sufficient — no need for regex pre-validation
-        for field_name in ["id", "file_id", "fileId"]:
-            fid = obj.get(field_name)
-            if isinstance(fid, str) and fid in valid_ids:
-                out.add(fid)
-
-        # Check file ID array fields
-        for field_name in ["file_ids", "fileIds"]:
-            fid_array = obj.get(field_name)
-            if isinstance(fid_array, list):
-                for fid in fid_array:
-                    if isinstance(fid, str) and fid in valid_ids:
-                        out.add(fid)
-
-        # Check URL-style references (legacy generated images carry only a url)
-        for field_name in ["url", "src"]:
-            url_val = obj.get(field_name)
-            if isinstance(url_val, str) and "/api/v1/files/" in url_val:
-                for match in URL_FILE_REF_PATTERN.findall(url_val):
-                    if match in valid_ids:
-                        out.add(match)
-
-        # Recurse into all dict values
-        for value in obj.values():
-            collect_file_ids_from_dict(value, out, valid_ids, _depth + 1)
-
-    elif isinstance(obj, list):
-        # Recurse into all list items
-        for item in obj:
-            collect_file_ids_from_dict(item, out, valid_ids, _depth + 1)
-
-    # Primitives (str, int, None, etc.) - do nothing
+    out.update(valid_ids.intersection(UUID_ANYWHERE_PATTERN.findall(text_val)))
+    # Non-UUID file ids (never produced by Open WebUI itself) still match
+    for fid in odd_ids:
+        if fid in text_val:
+            out.add(fid)
 
 
 # Open WebUI stores one metadata embedding per knowledge base (its name +
@@ -671,6 +642,7 @@ class VectorDatabaseCleaner(ABC):
         """Count memories whose database row no longer exists, per active user."""
         total = 0
         for uid, valid in (valid_ids_by_user or {}).items():
+            _prog_tick()
             present = self._collection_point_ids(f"user-memory-{uid}")
             if not present:
                 continue
@@ -684,6 +656,7 @@ class VectorDatabaseCleaner(ABC):
             return 0
         deleted = 0
         for uid, valid in (valid_ids_by_user or {}).items():
+            _prog_tick()
             collection = f"user-memory-{uid}"
             present = self._collection_point_ids(collection)
             if not present:
@@ -825,6 +798,7 @@ class ChromaDatabaseCleaner(VectorDatabaseCleaner):
                 if not collection_dir.is_dir() or collection_dir.name.startswith("."):
                     continue
 
+                _prog_tick()
                 dir_uuid = collection_dir.name
                 collection_name = uuid_to_collection.get(dir_uuid)
 
@@ -2651,7 +2625,7 @@ import os
 import time
 from pathlib import Path
 from typing import Iterator, Optional, Set, Tuple, Callable, Any
-from sqlalchemy import select, text, func, and_, or_, not_, delete, update
+from sqlalchemy import select, text, func, and_, or_, not_, delete, update, cast, Text
 from sqlalchemy.exc import OperationalError, ProgrammingError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -2760,11 +2734,24 @@ async def stream_rows(db, *columns, filter_clause=None, batch_size=5000):
         batch = result.fetchall()
         if not batch:
             break
+        # Yield the event loop (and honor the scan throttle) between batches
+        await _scan_pace(len(batch))
         for row in batch:
             yield row
         last_key = batch[-1][0]
         if len(batch) < batch_size:
             break
+
+
+async def _count_rows(db, table, filter_clause=None) -> int:
+    """Cheap COUNT(*) used only for progress totals."""
+    try:
+        stmt = select(func.count()).select_from(table)
+        if filter_clause is not None:
+            stmt = stmt.where(filter_clause)
+        return (await db.execute(stmt)).scalar_one_or_none() or 0
+    except Exception:
+        return 0
 
 
 # Direct Open WebUI imports — this module runs inside the Open WebUI process.
@@ -3220,6 +3207,7 @@ async def delete_old_knowledge_bases(
             async for (kb_id,) in stream_rows(
                 db, Knowledge.id, filter_clause=(age_col < cutoff_time)
             ):
+                _prog_tick()
                 try:
                     if vector_cleaner is not None:
                         await asyncio.to_thread(
@@ -3291,6 +3279,7 @@ async def count_orphaned_records(
             # SQL IN() clauses — active_file_ids can be 100K+ entries and
             # active_user_ids can exceed SQLite's ~999 parameter limit on
             # large instances.
+            _prog_stage("Counting orphaned files", await _count_rows(db, File))
             orphaned_file_count = 0
             grace_cutoff = int(time.time()) - max(
                 0, int(getattr(form_data, "orphan_file_grace_hours", 0) or 0)
@@ -3298,6 +3287,7 @@ async def count_orphaned_records(
             async for fid, _uid, created_at in stream_rows(
                 db, File.id, File.user_id, File.created_at
             ):
+                _prog_tick()
                 if created_at is not None and created_at > grace_cutoff:
                     continue  # freshly uploaded; may not be referenced yet
                 if str(fid) not in active_file_ids:
@@ -3379,11 +3369,16 @@ async def count_orphaned_records(
                     # SQL IN() binds one parameter per user (breaks past
                     # SQLite's limit on large instances) and SQL NOT IN never
                     # counts NULL owners while execution deletes them.
+                    _prog_stage(
+                        f"Counting orphaned {key.replace('_', ' ')}",
+                        await _count_rows(db, table_cls),
+                    )
                     exempt_ids = _shared_exempt.get(key, set())
                     n = 0
                     async for _rid, row_uid in stream_rows(
                         db, table_cls.id, user_id_col
                     ):
+                        _prog_tick()
                         if (
                             str(row_uid) not in active_user_ids
                             and str(_rid) not in exempt_ids
@@ -3393,6 +3388,7 @@ async def count_orphaned_records(
 
             # Count orphaned chat_messages (chat_id references a chat that no longer exists)
             if form_data.delete_orphaned_chat_messages:
+                _prog_stage("Counting orphaned chat messages")
                 try:
                     result = await db.execute(
                         select(func.count(ChatMessage.id)).where(
@@ -3408,6 +3404,7 @@ async def count_orphaned_records(
 
             # Count orphaned automations and their runs
             if form_data.delete_orphaned_automations and Automation is not None:
+                _prog_stage("Counting orphaned automations")
                 try:
                     orphaned_auto_count = 0
                     orphaned_auto_ids = set()
@@ -3464,6 +3461,7 @@ async def count_orphaned_records(
                 form_data.delete_orphaned_channels
                 or form_data.delete_orphaned_channel_messages
             ) and Channel is not None:
+                _prog_stage("Counting orphaned channels and messages")
                 try:
                     all_channel_ids = set()
                     orphan_channel_ids = set()
@@ -3546,12 +3544,14 @@ async def delete_orphaned_chat_messages() -> int:
             # Delete in batches to avoid SQLite variable limits
             deleted = 0
             batch_size = 500
+            _prog_tick(0, len(orphaned_ids))
             for i in range(0, len(orphaned_ids), batch_size):
                 batch = orphaned_ids[i : i + batch_size]
                 result = await db.execute(
                     delete(ChatMessage).where(ChatMessage.id.in_(batch))
                 )
                 deleted += result.rowcount
+                _prog_tick(len(batch))
                 await db.commit()
                 await _pace(len(batch))
             await db.commit()
@@ -3587,6 +3587,7 @@ async def _delete_channel_messages_by_ids(db, message_ids: list) -> int:
             )
         result = await db.execute(delete(Message).where(Message.id.in_(batch)))
         deleted += result.rowcount or 0
+        _prog_tick(len(batch))
         await db.commit()
         await _pace(len(batch))
     return deleted
@@ -3646,6 +3647,7 @@ async def delete_old_channel_messages(
             ids = [row[0] for row in result.fetchall()]
             if not ids:
                 return 0
+            _prog_tick(0, len(ids))
             deleted = await _delete_channel_messages_by_ids(db, ids)
             await db.commit()
             if deleted > 0:
@@ -3704,6 +3706,7 @@ async def delete_orphaned_channel_messages() -> int:
             ids = [row[0] for row in result.fetchall()]
             if not ids:
                 return 0
+            _prog_tick(0, len(ids))
             deleted = await _delete_channel_messages_by_ids(db, ids)
             await db.commit()
             if deleted > 0:
@@ -3921,6 +3924,7 @@ async def count_orphaned_uploads(active_file_ids: Set[str]) -> int:
     def _count() -> int:
         n = 0
         for ref, name, _size in iter_storage_objects():
+            _prog_tick()
             if ref in active_paths or name in active_paths:
                 continue
             # GCS/Azure delete_file cannot round-trip nested blob names and
@@ -3990,33 +3994,42 @@ async def get_active_file_ids(
         # Preload all valid file IDs to avoid N database queries during validation.
         # Stream only IDs — never load full File ORM objects (which include large
         # JSONB data/meta columns that cause OOM on large databases).
+        _prog_stage("Indexing file rows")
+
         async def _load_file_ids():
             async with get_async_db() as db:
                 return {str(fid) async for (fid,) in stream_rows(db, File.id)}
 
         all_file_ids = await retry_on_db_lock(_load_file_ids)
         log.debug(f"Preloaded {len(all_file_ids)} file IDs for validation")
+        # File ids not shaped like UUIDs (third-party inserts) get a substring
+        # match in the text scans below; the UUID regex alone would miss them
+        odd_file_ids = tuple(
+            fid for fid in all_file_ids if not UUID_PATTERN.match(fid)
+        )
 
-        # Build active KB IDs using lightweight SQL (just id + user_id).
-        # Knowledges.get_knowledge_bases() must NOT be used here — on databases
-        # with many files it eager-loads File objects through the knowledge_file
-        # relationship, pulling hundreds of MB of JSONB into memory.
-        kb_user_map = await get_kb_user_map()
-        active_kb_ids = set()
-        for kb_id, user_id in kb_user_map.items():
+        if preserved_kb_ids is not None:
             # CRITICAL: only preserved/active KBs may keep files alive; a KB
             # slated for deletion must not protect its contents, and a KB the
             # preservation decision keeps (off-flag, shared exemption) must.
-            if preserved_kb_ids is not None:
-                if kb_id in preserved_kb_ids:
+            active_kb_ids = set(preserved_kb_ids)
+        else:
+            # Build active KB IDs using lightweight SQL (just id + user_id).
+            # Knowledges.get_knowledge_bases() must NOT be used here — on databases
+            # with many files it eager-loads File objects through the knowledge_file
+            # relationship, pulling hundreds of MB of JSONB into memory.
+            kb_user_map = await get_kb_user_map()
+            active_kb_ids = set()
+            for kb_id, user_id in kb_user_map.items():
+                if active_user_ids is None or user_id in active_user_ids:
                     active_kb_ids.add(kb_id)
-            elif active_user_ids is None or user_id in active_user_ids:
-                active_kb_ids.add(kb_id)
         log.debug(f"Found {len(active_kb_ids)} active knowledge bases")
 
         # Query the knowledge_file junction table directly for file IDs.
         # This replaces the N+1 pattern of Knowledges.get_files_by_id() per KB,
         # and avoids loading full File ORM objects (large JSONB data/meta columns).
+        _prog_stage("Scanning attachment links")
+
         async def scan_knowledge_files():
             async with get_async_db() as db:
                 result = await db.execute(
@@ -4027,6 +4040,8 @@ async def get_active_file_ids(
                     rows = result.fetchmany(5000)
                     if not rows:
                         break
+                    await _scan_pace(len(rows))
+                    _prog_tick(len(rows))
                     for kb_id, file_id in rows:
                         kf_count += 1
                         # Normalize to str — text() queries can return
@@ -4069,6 +4084,8 @@ async def get_active_file_ids(
                     rows = result.fetchmany(5000)
                     if not rows:
                         break
+                    await _scan_pace(len(rows))
+                    _prog_tick(len(rows))
                     for (file_id,) in rows:
                         chat_file_count += 1
                         # Normalize to str — text() queries can return
@@ -4103,6 +4120,8 @@ async def get_active_file_ids(
                     rows = result.fetchmany(5000)
                     if not rows:
                         break
+                    await _scan_pace(len(rows))
+                    _prog_tick(len(rows))
                     for (file_id,) in rows:
                         file_id_str = str(file_id) if file_id else None
                         if file_id_str and file_id_str in all_file_ids:
@@ -4116,193 +4135,83 @@ async def get_active_file_ids(
             else:
                 raise
 
+        # JSON columns are selected as raw text (CAST) and regex-scanned:
+        # no json decode, no dict tree, no event-loop-starving recursion.
+        async def scan_text_refs(label, table, id_col, json_cols, batch_size=100):
+            async def _scan():
+                n = 0
+                async with get_async_db() as db:
+                    total = await _count_rows(db, table)
+                    _prog_stage(label, total)
+                    async for row in stream_rows(
+                        db,
+                        id_col,
+                        *[cast(c, Text) for c in json_cols],
+                        batch_size=batch_size,
+                    ):
+                        n += 1
+                        _prog_tick()
+                        for text_val in row[1:]:
+                            try:
+                                collect_file_ids_from_text(
+                                    text_val, active_file_ids, all_file_ids, odd_file_ids
+                                )
+                            except Exception as e:
+                                log.debug(f"Error scanning row {row[0]}: {e}")
+                return n
+
+            try:
+                return await retry_on_db_lock(_scan)
+            except _TABLE_MISSING_ERRORS as e:
+                if _is_table_missing_error(e):
+                    log.debug(f"{label} skipped (table missing): {e}")
+                    return 0
+                raise
+
         # Always scan legacy chat.chat JSON as well — during upgrades from
         # pre-v0.6.41 databases, some file references may exist only in the
         # JSON column while newer chats use chat_file.  Skipping this when
         # chat_file is non-empty is unsafe for partially-migrated schemas.
-        # Each row's JSONB can be megabytes, so use a small batch size.
-        async def scan_chats():
-            chat_count = 0
-            async with get_async_db() as db:
-                async for chat_id, chat_dict in stream_rows(
-                    db, Chat.id, Chat.chat, batch_size=50
-                ):
-                    chat_count += 1
-                    if not chat_dict or not isinstance(chat_dict, dict):
-                        continue
-                    try:
-                        collect_file_ids_from_dict(
-                            chat_dict, active_file_ids, all_file_ids
-                        )
-                    except Exception as e:
-                        log.debug(
-                            f"Error processing chat {chat_id} for file references: {e}"
-                        )
-            return chat_count
-
-        chat_count = await retry_on_db_lock(scan_chats)
+        # Each row's JSON can be megabytes, so keep the batch size small.
+        chat_count = await scan_text_refs(
+            "Scanning chats for file references", Chat, Chat.id, [Chat.chat],
+            batch_size=50,
+        )
         log.debug(f"Scanned {chat_count} chats (legacy JSON) for file references")
 
-        # Scan folders for file references
-        # Pre-check ORM attributes — Folder.items/data may not exist on older schemas
-        has_folder_items = hasattr(Folder, "items")
-        has_folder_data = hasattr(Folder, "data")
-        if has_folder_items or has_folder_data:
-
-            async def scan_folders():
-                async with get_async_db() as db:
-                    columns = [Folder.id]
-                    if has_folder_items:
-                        columns.append(Folder.items)
-                    if has_folder_data:
-                        columns.append(Folder.data)
-                    async for row in stream_rows(db, *columns, batch_size=100):
-                        folder_id = row[0]
-                        col_idx = 1
-                        if has_folder_items:
-                            items_dict = row[col_idx]
-                            col_idx += 1
-                            if items_dict:
-                                try:
-                                    collect_file_ids_from_dict(
-                                        items_dict, active_file_ids, all_file_ids
-                                    )
-                                except Exception as e:
-                                    log.debug(
-                                        f"Error processing folder {folder_id} items: {e}"
-                                    )
-                        if has_folder_data:
-                            data_dict = row[col_idx]
-                            if data_dict:
-                                try:
-                                    collect_file_ids_from_dict(
-                                        data_dict, active_file_ids, all_file_ids
-                                    )
-                                except Exception as e:
-                                    log.debug(
-                                        f"Error processing folder {folder_id} data: {e}"
-                                    )
-
-            try:
-                await retry_on_db_lock(scan_folders)
-            except _TABLE_MISSING_ERRORS as e:
-                if _is_table_missing_error(e):
-                    log.debug(f"Folder scan skipped (table missing): {e}")
-                else:
-                    raise
+        # Folders (Folder.items/data may not exist on older schemas)
+        folder_cols = [c for c in (getattr(Folder, "items", None),
+                                   getattr(Folder, "data", None)) if c is not None]
+        if folder_cols:
+            await scan_text_refs(
+                "Scanning folders", Folder, Folder.id, folder_cols
+            )
         else:
             log.debug("Folder.items/data attributes not present — skipping folder scan")
 
-        # Scan standalone messages for file references
+        # Standalone (channel) messages
         if hasattr(Message, "data"):
-
-            async def scan_messages():
-                async with get_async_db() as db:
-                    async for message_id, message_data_dict in stream_rows(
-                        db,
-                        Message.id,
-                        Message.data,
-                        filter_clause=Message.data.isnot(None),
-                        batch_size=100,
-                    ):
-                        if message_data_dict:
-                            try:
-                                collect_file_ids_from_dict(
-                                    message_data_dict, active_file_ids, all_file_ids
-                                )
-                            except Exception as e:
-                                log.debug(
-                                    f"Error processing message {message_id} data: {e}"
-                                )
-
-            try:
-                await retry_on_db_lock(scan_messages)
-            except _TABLE_MISSING_ERRORS as e:
-                if _is_table_missing_error(e):
-                    log.debug(f"Message scan skipped (table missing): {e}")
-                else:
-                    raise
+            await scan_text_refs(
+                "Scanning channel messages", Message, Message.id, [Message.data]
+            )
         else:
             log.debug("Message.data attribute not present — skipping message scan")
 
-        # Scan models for file references in params and meta fields
-        has_model_params = hasattr(Model, "params")
-        has_model_meta = hasattr(Model, "meta")
-        if has_model_params or has_model_meta:
-
-            async def scan_models():
-                async with get_async_db() as db:
-                    columns = [Model.id]
-                    if has_model_params:
-                        columns.append(Model.params)
-                    if has_model_meta:
-                        columns.append(Model.meta)
-                    model_count = 0
-                    async for row in stream_rows(db, *columns, batch_size=100):
-                        model_count += 1
-                        model_id = row[0]
-                        col_idx = 1
-                        if has_model_params:
-                            params_dict = row[col_idx]
-                            col_idx += 1
-                            if params_dict and isinstance(params_dict, dict):
-                                try:
-                                    collect_file_ids_from_dict(
-                                        params_dict, active_file_ids, all_file_ids
-                                    )
-                                except Exception as e:
-                                    log.debug(
-                                        f"Error processing model {model_id} params: {e}"
-                                    )
-                        if has_model_meta:
-                            meta_dict = row[col_idx]
-                            if meta_dict and isinstance(meta_dict, dict):
-                                try:
-                                    collect_file_ids_from_dict(
-                                        meta_dict, active_file_ids, all_file_ids
-                                    )
-                                except Exception as e:
-                                    log.debug(
-                                        f"Error processing model {model_id} meta: {e}"
-                                    )
-                    log.debug(f"Scanned {model_count} models for file references")
-
-            try:
-                await retry_on_db_lock(scan_models)
-            except _TABLE_MISSING_ERRORS as e:
-                if _is_table_missing_error(e):
-                    log.debug(f"Model scan skipped (table missing): {e}")
-                else:
-                    raise
+        # Models (params and meta fields)
+        model_cols = [c for c in (getattr(Model, "params", None),
+                                  getattr(Model, "meta", None)) if c is not None]
+        if model_cols:
+            await scan_text_refs(
+                "Scanning models", Model, Model.id, model_cols
+            )
         else:
             log.debug("Model.params/meta attributes not present — skipping model scan")
 
-        # Scan notes for file attachments. The notes editor stores them in
-        # note.data.files as {"id": ...} entries, which the collector detects.
+        # Notes store attachments in note.data.files as {"id": ...} entries
         if hasattr(Note, "data"):
-
-            async def scan_notes():
-                async with get_async_db() as db:
-                    async for note_id, note_data in stream_rows(
-                        db, Note.id, Note.data, batch_size=100
-                    ):
-                        if note_data and isinstance(note_data, dict):
-                            try:
-                                collect_file_ids_from_dict(
-                                    note_data, active_file_ids, all_file_ids
-                                )
-                            except Exception as e:
-                                log.debug(
-                                    f"Error processing note {note_id} data: {e}"
-                                )
-
-            try:
-                await retry_on_db_lock(scan_notes)
-            except _TABLE_MISSING_ERRORS as e:
-                if _is_table_missing_error(e):
-                    log.debug(f"Note scan skipped (table missing): {e}")
-                else:
-                    raise
+            await scan_text_refs(
+                "Scanning notes", Note, Note.id, [Note.data]
+            )
         else:
             log.debug("Note.data attribute not present — skipping note scan")
 
@@ -4454,7 +4363,9 @@ async def cleanup_orphaned_uploads(active_file_ids: Set[str]) -> int:
 
     try:
         orphans = await asyncio.to_thread(_list_orphans)
+        _prog_tick(0, len(orphans))
         for ref, name in orphans:
+            _prog_tick()
             try:
                 await asyncio.to_thread(Storage.delete_file, ref)
                 deleted_count += 1
@@ -4518,8 +4429,10 @@ async def delete_inactive_users(
         # No savepoint: the OWUI managers commit their own sessions in the
         # default (non-session-sharing) configuration, so a savepoint here
         # would contain no work and only feign atomicity.
+        _prog_tick(0, len(users_to_delete))
         async with get_async_db() as db:
             for user in users_to_delete:
+                _prog_tick()
                 try:
                     # Delete user's automations and their runs
                     await delete_user_automations(user.id, db=db)
@@ -4685,6 +4598,7 @@ async def delete_orphaned_automations(active_user_ids: Set[str]) -> int:
             async for auto_id, auto_uid in stream_rows(
                 db, Automation.id, Automation.user_id
             ):
+                _prog_tick()
                 if str(auto_uid) not in active_user_ids:
                     batch.append(str(auto_id))
 
@@ -4760,6 +4674,7 @@ async def delete_orphaned_automation_runs() -> int:
             async for run_id, parent_id in stream_rows(
                 db, AutomationRun.id, AutomationRun.automation_id
             ):
+                _prog_tick()
                 if parent_id is None or parent_id not in valid_auto_ids:
                     batch.append(str(run_id))
 
@@ -4905,6 +4820,7 @@ async def run_prune(form_data: PruneDataForm) -> dict:
         }
 
     try:
+        _prog_begin("preview" if form_data.dry_run else "execute")
         # Get vector database cleaner based on configuration
         vector_cleaner = get_vector_database_cleaner(
             VECTOR_DB,
@@ -4918,10 +4834,12 @@ async def run_prune(form_data: PruneDataForm) -> dict:
             log.info("Starting data pruning preview (dry run)")
 
             # Get counts for all enabled operations
+            _prog_stage("Loading users")
             all_users = (await Users.get_users())["users"]
             active_user_ids = {str(user.id) for user in all_users}
             # Single preservation decision: off-flag and shared exemption
             # protect KB contents (files, vectors, metadata), not just rows
+            _prog_stage("Deciding which knowledge bases to keep")
             active_kb_ids = await get_preserved_kb_ids(form_data, active_user_ids)
             active_file_ids = await get_active_file_ids(
                 active_user_ids=active_user_ids, preserved_kb_ids=active_kb_ids
@@ -4934,23 +4852,64 @@ async def run_prune(form_data: PruneDataForm) -> dict:
                 form_data, active_file_ids, active_user_ids
             )
 
+            _prog_stage("Counting inactive users")
+            inactive_users = await count_inactive_users(
+                form_data.delete_inactive_users_days,
+                form_data.exempt_admin_users,
+                form_data.exempt_pending_users,
+                all_users,
+            )
+            _prog_stage("Counting old chats")
+            old_chats = await count_old_chats(
+                form_data.days,
+                form_data.exempt_archived_chats,
+                form_data.exempt_chats_in_folders,
+                form_data.exempt_pinned_chats,
+            )
+            old_knowledge_bases = await count_old_knowledge_bases(
+                form_data.delete_knowledge_bases_older_than_days,
+                form_data.knowledge_bases_age_field,
+            )
+            _prog_stage("Scanning storage for orphaned uploads")
+            orphaned_uploads = await count_orphaned_uploads(active_file_ids)
+            _prog_stage("Scanning vector collections")
+            orphaned_vector_collections = await asyncio.to_thread(
+                vector_cleaner.count_orphaned_collections,
+                all_file_row_ids,
+                active_kb_ids,
+                active_user_ids,
+            )
+            _prog_stage("Checking the knowledge-base search index")
+            orphaned_kb_metadata = (
+                await asyncio.to_thread(
+                    vector_cleaner.count_orphaned_kb_metadata, active_kb_ids
+                )
+                if form_data.delete_orphaned_kb_metadata
+                else 0
+            )
+            orphaned_memories = 0
+            if form_data.delete_orphaned_memories:
+                memory_ids_by_user = await get_memory_ids_by_user(active_user_ids)
+                _prog_stage(
+                    "Reconciling memory embeddings", len(memory_ids_by_user)
+                )
+                orphaned_memories = await asyncio.to_thread(
+                    vector_cleaner.count_orphaned_memories, memory_ids_by_user
+                ) + await count_orphaned_memory_rows(active_user_ids)
+            _prog_stage("Counting audio cache files")
+            audio_cache_files = await asyncio.to_thread(
+                count_audio_cache_files, form_data.audio_cache_max_age_days
+            )
+            _prog_stage("Counting old channel messages")
+            old_channel_messages = await count_old_channel_messages(
+                form_data.channel_message_max_age_days,
+                form_data.exempt_pinned_channel_messages,
+            )
+
             result = PrunePreviewResult(
-                inactive_users=await count_inactive_users(
-                    form_data.delete_inactive_users_days,
-                    form_data.exempt_admin_users,
-                    form_data.exempt_pending_users,
-                    all_users,
-                ),
-                old_chats=await count_old_chats(
-                    form_data.days,
-                    form_data.exempt_archived_chats,
-                    form_data.exempt_chats_in_folders,
-                    form_data.exempt_pinned_chats,
-                ),
-                old_knowledge_bases=await count_old_knowledge_bases(
-                    form_data.delete_knowledge_bases_older_than_days,
-                    form_data.knowledge_bases_age_field,
-                ),
+                inactive_users=inactive_users,
+                old_chats=old_chats,
+                old_knowledge_bases=old_knowledge_bases,
                 orphaned_chats=orphaned_counts["chats"],
                 orphaned_files=orphaned_counts["files"],
                 orphaned_tools=orphaned_counts["tools"],
@@ -4961,39 +4920,15 @@ async def run_prune(form_data: PruneDataForm) -> dict:
                 orphaned_notes=orphaned_counts["notes"],
                 orphaned_skills=orphaned_counts["skills"],
                 orphaned_folders=orphaned_counts["folders"],
-                orphaned_uploads=await count_orphaned_uploads(active_file_ids),
-                orphaned_vector_collections=await asyncio.to_thread(
-                    vector_cleaner.count_orphaned_collections,
-                    all_file_row_ids,
-                    active_kb_ids,
-                    active_user_ids,
-                ),
-                orphaned_kb_metadata=(
-                    await asyncio.to_thread(
-                        vector_cleaner.count_orphaned_kb_metadata, active_kb_ids
-                    )
-                    if form_data.delete_orphaned_kb_metadata
-                    else 0
-                ),
-                orphaned_memories=(
-                    await asyncio.to_thread(
-                        vector_cleaner.count_orphaned_memories,
-                        await get_memory_ids_by_user(active_user_ids),
-                    )
-                    + await count_orphaned_memory_rows(active_user_ids)
-                    if form_data.delete_orphaned_memories
-                    else 0
-                ),
-                audio_cache_files=await asyncio.to_thread(
-                    count_audio_cache_files, form_data.audio_cache_max_age_days
-                ),
+                orphaned_uploads=orphaned_uploads,
+                orphaned_vector_collections=orphaned_vector_collections,
+                orphaned_kb_metadata=orphaned_kb_metadata,
+                orphaned_memories=orphaned_memories,
+                audio_cache_files=audio_cache_files,
                 orphaned_chat_messages=orphaned_counts["chat_messages"],
                 orphaned_automations=orphaned_counts["automations"],
                 orphaned_automation_runs=orphaned_counts["automation_runs"],
-                old_channel_messages=await count_old_channel_messages(
-                    form_data.channel_message_max_age_days,
-                    form_data.exempt_pinned_channel_messages,
-                ),
+                old_channel_messages=old_channel_messages,
                 orphaned_channels=orphaned_counts["channels"],
                 orphaned_channel_messages=orphaned_counts["channel_messages"],
             )
@@ -5007,6 +4942,7 @@ async def run_prune(form_data: PruneDataForm) -> dict:
         # Stage 0: Delete inactive users (if enabled)
         deleted_users = 0
         if form_data.delete_inactive_users_days is not None:
+            _prog_stage("Deleting inactive users")
             log.info(
                 f"Deleting users inactive for more than {form_data.delete_inactive_users_days} days"
             )
@@ -5037,6 +4973,9 @@ async def run_prune(form_data: PruneDataForm) -> dict:
                     if hasattr(Chat, "folder_id"):
                         conditions &= Chat.folder_id == None
 
+                _prog_stage(
+                    "Deleting old chats", await _count_rows(db, Chat, conditions)
+                )
                 deleted = 0
                 async for (chat_id,) in stream_rows(
                     db, Chat.id, filter_clause=conditions
@@ -5044,6 +4983,7 @@ async def run_prune(form_data: PruneDataForm) -> dict:
                     # delete_chat_by_id swallows exceptions and returns False
                     if await Chats.delete_chat_by_id(chat_id, db=db):
                         deleted += 1
+                    _prog_tick()
                     await db.commit()
                     await _pace()
                 if deleted > 0:
@@ -5060,6 +5000,7 @@ async def run_prune(form_data: PruneDataForm) -> dict:
         # files, uploads and per-file vector collections are reclaimed by the
         # normal orphan sweep in Stages 3-4.
         if form_data.delete_knowledge_bases_older_than_days is not None:
+            _prog_stage("Deleting old knowledge bases")
             deleted_old_kbs = await delete_old_knowledge_bases(
                 form_data.delete_knowledge_bases_older_than_days,
                 vector_cleaner,
@@ -5083,11 +5024,13 @@ async def run_prune(form_data: PruneDataForm) -> dict:
         # cascades, so deleted chats/KBs/channels strand junction rows; stale
         # chat_file rows would pin deleted chats' attachments as active forever.
         # Must run BEFORE the preservation set is built.
+        _prog_stage("Cleaning junction tables")
         await cleanup_dangling_junction_rows()
 
         # Stage 2: Build preservation set
         log.info("Building preservation set")
 
+        _prog_stage("Building preservation set")
         active_user_ids = {str(user.id) for user in (await Users.get_users())["users"]}
         log.info(f"Found {len(active_user_ids)} active users")
 
@@ -5142,9 +5085,11 @@ async def run_prune(form_data: PruneDataForm) -> dict:
             0, int(getattr(form_data, "orphan_file_grace_hours", 0) or 0)
         ) * 3600
         async with get_async_db() as db:
+            _prog_stage("Sweeping orphaned files", await _count_rows(db, File))
             async for fid, _uid, created_at in stream_rows(
                 db, File.id, File.user_id, File.created_at
             ):
+                _prog_tick()
                 if created_at is not None and created_at > grace_cutoff:
                     continue
                 if str(fid) not in active_file_ids:
@@ -5158,6 +5103,7 @@ async def run_prune(form_data: PruneDataForm) -> dict:
 
         deleted_kbs = 0
         if form_data.delete_orphaned_knowledge_bases:
+            _prog_stage("Deleting orphaned knowledge bases")
             deleted_kb_ids = []
             async with get_async_db() as db:
                 # Stream ids — get_knowledge_bases() paginates (limit=30) and
@@ -5170,7 +5116,9 @@ async def run_prune(form_data: PruneDataForm) -> dict:
                     # shared exemption; anything outside it is deletable
                     if str(okb_id) not in active_kb_ids:
                         orphan_kb_ids.append(str(okb_id))
+                _prog_tick(0, len(orphan_kb_ids))
                 for okb_id in orphan_kb_ids:
+                    _prog_tick()
                     if await asyncio.to_thread(
                         vector_cleaner.delete_collection, okb_id
                     ):
@@ -5202,7 +5150,11 @@ async def run_prune(form_data: PruneDataForm) -> dict:
         if form_data.delete_orphaned_chats:
             chats_deleted = 0
             async with get_async_db() as db:
+                _prog_stage(
+                    "Deleting chats of deleted users", await _count_rows(db, Chat)
+                )
                 async for chat_id, chat_uid in stream_rows(db, Chat.id, Chat.user_id):
+                    _prog_tick()
                     if str(chat_uid) not in active_user_ids:
                         if await Chats.delete_chat_by_id(chat_id, db=db):
                             chats_deleted += 1
@@ -5216,8 +5168,10 @@ async def run_prune(form_data: PruneDataForm) -> dict:
 
         if form_data.delete_orphaned_tools:
             tools_deleted = 0
+            _prog_stage("Deleting orphaned tools")
             async with get_async_db() as db:
                 for tool in await Tools.get_tools(db=db):
+                    _prog_tick()
                     if str(tool.user_id) not in active_user_ids:
                         if str(tool.id) in shared_tools:
                             continue
@@ -5233,8 +5187,10 @@ async def run_prune(form_data: PruneDataForm) -> dict:
 
         if form_data.delete_orphaned_functions:
             functions_deleted = 0
+            _prog_stage("Deleting orphaned functions")
             async with get_async_db() as db:
                 for function in await Functions.get_functions(db=db):
+                    _prog_tick()
                     if str(function.user_id) not in active_user_ids:
                         await Functions.delete_function_by_id(function.id, db=db)
                         functions_deleted += 1
@@ -5248,9 +5204,11 @@ async def run_prune(form_data: PruneDataForm) -> dict:
 
         if form_data.delete_orphaned_notes:
             notes_deleted = 0
+            _prog_stage("Deleting orphaned notes")
             async with get_async_db() as db:
                 # Stream raw columns — Notes.get_notes() paginates (limit=50)
                 async for note_id, note_uid in stream_rows(db, Note.id, Note.user_id):
+                    _prog_tick()
                     if str(note_uid) not in active_user_ids:
                         if str(note_id) in shared_notes:
                             continue
@@ -5266,8 +5224,10 @@ async def run_prune(form_data: PruneDataForm) -> dict:
 
         if form_data.delete_orphaned_skills:
             skills_deleted = 0
+            _prog_stage("Deleting orphaned skills")
             async with get_async_db() as db:
                 for skill in await Skills.get_skills(db=db):
+                    _prog_tick()
                     if str(skill.user_id) not in active_user_ids:
                         if str(skill.id) in shared_skills:
                             continue
@@ -5283,12 +5243,14 @@ async def run_prune(form_data: PruneDataForm) -> dict:
 
         if form_data.delete_orphaned_prompts:
             prompts_deleted = 0
+            _prog_stage("Deleting orphaned prompts")
             async with get_async_db() as db:
                 # Stream raw columns — Prompts.get_prompts() validates every row
                 # into PromptModel and aborts the run on legacy rows (NULL tags)
                 async for _pid, command, prompt_uid in stream_rows(
                     db, Prompt.id, Prompt.command, Prompt.user_id
                 ):
+                    _prog_tick()
                     if str(prompt_uid) not in active_user_ids:
                         if str(_pid) in shared_prompts:
                             continue
@@ -5304,8 +5266,10 @@ async def run_prune(form_data: PruneDataForm) -> dict:
 
         if form_data.delete_orphaned_models:
             models_deleted = 0
+            _prog_stage("Deleting orphaned models")
             async with get_async_db() as db:
                 for model in await Models.get_all_models(db=db):
+                    _prog_tick()
                     if str(model.user_id) not in active_user_ids:
                         if str(model.id) in shared_models:
                             continue
@@ -5321,8 +5285,10 @@ async def run_prune(form_data: PruneDataForm) -> dict:
 
         if form_data.delete_orphaned_folders:
             folders_deleted = 0
+            _prog_stage("Deleting orphaned folders")
             async with get_async_db() as db:
                 for folder in await get_all_folders(db=db):
+                    _prog_tick()
                     if str(folder.user_id) not in active_user_ids:
                         await Folders.delete_folder_by_id_and_user_id(
                             folder.id, folder.user_id, db=db
@@ -5341,6 +5307,7 @@ async def run_prune(form_data: PruneDataForm) -> dict:
 
         # Stage 3b: Delete orphaned chat messages
         if form_data.delete_orphaned_chat_messages:
+            _prog_stage("Deleting orphaned chat messages")
             deleted_chat_messages = await delete_orphaned_chat_messages()
             if deleted_chat_messages > 0:
                 log.info(f"Deleted {deleted_chat_messages} orphaned chat messages")
@@ -5349,6 +5316,7 @@ async def run_prune(form_data: PruneDataForm) -> dict:
 
         # Stage 3c: Delete orphaned automations and automation runs
         if form_data.delete_orphaned_automations:
+            _prog_stage("Deleting orphaned automations")
             deleted_automations = await delete_orphaned_automations(active_user_ids)
             if deleted_automations > 0:
                 log.info(f"Deleted {deleted_automations} orphaned automations")
@@ -5362,6 +5330,7 @@ async def run_prune(form_data: PruneDataForm) -> dict:
         # Stage 3d: Channel pruning. Runs before Stage 4 so that files attached to
         # pruned channel content become unreferenced and get cleaned below.
         if form_data.delete_orphaned_channels:
+            _prog_stage("Deleting orphaned channels")
             deleted_channels = await delete_orphaned_channels(active_user_ids)
             if deleted_channels > 0:
                 log.info(f"Deleted {deleted_channels} orphaned channels")
@@ -5369,6 +5338,7 @@ async def run_prune(form_data: PruneDataForm) -> dict:
             log.info("Skipping orphaned channel deletion (disabled)")
 
         if form_data.delete_orphaned_channel_messages:
+            _prog_stage("Deleting orphaned channel messages")
             deleted_ch_msgs = await delete_orphaned_channel_messages()
             if deleted_ch_msgs > 0:
                 log.info(f"Deleted {deleted_ch_msgs} orphaned channel messages")
@@ -5376,6 +5346,7 @@ async def run_prune(form_data: PruneDataForm) -> dict:
             log.info("Skipping orphaned channel message deletion (disabled)")
 
         if form_data.channel_message_max_age_days is not None:
+            _prog_stage("Deleting old channel messages")
             deleted_old_ch_msgs = await delete_old_channel_messages(
                 form_data.channel_message_max_age_days,
                 form_data.exempt_pinned_channel_messages,
@@ -5394,6 +5365,7 @@ async def run_prune(form_data: PruneDataForm) -> dict:
         # be considered active.  This is safe with the streaming-based
         # get_active_file_ids() that replaced the OOM-prone ORM version.
         log.info("Recomputing preservation sets after deletions")
+        _prog_stage("Recomputing preservation set")
         active_user_ids = {str(user.id) for user in (await Users.get_users())["users"]}
         active_kb_ids = await get_preserved_kb_ids(form_data, active_user_ids)
         active_file_ids = await get_active_file_ids(
@@ -5406,12 +5378,14 @@ async def run_prune(form_data: PruneDataForm) -> dict:
 
         log.info("Cleaning up orphaned physical files")
 
+        _prog_stage("Deleting orphaned uploads from storage")
         deleted_uploads = await cleanup_orphaned_uploads(active_file_ids)
         if deleted_uploads > 0:
             log.info(f"Deleted {deleted_uploads} orphaned upload files")
 
         # Audio cache cleanup
         if form_data.audio_cache_max_age_days is not None:
+            _prog_stage("Cleaning audio cache")
             log.info(
                 f"Cleaning audio cache files older than {form_data.audio_cache_max_age_days} days"
             )
@@ -5420,6 +5394,7 @@ async def run_prune(form_data: PruneDataForm) -> dict:
             )
 
         # Use modular vector database cleanup
+        _prog_stage("Cleaning vector collections")
         warnings = []
         deleted_vector_count, vector_error = await asyncio.to_thread(
             vector_cleaner.cleanup_orphaned_collections,
@@ -5434,6 +5409,7 @@ async def run_prune(form_data: PruneDataForm) -> dict:
         # Clean orphaned KB metadata embeddings (KBs deleted outside the tool,
         # or by older versions that did not remove the metadata entry).
         if form_data.delete_orphaned_kb_metadata:
+            _prog_stage("Cleaning the knowledge-base search index")
             deleted_kb_meta = await asyncio.to_thread(
                 vector_cleaner.cleanup_orphaned_kb_metadata, active_kb_ids
             )
@@ -5447,6 +5423,7 @@ async def run_prune(form_data: PruneDataForm) -> dict:
         if form_data.delete_orphaned_memories:
             await delete_orphaned_memory_rows(active_user_ids)
             memory_ids_by_user = await get_memory_ids_by_user(active_user_ids)
+            _prog_stage("Reconciling memory embeddings", len(memory_ids_by_user))
             deleted_mem = await asyncio.to_thread(
                 vector_cleaner.cleanup_orphaned_memories, memory_ids_by_user
             )
@@ -5463,6 +5440,7 @@ async def run_prune(form_data: PruneDataForm) -> dict:
         # autocommit mode.  The sync engine is retained by Open WebUI
         # specifically for startup and maintenance tasks.
         if form_data.run_vacuum:
+            _prog_stage("Running VACUUM")
             await asyncio.to_thread(_run_vacuum_sync, vector_cleaner)
         else:
             log.info("Skipping VACUUM optimization (not enabled)")
@@ -5479,6 +5457,7 @@ async def run_prune(form_data: PruneDataForm) -> dict:
         return {"ok": False, "error": str(e)}
     finally:
         # Always release lock, even if operation fails
+        _prog_end()
         PruneLock.release()
 
 
@@ -5487,7 +5466,7 @@ async def run_prune(form_data: PruneDataForm) -> dict:
 # manual admin UI + API (same deletion engine as the automatic passes)
 # ============================================================================
 
-PLUGIN_VERSION = "0.9.0"
+PLUGIN_VERSION = "0.10.0"
 MAX_RUN_LOG_LINES = 4000
 MAX_RUNS_KEPT = 20
 
@@ -5915,21 +5894,48 @@ def _run_summary(run: dict, log_tail: int = 0) -> dict:
     out = {k: v for k, v in run.items() if k != "log"}
     out["log_lines"] = len(run["log"])
     out["log"] = run["log"][-log_tail:] if log_tail else run["log"]
+    if run["status"] == "running" and _PROGRESS.get("active"):
+        out["progress"] = dict(_PROGRESS)
     return out
 
 
-async def _manual_execute(form_data: "PruneDataForm", run: dict):
+def _rate_override(body: dict, key: str):
+    """Optional per-run speed override; non-negative int or None."""
+    try:
+        value = int(body.get(key))
+    except (TypeError, ValueError):
+        return None
+    return value if value >= 0 else None
+
+
+async def _manual_execute(form_data: "PruneDataForm", run: dict, rates: dict = None):
     handler = _RunLogHandler(run["log"])
     log.addHandler(handler)
+    rates = rates or {}
+    _PACE["run_rows_per_second"] = rates.get("deletion_rows_per_second")
+    _PACE["run_scan_rows_per_second"] = rates.get("scan_rows_per_second")
     try:
         outcome = await run_prune(form_data)
-        run["result"] = outcome
+        if outcome.get("ok") and outcome.get("dry_run"):
+            # Store the UI-ready payload; PrunePreviewResult itself is not JSON
+            preview = outcome["preview"]
+            run["result"] = {
+                "ok": True,
+                "dry_run": True,
+                "total": preview.total_items(),
+                "summary": preview.get_summary_dict(),
+                "detail": preview.model_dump(),
+            }
+        else:
+            run["result"] = outcome
         run["status"] = "done" if outcome.get("ok") else "failed"
     except Exception as e:
         log.exception(f"Prune run failed: {e}")
         run["result"] = {"ok": False, "error": str(e)}
         run["status"] = "failed"
     finally:
+        _PACE["run_rows_per_second"] = None
+        _PACE["run_scan_rows_per_second"] = None
         log.removeHandler(handler)
         run["finished_at"] = int(time.time())
 
@@ -6022,47 +6028,28 @@ def mount_routes(app, settings: dict):
             "storage_provider": str(STORAGE_PROVIDER or "local"),
             "running": running,
             "current": _run_summary(current, log_tail=20) if current else None,
+            # Automatic passes have no run record but still report progress
+            "progress": dict(_PROGRESS) if _PROGRESS.get("active") else None,
         }
 
-    @router.post(f"{prefix}/api/preview", include_in_schema=False)
-    async def preview(request: Request, body: dict, user=Depends(get_admin_user)):
-        # Same bearer requirement as execute: preview is not destructive but
-        # it takes the global run lock and scans the whole database.
-        if not request.headers.get("authorization", "").lower().startswith("bearer "):
-            return JSONResponse(
-                status_code=403,
-                content={"ok": False, "error": "Bearer token required"},
-            )
-        form_data = PruneDataForm(**{**_sanitize_manual_form(body), "dry_run": True})
-        outcome = await run_prune(form_data)
-        if not outcome.get("ok"):
-            return JSONResponse(status_code=409, content=outcome)
-        result = outcome["preview"]
-        return {
-            "ok": True,
-            "total": result.total_items(),
-            "summary": result.get_summary_dict(),
-            "result": result.model_dump(),
-        }
-
-    @router.post(f"{prefix}/api/execute", include_in_schema=False)
-    async def execute(request: Request, body: dict, user=Depends(get_admin_user)):
-        # CSRF hardening: the UI always sends a Bearer header; never accept
-        # cookie-only auth for the destructive endpoint.
-        if not request.headers.get("authorization", "").lower().startswith("bearer "):
-            return JSONResponse(
-                status_code=403,
-                content={"ok": False, "error": "Bearer token required"},
-            )
+    def _start_manual_run(body: dict, user, dry_run: bool):
+        """Create a run record and launch preview/execute in the background."""
         if _STATE["lock"] is not None and _STATE["lock"].locked():
             return JSONResponse(
                 status_code=409,
                 content={"ok": False, "error": "A prune pass is already in progress"},
             )
-        form_data = PruneDataForm(**{**_sanitize_manual_form(body), "dry_run": False})
+        sanitized = _sanitize_manual_form(body)
+        rates = {
+            k: _rate_override(sanitized, k)
+            for k in ("deletion_rows_per_second", "scan_rows_per_second")
+        }
+        sanitized.pop("deletion_rows_per_second", None)
+        sanitized.pop("scan_rows_per_second", None)
+        form_data = PruneDataForm(**{**sanitized, "dry_run": dry_run})
         run = {
             "id": str(uuid.uuid4())[:8],
-            "mode": "manual",
+            "mode": "preview" if dry_run else "manual",
             "started_at": int(time.time()),
             "finished_at": None,
             "status": "running",
@@ -6079,8 +6066,35 @@ def mount_routes(app, settings: dict):
             run["finished_at"] = int(time.time())
             run["result"] = {"ok": False, "error": "another pass won the start race"}
 
-        _spawn(f"manual-{run['id']}", lambda: _manual_execute(form_data, run), on_skip)
+        _spawn(
+            f"{run['mode']}-{run['id']}",
+            lambda: _manual_execute(form_data, run, rates),
+            on_skip,
+        )
         return {"ok": True, "run_id": run["id"]}
+
+    @router.post(f"{prefix}/api/preview", include_in_schema=False)
+    async def preview(request: Request, body: dict, user=Depends(get_admin_user)):
+        # Same bearer requirement as execute: preview is not destructive but
+        # it takes the global run lock and scans the whole database. Runs in
+        # the background like execute; poll the run for progress and result.
+        if not request.headers.get("authorization", "").lower().startswith("bearer "):
+            return JSONResponse(
+                status_code=403,
+                content={"ok": False, "error": "Bearer token required"},
+            )
+        return _start_manual_run(body, user, dry_run=True)
+
+    @router.post(f"{prefix}/api/execute", include_in_schema=False)
+    async def execute(request: Request, body: dict, user=Depends(get_admin_user)):
+        # CSRF hardening: the UI always sends a Bearer header; never accept
+        # cookie-only auth for the destructive endpoint.
+        if not request.headers.get("authorization", "").lower().startswith("bearer "):
+            return JSONResponse(
+                status_code=403,
+                content={"ok": False, "error": "Bearer token required"},
+            )
+        return _start_manual_run(body, user, dry_run=False)
 
     @router.get(f"{prefix}/api/runs", include_in_schema=False)
     async def runs(user=Depends(get_admin_user)):
@@ -6121,6 +6135,10 @@ class Event:
         deletion_rows_per_second: int = Field(
             default=50,
             description="Speed limit for all pruning, in database rows per second, so large cleanups never slow down a live instance. Applies immediately, even to a pass that is already running. 0 = no limit.",
+        )
+        scan_rows_per_second: int = Field(
+            default=0,
+            description="Speed limit for the read-side scans (preview counts and orphan detection), in rows per second. Scans always yield between batches so the server stays responsive; set a limit only if a running preview still puts too much load on your database. 0 = no limit.",
         )
         event_recheck_minutes: int = Field(
             default=60,
@@ -6292,6 +6310,7 @@ class Event:
         # Snapshot valves; the module is a shared singleton reassigned per dispatch.
         v = self.valves.model_dump()
         _PACE["rows_per_second"] = max(0, int(v["deletion_rows_per_second"] or 0))
+        _PACE["scan_rows_per_second"] = max(0, int(v.get("scan_rows_per_second") or 0))
         name = __event_name__ or ""
 
         if name == "system.startup.completed":
@@ -6404,6 +6423,14 @@ font-weight:600;background:var(--danger-bg);color:var(--danger)}
 .badge.ok{background:rgba(21,147,95,.12);color:var(--ok)}
 pre.log{background:var(--bg);border:1px solid var(--border);border-radius:8px;
 padding:10px;max-height:320px;overflow:auto;font-size:12px;white-space:pre-wrap;margin:8px 0 0}
+.prog{margin:14px 0 4px;display:none}
+.prog .bar{height:8px;border-radius:999px;background:var(--border);overflow:hidden}
+.prog .fill{height:100%;width:0%;background:var(--accent);border-radius:999px;
+transition:width .4s ease}
+.prog.indet .fill{width:30%;animation:pslide 1.2s linear infinite;transition:none}
+@keyframes pslide{from{margin-left:-30%}to{margin-left:100%}}
+.prog .lbl{font-size:12px;color:var(--muted);margin-top:5px;display:flex;
+justify-content:space-between;gap:12px;flex-wrap:wrap}
 .msg{margin:10px 0;font-size:13px}
 .hint{color:var(--muted);font-size:12px}
 .tipi{cursor:help;border:1px solid var(--border);border-radius:50%;width:15px;height:15px;
@@ -6423,6 +6450,10 @@ color:var(--muted);flex:none;user-select:none}
   <button class="primary" id="btnPreview">Preview</button>
   <button class="danger" id="btnExecute">Execute…</button>
   <span id="status"></span>
+</div>
+<div class="prog" id="prog">
+  <div class="bar"><div class="fill" id="progFill"></div></div>
+  <div class="lbl"><span id="progStage"></span><span id="progCount"></span></div>
 </div>
 <div class="msg" id="msg"></div>
 
@@ -6445,6 +6476,12 @@ const SECTIONS = [
  {title:'🛡️ Safety', fields:[
   {k:'orphan_file_grace_hours',t:'num',label:'Protect uploads younger than',unit:'hours',val:24,
    tip:'Files younger than this are never treated as orphaned. Uploading and attaching are separate steps in Open WebUI, so this protects uploads not yet attached to a chat or knowledge base. 0 disables the protection.'},
+ ]},
+ {title:'🚦 Speed limits (this run only)', fields:[
+  {k:'scan_rows_per_second',t:'num',label:'Scan speed limit',unit:'rows/s',ph:'valve',
+   tip:'Caps how fast this run reads rows while scanning (preview counts and orphan detection). Scans always pause between batches so the server stays responsive. Empty = use the valve setting (default: no limit); 0 = no limit.'},
+  {k:'deletion_rows_per_second',t:'num',label:'Deletion speed limit',unit:'rows/s',ph:'valve',
+   tip:'Caps how fast Execute deletes rows so a live instance is never saturated. Empty = use the valve setting (default 50/s); 0 = no limit.'},
  ]},
  {title:'🕒 Age Rules', fields:[
   {k:'days',t:'num',label:'Delete chats older than',unit:'days',
@@ -6537,7 +6574,7 @@ function build(){
       if(f.t==='num'){
         const d=document.createElement('div');d.className='numrow';
         d.innerHTML=`<span>${f.label}</span><input type="number" min="0" id="f_${f.k}" `+
-          `${f.val!==undefined?`value="${f.val}"`:''} placeholder="off"><span class="unit">${f.unit}</span> ${tipIcon(f.tip)}`;
+          `${f.val!==undefined?`value="${f.val}"`:''} placeholder="${f.ph||'off'}"><span class="unit">${f.unit}</span> ${tipIcon(f.tip)}`;
         card.appendChild(d);
       }else if(f.t==='sel'){
         const d=document.createElement('div');d.className='numrow';
@@ -6558,11 +6595,12 @@ function build(){
   }
 }
 
+const ZERO_OK=new Set(['orphan_file_grace_hours','scan_rows_per_second','deletion_rows_per_second']);
 function form(){
   const f={};
   for(const sec of SECTIONS)for(const fl of sec.fields){
     const el=document.getElementById('f_'+fl.k);
-    if(fl.t==='num'){const n=parseInt(el.value,10);f[fl.k]=el.value&&Number.isFinite(n)&&n>0?n:(fl.k==='orphan_file_grace_hours'&&el.value==='0'?0:null);}
+    if(fl.t==='num'){const n=parseInt(el.value,10);f[fl.k]=el.value&&Number.isFinite(n)&&n>0?n:(ZERO_OK.has(fl.k)&&el.value==='0'?0:null);}
     else if(fl.t==='sel'){f[fl.k]=el.value;}
     else{f[fl.k]=el.checked;}
   }
@@ -6580,57 +6618,103 @@ async function api(path,opts={}){
 }
 
 const msg=t=>{document.getElementById('msg').textContent=t||'';};
+const fmt=n=>(n||0).toLocaleString();
 
-async function doPreview(){
-  const btn=document.getElementById('btnPreview');btn.disabled=true;msg('Previewing… this can take a while on large databases.');
-  try{
-    const data=await api('/api/preview',{method:'POST',body:JSON.stringify(form())});
-    msg('');
-    document.getElementById('previewCard').style.display='';
-    let html='';
-    for(const [group,items] of Object.entries(data.summary)){
-      const rows=Object.entries(items).filter(([,v])=>v>0);
-      if(!rows.length)continue;
-      html+=`<table><tr><th colspan="2">${group}</th></tr>`+
-        rows.map(([k,v])=>`<tr><td>${k}</td><td class="n">${v}</td></tr>`).join('')+'</table>';
-    }
-    html+=`<p class="total">Total items: ${data.total}</p>`;
-    if(data.total===0)html='<p>Nothing to delete — database is clean for the selected options.</p>';
-    document.getElementById('previewBody').innerHTML=html;
-  }catch(e){msg('Preview failed: '+e.message);}
-  btn.disabled=false;
+function setBusy(b){
+  document.getElementById('btnPreview').disabled=b;
+  document.getElementById('btnExecute').disabled=b;
+}
+
+function showProgress(p,mode){
+  const box=document.getElementById('prog');
+  if(!p){box.style.display='none';return;}
+  box.style.display='block';
+  const kind=mode==='preview'?'Preview':'Run';
+  document.getElementById('progStage').textContent=
+    kind+' · step '+(p.stages_done||1)+' · '+(p.stage||'working');
+  const fill=document.getElementById('progFill');
+  const count=document.getElementById('progCount');
+  if(p.total){
+    box.classList.remove('indet');
+    const pct=Math.min(100,Math.round(100*(p.done||0)/p.total));
+    fill.style.width=pct+'%';
+    count.textContent=fmt(p.done)+' / '+fmt(p.total)+' ('+pct+'%)';
+  }else{
+    box.classList.add('indet');
+    count.textContent=p.done?fmt(p.done)+' processed':'';
+  }
+}
+
+function renderPreview(result){
+  document.getElementById('previewCard').style.display='';
+  let html='';
+  for(const [group,items] of Object.entries(result.summary||{})){
+    const rows=Object.entries(items).filter(([,v])=>v>0);
+    if(!rows.length)continue;
+    html+=`<table><tr><th colspan="2">${group}</th></tr>`+
+      rows.map(([k,v])=>`<tr><td>${k}</td><td class="n">${fmt(v)}</td></tr>`).join('')+'</table>';
+  }
+  html+=`<p class="total">Total items: ${fmt(result.total)}</p>`;
+  if(!result.total)html='<p>Nothing to delete — database is clean for the selected options.</p>';
+  document.getElementById('previewBody').innerHTML=html;
 }
 
 let pollTimer=null;
 async function pollRun(id){
   try{
     const r=await api('/api/runs/'+id);
-    document.getElementById('runCard').style.display='';
-    document.getElementById('runId').textContent=id;
-    const b=document.getElementById('runStatus');
-    b.textContent=r.status;b.className='badge'+(r.status==='done'?' ok':'');
-    const pre=document.getElementById('runLog');
-    pre.textContent=r.log.join('\\n');pre.scrollTop=pre.scrollHeight;
-    if(r.status==='running'){pollTimer=setTimeout(()=>pollRun(id),2000);}
-    else{msg(r.status==='done'?'Run finished.':'Run failed — see log.');document.getElementById('btnExecute').disabled=false;}
-  }catch(e){msg('Poll failed: '+e.message);document.getElementById('btnExecute').disabled=false;}
+    const isPreview=r.mode==='preview';
+    showProgress(r.status==='running'?(r.progress||{}):null,r.mode);
+    if(!isPreview){
+      document.getElementById('runCard').style.display='';
+      document.getElementById('runId').textContent=id;
+      const b=document.getElementById('runStatus');
+      b.textContent=r.status;b.className='badge'+(r.status==='done'?' ok':'');
+      const pre=document.getElementById('runLog');
+      pre.textContent=r.log.join('\\n');pre.scrollTop=pre.scrollHeight;
+    }
+    if(r.status==='running'){pollTimer=setTimeout(()=>pollRun(id),1000);return;}
+    setBusy(false);
+    if(isPreview){
+      if(r.status==='done'&&r.result){msg('');renderPreview(r.result);}
+      else msg('Preview failed: '+((r.result&&r.result.error)||'see server log.'));
+    }else{
+      msg(r.status==='done'?'Run finished.':'Run failed — see log.');
+    }
+  }catch(e){msg('Poll failed: '+e.message);showProgress(null);setBusy(false);}
 }
 
-async function doExecute(){
+async function startRun(path,startMsg){
+  setBusy(true);msg(startMsg);
+  try{
+    const data=await api(path,{method:'POST',body:JSON.stringify(form())});
+    msg('');pollRun(data.run_id);
+  }catch(e){msg(e.message);showProgress(null);setBusy(false);}
+}
+
+function doPreview(){
+  document.getElementById('previewCard').style.display='none';
+  startRun('/api/preview','Starting preview…');
+}
+
+function doExecute(){
   const answer=prompt('This will PERMANENTLY DELETE the selected data.\\nType DELETE to confirm.');
   if(answer!=='DELETE')return;
-  const btn=document.getElementById('btnExecute');btn.disabled=true;msg('Starting run…');
-  try{
-    const data=await api('/api/execute',{method:'POST',body:JSON.stringify(form())});
-    msg('');pollRun(data.run_id);
-  }catch(e){msg('Execute failed: '+e.message);btn.disabled=false;}
+  startRun('/api/execute','Starting run…');
 }
 
 async function initStatus(){
   try{
     const s=await api('/api/status');
-    if(s.running&&s.current){msg('A prune run is already in progress.');pollRun(s.current.id);}
-    else if(s.running){document.getElementById('status').textContent='An automatic prune pass is currently running.';}
+    if(s.running&&s.current){msg('A prune run is already in progress.');setBusy(true);pollRun(s.current.id);}
+    else if(s.running){
+      document.getElementById('status').textContent='An automatic prune pass is currently running.';
+      showProgress(s.progress||{},s.progress&&s.progress.mode);
+      setTimeout(initStatus,2000);
+    }else{
+      document.getElementById('status').textContent='';
+      showProgress(null);
+    }
   }catch(e){}
 }
 
