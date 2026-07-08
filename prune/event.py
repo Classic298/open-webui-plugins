@@ -784,7 +784,25 @@ class ChromaDatabaseCleaner(VectorDatabaseCleaner):
         deleted_count = 0
         errors = []
 
-        # First, clean up orphaned database records
+        # Delete mapped orphans through the client first: Chroma releases its
+        # segment handles and removes the directory itself, which plain rmtree
+        # cannot do on Windows (an open data_level0.bin locks the directory).
+        client = getattr(self, "vector_db_client", None)
+        if client is not None:
+            for dir_uuid, collection_name in list(uuid_to_collection.items()):
+                if collection_name in expected_collections:
+                    continue
+                try:
+                    client.delete_collection(collection_name=collection_name)
+                    deleted_count += 1
+                    _prog_tick()
+                    uuid_to_collection.pop(dir_uuid, None)
+                    log.info(f"Deleted orphaned ChromaDB collection: {collection_name}")
+                except Exception as e:
+                    # Fall through to the directory sweep below
+                    log.debug(f"Client delete failed for {collection_name}: {e}")
+
+        # Then clean up orphaned database records
         try:
             deleted_count += self._cleanup_orphaned_database_records()
         except Exception as e:
@@ -792,7 +810,22 @@ class ChromaDatabaseCleaner(VectorDatabaseCleaner):
             log.error(error_msg)
             errors.append(error_msg)
 
-        # Then clean up physical directories
+        # Finally sweep leftover physical directories (strays with no mapping)
+        def rmtree_or_defer(path, label):
+            try:
+                shutil.rmtree(path)
+                log.info(f"Deleted orphaned ChromaDB directory: {label}")
+                return 1
+            except OSError as e:
+                if isinstance(e, PermissionError) or getattr(e, "winerror", None) == 32:
+                    # Windows: the running server still holds the mmap; the
+                    # mapping is gone, a sweep after the next restart reclaims it
+                    log.info(f"Deferred locked ChromaDB directory {label} (reclaimed after restart)")
+                else:
+                    errors.append(f"Failed to delete directory {label}: {e}")
+                    log.error(errors[-1])
+                return 0
+
         try:
             for collection_dir in self.vector_dir.iterdir():
                 if not collection_dir.is_dir() or collection_dir.name.startswith("."):
@@ -804,32 +837,9 @@ class ChromaDatabaseCleaner(VectorDatabaseCleaner):
 
                 # Delete if no corresponding collection name or collection is not expected
                 if collection_name is None:
-                    try:
-                        shutil.rmtree(collection_dir)
-                        deleted_count += 1
-                        log.info(
-                            f"Deleted orphaned ChromaDB directory (no mapping): {dir_uuid}"
-                        )
-                    except Exception as e:
-                        error_msg = (
-                            f"Failed to delete orphaned directory {dir_uuid}: {e}"
-                        )
-                        log.error(error_msg)
-                        errors.append(error_msg)
-
+                    deleted_count += rmtree_or_defer(collection_dir, f"(no mapping) {dir_uuid}")
                 elif collection_name not in expected_collections:
-                    try:
-                        shutil.rmtree(collection_dir)
-                        deleted_count += 1
-                        log.info(
-                            f"Deleted orphaned ChromaDB collection directory: {collection_name} ({dir_uuid})"
-                        )
-                    except Exception as e:
-                        error_msg = (
-                            f"Failed to delete collection directory {dir_uuid}: {e}"
-                        )
-                        log.error(error_msg)
-                        errors.append(error_msg)
+                    deleted_count += rmtree_or_defer(collection_dir, f"{collection_name} ({dir_uuid})")
                 else:
                     log.debug(
                         f"Keeping expected collection: {collection_name} ({dir_uuid})"
