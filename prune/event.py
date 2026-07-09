@@ -289,6 +289,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Generator, Optional, Set, Tuple
 from abc import ABC, abstractmethod
+from concurrent.futures import ThreadPoolExecutor
 
 # Optional database-specific imports
 try:
@@ -556,29 +557,12 @@ class VectorDatabaseCleaner(ABC):
         """Return the KB ids present in the shared metadata collection.
 
         Returns None when the collection or client is unavailable (so callers
-        can distinguish "nothing to do" from "empty"). Best-effort.
+        can distinguish "nothing to do" from "empty"). Reads only the ids —
+        the same id-extraction as any other collection — so backends that
+        override _collection_point_ids for an ids-only fetch (e.g. PGVector)
+        avoid dragging every KB's text and vector over the wire. Best-effort.
         """
-        client = getattr(self, "vector_db_client", None)
-        if client is None:
-            return None
-        try:
-            if not client.has_collection(KNOWLEDGE_BASES_COLLECTION):
-                return None
-            result = client.get(KNOWLEDGE_BASES_COLLECTION)
-        except Exception as e:
-            log.debug(f"Could not read {KNOWLEDGE_BASES_COLLECTION} collection: {e}")
-            return None
-
-        ids: Set[str] = set()
-        raw = getattr(result, "ids", None) if result is not None else None
-        for entry in raw or []:
-            # GetResult.ids is List[List[str]] but some backends return a flat
-            # list — handle both.
-            if isinstance(entry, (list, tuple)):
-                ids.update(str(i) for i in entry if i)
-            elif entry:
-                ids.add(str(entry))
-        return ids
+        return self._collection_point_ids(KNOWLEDGE_BASES_COLLECTION)
 
     def delete_kb_metadata(self, kb_ids) -> int:
         """Remove specific KB ids from the shared metadata collection.
@@ -658,14 +642,80 @@ class VectorDatabaseCleaner(ABC):
                 ids.add(str(entry))
         return ids
 
+    # How many per-user memory collections to probe concurrently when no bulk
+    # path exists. Each probe is an independent, blocking round trip to the
+    # vector store, so a small thread pool collapses N sequential network waits
+    # into roughly N/pool_size — this is what makes "Reconciling memory
+    # embeddings" crawl at one user per round trip on large installs. Backends
+    # whose client is not safe to call from multiple threads (e.g. PGVector's
+    # shared SQLAlchemy session) set this to 1 to stay sequential.
+    _MEMORY_PROBE_WORKERS = 8
+
+    def _present_memory_ids_by_user(
+        self, uids: "list"
+    ) -> Optional[dict]:
+        """Bulk-fetch {uid: {present point id, ...}} for user memory collections.
+
+        Returns None when the backend has no bulk path, signalling the caller to
+        probe each collection individually. Backends that can enumerate every
+        memory point in a single query (e.g. PGVector) override this to avoid
+        the per-user round trips that make reconciliation crawl. The point ids
+        returned MUST be in the same id space as the generic client's get()
+        (i.e. the resource ids the database rows are keyed by), so counts and
+        deletions stay correct.
+        """
+        return None
+
+    def _iter_present_memory_ids(
+        self, uids, tick: bool = True
+    ) -> Generator[Tuple[str, Set[str]], None, None]:
+        """Yield (uid, present_point_ids) for each user's memory collection.
+
+        Uses the backend bulk path when available; otherwise fans the
+        independent per-user probes out across a small thread pool so one slow
+        round trip does not stall the rest. Progress is ticked once per user
+        (from the consuming thread) unless ``tick`` is False.
+        """
+        uid_list = [str(u) for u in uids]
+        if not uid_list:
+            return
+
+        bulk = self._present_memory_ids_by_user(uid_list)
+        if bulk is not None:
+            for uid in uid_list:
+                if tick:
+                    _prog_tick()
+                yield uid, (bulk.get(uid) or set())
+            return
+
+        def _probe(uid: str) -> Tuple[str, Set[str]]:
+            return uid, (self._collection_point_ids(f"user-memory-{uid}") or set())
+
+        workers = max(1, min(self._MEMORY_PROBE_WORKERS, len(uid_list)))
+        if workers == 1:
+            for uid in uid_list:
+                if tick:
+                    _prog_tick()
+                yield _probe(uid)
+            return
+
+        # ThreadPoolExecutor.map preserves input order and yields each result as
+        # it becomes ready, so progress advances smoothly while many probes run
+        # concurrently underneath.
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            for uid, present in pool.map(_probe, uid_list):
+                if tick:
+                    _prog_tick()
+                yield uid, present
+
     def count_orphaned_memories(self, valid_ids_by_user: dict) -> int:
         """Count memories whose database row no longer exists, per active user."""
+        valid_ids_by_user = valid_ids_by_user or {}
         total = 0
-        for uid, valid in (valid_ids_by_user or {}).items():
-            _prog_tick()
-            present = self._collection_point_ids(f"user-memory-{uid}")
+        for uid, present in self._iter_present_memory_ids(valid_ids_by_user.keys()):
             if not present:
                 continue
+            valid = valid_ids_by_user.get(uid) or set()
             total += sum(1 for pid in present if pid not in valid)
         return total
 
@@ -674,16 +724,16 @@ class VectorDatabaseCleaner(ABC):
         client = getattr(self, "vector_db_client", None)
         if client is None:
             return 0
+        valid_ids_by_user = valid_ids_by_user or {}
         deleted = 0
-        for uid, valid in (valid_ids_by_user or {}).items():
-            _prog_tick()
-            collection = f"user-memory-{uid}"
-            present = self._collection_point_ids(collection)
+        for uid, present in self._iter_present_memory_ids(valid_ids_by_user.keys()):
             if not present:
                 continue
+            valid = valid_ids_by_user.get(uid) or set()
             orphans = [pid for pid in present if pid not in valid]
             if not orphans:
                 continue
+            collection = f"user-memory-{uid}"
             try:
                 client.delete(collection_name=collection, ids=orphans)
                 deleted += len(orphans)
@@ -697,8 +747,12 @@ class VectorDatabaseCleaner(ABC):
         self, valid_ids_by_user: dict
     ) -> Generator[Tuple[str, str], None, None]:
         """Yield (point_id, context) for each orphaned memory."""
-        for uid, valid in (valid_ids_by_user or {}).items():
-            present = self._collection_point_ids(f"user-memory-{uid}") or set()
+        valid_ids_by_user = valid_ids_by_user or {}
+        # Export listing, not the progress-tracked prune stage: don't tick.
+        for uid, present in self._iter_present_memory_ids(
+            valid_ids_by_user.keys(), tick=False
+        ):
+            valid = valid_ids_by_user.get(uid) or set()
             for pid in present:
                 if pid not in valid:
                     yield (pid, f"user-memory-{uid}")
@@ -1165,6 +1219,12 @@ class PGVectorDatabaseCleaner(VectorDatabaseCleaner):
     and safety features.
     """
 
+    # PGVector shares one SQLAlchemy session; never probe it from worker
+    # threads. The bulk override below removes the need for per-user probes
+    # entirely, but this keeps the fallback path (if the bulk query fails)
+    # sequential and session-safe.
+    _MEMORY_PROBE_WORKERS = 1
+
     def __init__(self, vector_db_client):
         """Initialize PGVector cleaner with client."""
         self.vector_db_client = vector_db_client
@@ -1433,6 +1493,80 @@ class PGVectorDatabaseCleaner(VectorDatabaseCleaner):
         expected_collections.add(KNOWLEDGE_BASES_COLLECTION)
 
         return expected_collections
+
+    def _collection_point_ids(self, collection_name: str) -> Optional[Set[str]]:
+        """Read one collection's point ids straight from document_chunk.
+
+        The generic base version calls client.get(), which materialises every
+        row's text and vector just to hand back the ids. Here we select only
+        the id column. Used for the shared KB-metadata collection and as the
+        per-user memory fallback when the bulk scan is unavailable; runs on the
+        shared session, so it stays sequential (see _MEMORY_PROBE_WORKERS).
+        A missing collection simply yields an empty set, which every caller
+        treats the same as "nothing to reconcile".
+        """
+        if not self.session or text is None:
+            return super()._collection_point_ids(collection_name)
+        try:
+            rows = self.session.execute(
+                text("SELECT id FROM document_chunk WHERE collection_name = :c"),
+                {"c": collection_name},
+            )
+            ids = {str(pid) for (pid,) in rows if pid is not None}
+            self.session.rollback()  # read-only transaction
+            return ids
+        except Exception as e:
+            if self.session:
+                self.session.rollback()
+            log.debug(f"PGVector id-only fetch failed for {collection_name}: {e}")
+            return super()._collection_point_ids(collection_name)
+
+    def _present_memory_ids_by_user(self, uids: "list") -> Optional[dict]:
+        """Enumerate every user's memory point ids in one query.
+
+        Every memory embedding lives as a row in the shared document_chunk
+        table keyed by (collection_name, id), where collection_name is
+        'user-memory-{uid}' and id is the memory row id — the same id space the
+        generic get() exposes. A single scan therefore replaces one existence
+        check plus one heavy per-user get() (which would also load the vector
+        column) for each of potentially thousands of users. Returns None on any
+        failure so the caller falls back to the sequential per-user probe.
+        """
+        if not self.session or text is None:
+            return None
+
+        wanted = {str(u) for u in uids}
+        if not wanted:
+            return {}
+
+        prefix = "user-memory-"
+        present = {uid: set() for uid in wanted}
+        try:
+            rows = self.session.execute(
+                text(
+                    "SELECT collection_name, id FROM document_chunk "
+                    "WHERE collection_name LIKE 'user-memory-%'"
+                )
+            )
+            for collection_name, pid in rows:
+                if not collection_name or pid is None:
+                    continue
+                if not str(collection_name).startswith(prefix):
+                    continue
+                uid = str(collection_name)[len(prefix) :]
+                bucket = present.get(uid)
+                if bucket is not None:  # only active users we were asked about
+                    bucket.add(str(pid))
+            self.session.rollback()  # read-only transaction
+        except Exception as e:
+            if self.session:
+                self.session.rollback()
+            log.debug(
+                f"PGVector bulk memory id scan failed, using per-user probe: {e}"
+            )
+            return None
+
+        return present
 
 
 def _ensure_milvus_default_connection():
