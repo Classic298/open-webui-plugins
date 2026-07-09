@@ -3,7 +3,7 @@ title: Prune
 author: classic298
 author_url: https://github.com/Classic298
 funding_url: https://github.com/Classic298/prune-open-webui
-version: 0.10.2
+version: 0.10.3
 required_open_webui_version: 0.10.2
 description: Automatic, throttled database and storage cleanup. Configure retention via Valves (0 = disabled); pruning runs event-driven on one worker only, slowly, so a live instance stays responsive.
 """
@@ -5519,7 +5519,7 @@ async def run_prune(form_data: PruneDataForm) -> dict:
 # manual admin UI + API (same deletion engine as the automatic passes)
 # ============================================================================
 
-PLUGIN_VERSION = "0.10.2"
+PLUGIN_VERSION = "0.10.3"
 MAX_RUN_LOG_LINES = 4000
 MAX_RUNS_KEPT = 20
 
@@ -6678,9 +6678,26 @@ function setBusy(b){
   document.getElementById('btnExecute').disabled=b;
 }
 
+// A preview is an unthrottled scan that often finishes inside a single
+// animation frame (small DB / localhost): the whole POST -> scan -> first
+// poll round-trip completes before the browser paints, so it coalesces the
+// show and the subsequent hide and the bar never actually appears. Hold the
+// bar for a minimum visible duration so it is always perceptible.
+const PROG_MIN_MS=650;
+let progShownAt=0,progHideTimer=null;
 function showProgress(p,mode){
   const box=document.getElementById('prog');
-  if(!p){box.style.display='none';return;}
+  if(!p){
+    // Defer hiding until the bar has been on screen long enough to paint.
+    if(box.style.display==='block'){
+      const remaining=PROG_MIN_MS-(Date.now()-progShownAt);
+      clearTimeout(progHideTimer);
+      if(remaining>0){progHideTimer=setTimeout(()=>{box.style.display='none';},remaining);return;}
+    }
+    box.style.display='none';return;
+  }
+  clearTimeout(progHideTimer);
+  if(box.style.display!=='block'){progShownAt=Date.now();}
   box.style.display='block';
   const kind=mode==='preview'?'Preview':'Run';
   document.getElementById('progStage').textContent=
