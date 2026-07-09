@@ -3,7 +3,7 @@ title: Prune
 author: classic298
 author_url: https://github.com/Classic298
 funding_url: https://github.com/Classic298/prune-open-webui
-version: 0.10.1
+version: 0.10.2
 required_open_webui_version: 0.10.2
 description: Automatic, throttled database and storage cleanup. Configure retention via Valves (0 = disabled); pruning runs event-driven on one worker only, slowly, so a live instance stays responsive.
 """
@@ -430,6 +430,20 @@ def collect_file_ids_from_text(text_val, out: Set[str], valid_ids: Set[str], odd
         json_escaped_id = json.dumps(odd_id)[1:-1]
         if odd_id in text_val or json_escaped_id in text_val:
             out.add(odd_id)
+
+
+def _collect_file_ids_from_texts(text_values, valid_ids, odd_ids=()):
+    """Regex-scan a chunk of JSON column texts and return the referenced file
+    ids. Runs in a worker thread (via asyncio.to_thread): the match work is
+    CPU-bound and would otherwise starve the request loop on a live instance
+    during a manual preview or run."""
+    found: Set[str] = set()
+    for text_val in text_values:
+        try:
+            collect_file_ids_from_text(text_val, found, valid_ids, odd_ids)
+        except Exception as e:
+            log.debug(f"Error scanning row text: {e}")
+    return found
 
 
 # Open WebUI stores one metadata embedding per knowledge base (its name +
@@ -4182,6 +4196,24 @@ async def get_active_file_ids(
                 async with get_async_db() as db:
                     total = await _count_rows(db, table)
                     _prog_stage(label, total)
+                    # Buffer the raw JSON texts and regex-scan them in a worker
+                    # thread. The match work is CPU-bound; doing it inline would
+                    # monopolize this worker's event loop and make the whole app
+                    # crawl while a preview or run scans a large database.
+                    chunk = []
+
+                    async def _flush():
+                        if not chunk:
+                            return
+                        found = await asyncio.to_thread(
+                            _collect_file_ids_from_texts,
+                            chunk,
+                            all_file_ids,
+                            odd_file_ids,
+                        )
+                        active_file_ids.update(found)
+                        chunk.clear()
+
                     async for row in stream_rows(
                         db,
                         id_col,
@@ -4191,12 +4223,11 @@ async def get_active_file_ids(
                         n += 1
                         _prog_tick()
                         for text_val in row[1:]:
-                            try:
-                                collect_file_ids_from_text(
-                                    text_val, active_file_ids, all_file_ids, odd_file_ids
-                                )
-                            except Exception as e:
-                                log.debug(f"Error scanning row {row[0]}: {e}")
+                            if text_val:
+                                chunk.append(text_val)
+                        if len(chunk) >= batch_size:
+                            await _flush()
+                    await _flush()
                 return n
 
             try:
@@ -5488,7 +5519,7 @@ async def run_prune(form_data: PruneDataForm) -> dict:
 # manual admin UI + API (same deletion engine as the automatic passes)
 # ============================================================================
 
-PLUGIN_VERSION = "0.10.1"
+PLUGIN_VERSION = "0.10.2"
 MAX_RUN_LOG_LINES = 4000
 MAX_RUNS_KEPT = 20
 
@@ -6159,8 +6190,8 @@ class Event:
             description="Speed limit for all pruning, in database rows per second, so large cleanups never slow down a live instance. Applies immediately, even to a pass that is already running. 0 = no limit.",
         )
         scan_rows_per_second: int = Field(
-            default=0,
-            description="Speed limit for the read-side scans (preview counts and orphan detection), in rows per second. Scans always yield between batches so the server stays responsive; set a limit only if a running preview still puts too much load on your database. 0 = no limit.",
+            default=10000,
+            description="Speed limit for the read-side scans (preview counts and orphan detection), in rows per second, so a preview or run never saturates a live database. Defaults to a bounded 10000/s; raise it for faster previews on a quiet instance, or set 0 for no limit.",
         )
         event_recheck_minutes: int = Field(
             default=60,
@@ -6501,7 +6532,7 @@ const SECTIONS = [
  ]},
  {title:'🚦 Speed limits (this run only)', fields:[
   {k:'scan_rows_per_second',t:'num',label:'Scan speed limit',unit:'rows/s',ph:'valve',
-   tip:'Caps how fast this run reads rows while scanning (preview counts and orphan detection). Scans always pause between batches so the server stays responsive. Empty = use the valve setting (default: no limit); 0 = no limit.'},
+   tip:'Caps how fast this run reads rows while scanning (preview counts and orphan detection) so a live instance stays responsive. Empty = use the valve setting (default 10000/s); 0 = no limit.'},
   {k:'deletion_rows_per_second',t:'num',label:'Deletion speed limit',unit:'rows/s',ph:'valve',
    tip:'Caps how fast Execute deletes rows so a live instance is never saturated. Empty = use the valve setting (default 50/s); 0 = no limit.'},
  ]},
@@ -6708,6 +6739,11 @@ async function pollRun(id){
 
 async function startRun(path,startMsg){
   setBusy(true);msg(startMsg);
+  // Show an indeterminate bar immediately. A preview is an unthrottled scan and
+  // often finishes within the round-trip before the first poll can observe the
+  // 'running' state, so relying on pollRun to reveal the bar means it never
+  // appears at all. pollRun still takes over once the first poll returns.
+  showProgress({},path.indexOf('preview')>=0?'preview':'manual');
   try{
     const data=await api(path,{method:'POST',body:JSON.stringify(form())});
     msg('');pollRun(data.run_id);
