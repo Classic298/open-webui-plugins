@@ -3,7 +3,7 @@ title: Prune
 author: classic298
 author_url: https://github.com/Classic298
 funding_url: https://github.com/Classic298/prune-open-webui
-version: 0.10.4
+version: 0.10.5
 required_open_webui_version: 0.10.2
 description: Automatic, throttled database and storage cleanup. Configure retention via Valves (0 = disabled); pruning runs event-driven on one worker only, slowly, so a live instance stays responsive.
 """
@@ -5519,7 +5519,7 @@ async def run_prune(form_data: PruneDataForm) -> dict:
 # manual admin UI + API (same deletion engine as the automatic passes)
 # ============================================================================
 
-PLUGIN_VERSION = "0.10.4"
+PLUGIN_VERSION = "0.10.5"
 MAX_RUN_LOG_LINES = 4000
 MAX_RUNS_KEPT = 20
 
@@ -6543,11 +6543,11 @@ const SECTIONS = [
   {k:'orphan_file_grace_hours',t:'num',label:'Protect uploads younger than',unit:'hours',val:24,
    tip:'Files younger than this are never treated as orphaned. Uploading and attaching are separate steps in Open WebUI, so this protects uploads not yet attached to a chat or knowledge base. 0 disables the protection.'},
  ]},
- {title:'🚦 Speed limits (this run only)', fields:[
-  {k:'scan_rows_per_second',t:'num',label:'Scan speed limit',unit:'rows/s',ph:'valve',
-   tip:'Caps how fast this run reads rows while scanning (preview counts and orphan detection) so a live instance stays responsive. Empty = use the valve setting (default 10000/s); 0 = no limit.'},
-  {k:'deletion_rows_per_second',t:'num',label:'Deletion speed limit',unit:'rows/s',ph:'valve',
-   tip:'Caps how fast Execute deletes rows so a live instance is never saturated. Empty = use the valve setting (default 50/s); 0 = no limit.'},
+ {title:'🚦 Speed (this run only)', fields:[
+  {k:'scan_rows_per_second',t:'num',label:'Scan speed',unit:'rows/s',ph:'valve',
+   tip:'Read speed for THIS run only, overriding the valve. Applies to preview counts and orphan detection. Higher = faster preview/scan; lower = gentler on a live database. Empty = use the valve default (10000/s); 0 = no limit.'},
+  {k:'deletion_rows_per_second',t:'num',label:'Deletion speed',unit:'rows/s',ph:'valve',
+   tip:'Delete speed for THIS run only, overriding the valve (Execute only). Higher = faster cleanup; lower = gentler on a live instance. Empty = use the valve default (50/s); 0 = no limit.'},
  ]},
  {title:'🕒 Age Rules', fields:[
   {k:'days',t:'num',label:'Delete chats older than',unit:'days',
