@@ -3,7 +3,7 @@ title: Prune
 author: classic298
 author_url: https://github.com/Classic298
 funding_url: https://github.com/Classic298/prune-open-webui
-version: 0.10.2
+version: 0.10.6
 required_open_webui_version: 0.10.2
 description: Automatic, throttled database and storage cleanup. Configure retention via Valves (0 = disabled); pruning runs event-driven on one worker only, slowly, so a live instance stays responsive.
 """
@@ -5519,7 +5519,7 @@ async def run_prune(form_data: PruneDataForm) -> dict:
 # manual admin UI + API (same deletion engine as the automatic passes)
 # ============================================================================
 
-PLUGIN_VERSION = "0.10.2"
+PLUGIN_VERSION = "0.10.6"
 MAX_RUN_LOG_LINES = 4000
 MAX_RUNS_KEPT = 20
 
@@ -6039,11 +6039,24 @@ def mount_routes(app, settings: dict):
     prefix = "/" + settings["route_prefix"].strip("/ ")
     if prefix == "/":
         prefix = "/prune"  # an empty valve would shadow the SPA at '/'
-    if any(getattr(r, "path", None) == prefix for r in app.router.routes):
-        # Module was re-executed (code update); the previous version's routes
-        # still serve. Handlers refresh on full restart.
-        log.warning("prune: routes already mounted by a previous version; restart to refresh them")
-        return
+    stale = [
+        r
+        for r in app.router.routes
+        if getattr(r, "path", None) == prefix
+        or str(getattr(r, "path", "")).startswith(prefix + "/")
+    ]
+    if stale:
+        # Module was re-executed (in-place code update). Starlette can't swap a
+        # route's handler in place, so the previous version's page and API keep
+        # serving until a full server restart -- which is why a freshly updated
+        # plugin still shows the old UI (e.g. a preview with no progress bar).
+        # Drop our stale routes here so the fresh handlers mounted below take
+        # effect on update, no restart required.
+        stale_ids = {id(r) for r in stale}
+        app.router.routes[:] = [
+            r for r in app.router.routes if id(r) not in stale_ids
+        ]
+        log.info("prune: refreshed %d route(s) after code update", len(stale))
     router = APIRouter()
 
     # ---- page: session-gated BEFORE any HTML is served; admins only ----
@@ -6530,11 +6543,11 @@ const SECTIONS = [
   {k:'orphan_file_grace_hours',t:'num',label:'Protect uploads younger than',unit:'hours',val:24,
    tip:'Files younger than this are never treated as orphaned. Uploading and attaching are separate steps in Open WebUI, so this protects uploads not yet attached to a chat or knowledge base. 0 disables the protection.'},
  ]},
- {title:'🚦 Speed limits (this run only)', fields:[
-  {k:'scan_rows_per_second',t:'num',label:'Scan speed limit',unit:'rows/s',ph:'valve',
-   tip:'Caps how fast this run reads rows while scanning (preview counts and orphan detection) so a live instance stays responsive. Empty = use the valve setting (default 10000/s); 0 = no limit.'},
-  {k:'deletion_rows_per_second',t:'num',label:'Deletion speed limit',unit:'rows/s',ph:'valve',
-   tip:'Caps how fast Execute deletes rows so a live instance is never saturated. Empty = use the valve setting (default 50/s); 0 = no limit.'},
+ {title:'🚦 Speed (this run only)', fields:[
+  {k:'scan_rows_per_second',t:'num',label:'Scan speed',unit:'rows/s',val:50000,ph:'valve',
+   tip:'Read speed for THIS run only, overriding the valve. Applies to preview counts and orphan detection. Higher = faster preview/scan; lower = gentler on a live database. Seeded here at 50000/s for snappy on-demand runs — clear the field to fall back to the valve default (10000/s); 0 = no limit.'},
+  {k:'deletion_rows_per_second',t:'num',label:'Deletion speed',unit:'rows/s',val:500,ph:'valve',
+   tip:'Delete speed for THIS run only, overriding the valve (Execute only). Higher = faster cleanup; lower = gentler on a live instance. Seeded here at 500/s for hand-run cleanups — clear the field to fall back to the valve default (50/s); 0 = no limit.'},
  ]},
  {title:'🕒 Age Rules', fields:[
   {k:'days',t:'num',label:'Delete chats older than',unit:'days',
@@ -6678,9 +6691,26 @@ function setBusy(b){
   document.getElementById('btnExecute').disabled=b;
 }
 
+// A preview is an unthrottled scan that often finishes inside a single
+// animation frame (small DB / localhost): the whole POST -> scan -> first
+// poll round-trip completes before the browser paints, so it coalesces the
+// show and the subsequent hide and the bar never actually appears. Hold the
+// bar for a minimum visible duration so it is always perceptible.
+const PROG_MIN_MS=650;
+let progShownAt=0,progHideTimer=null;
 function showProgress(p,mode){
   const box=document.getElementById('prog');
-  if(!p){box.style.display='none';return;}
+  if(!p){
+    // Defer hiding until the bar has been on screen long enough to paint.
+    if(box.style.display==='block'){
+      const remaining=PROG_MIN_MS-(Date.now()-progShownAt);
+      clearTimeout(progHideTimer);
+      if(remaining>0){progHideTimer=setTimeout(()=>{box.style.display='none';},remaining);return;}
+    }
+    box.style.display='none';return;
+  }
+  clearTimeout(progHideTimer);
+  if(box.style.display!=='block'){progShownAt=Date.now();}
   box.style.display='block';
   const kind=mode==='preview'?'Preview':'Run';
   document.getElementById('progStage').textContent=
