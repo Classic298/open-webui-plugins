@@ -3,7 +3,7 @@ title: Prune
 author: classic298
 author_url: https://github.com/Classic298
 funding_url: https://github.com/Classic298/prune-open-webui
-version: 0.10.3
+version: 0.10.4
 required_open_webui_version: 0.10.2
 description: Automatic, throttled database and storage cleanup. Configure retention via Valves (0 = disabled); pruning runs event-driven on one worker only, slowly, so a live instance stays responsive.
 """
@@ -5519,7 +5519,7 @@ async def run_prune(form_data: PruneDataForm) -> dict:
 # manual admin UI + API (same deletion engine as the automatic passes)
 # ============================================================================
 
-PLUGIN_VERSION = "0.10.3"
+PLUGIN_VERSION = "0.10.4"
 MAX_RUN_LOG_LINES = 4000
 MAX_RUNS_KEPT = 20
 
@@ -6039,11 +6039,24 @@ def mount_routes(app, settings: dict):
     prefix = "/" + settings["route_prefix"].strip("/ ")
     if prefix == "/":
         prefix = "/prune"  # an empty valve would shadow the SPA at '/'
-    if any(getattr(r, "path", None) == prefix for r in app.router.routes):
-        # Module was re-executed (code update); the previous version's routes
-        # still serve. Handlers refresh on full restart.
-        log.warning("prune: routes already mounted by a previous version; restart to refresh them")
-        return
+    stale = [
+        r
+        for r in app.router.routes
+        if getattr(r, "path", None) == prefix
+        or str(getattr(r, "path", "")).startswith(prefix + "/")
+    ]
+    if stale:
+        # Module was re-executed (in-place code update). Starlette can't swap a
+        # route's handler in place, so the previous version's page and API keep
+        # serving until a full server restart -- which is why a freshly updated
+        # plugin still shows the old UI (e.g. a preview with no progress bar).
+        # Drop our stale routes here so the fresh handlers mounted below take
+        # effect on update, no restart required.
+        stale_ids = {id(r) for r in stale}
+        app.router.routes[:] = [
+            r for r in app.router.routes if id(r) not in stale_ids
+        ]
+        log.info("prune: refreshed %d route(s) after code update", len(stale))
     router = APIRouter()
 
     # ---- page: session-gated BEFORE any HTML is served; admins only ----
