@@ -4155,6 +4155,274 @@ def count_audio_cache_files(max_age_days: Optional[int]) -> int:
     return count
 
 
+async def get_preview_detail_page(
+    form_data: PruneDataForm, category: str, page: int, page_size: int
+) -> dict:
+    """Return one read-only page of identifiers selected by the preview rules."""
+    page = max(1, page)
+    page_size = 100 if page_size == 100 else 50
+    start = (page - 1) * page_size
+
+    async def collect(rows):
+        items = []
+        index = 0
+        async for row in rows:
+            if index >= start and len(items) < page_size:
+                items.append(row)
+            index += 1
+            if len(items) == page_size:
+                break
+        return items
+
+    async def owned_rows(
+        model,
+        owner_column,
+        shared_resource_type=None,
+        shared_exempt=True,
+        label_column=None,
+    ):
+        all_users = (await Users.get_users())["users"]
+        active_user_ids = {str(user.id) for user in all_users}
+        exempt_ids = set()
+        if shared_resource_type and shared_exempt:
+            exempt_ids = await get_shared_resource_ids(
+                shared_resource_type, active_user_ids
+            )
+        async with get_async_db_context() as db:
+            async def rows():
+                columns = (model.id, owner_column)
+                if label_column is not None:
+                    columns += (label_column,)
+                async for row in stream_rows(db, *columns):
+                    record_id, owner_id = row[:2]
+                    if (
+                        str(owner_id) not in active_user_ids
+                        and str(record_id) not in exempt_ids
+                    ):
+                        item = {"id": str(record_id), "owner": str(owner_id)}
+                        if label_column is not None:
+                            item["title"] = row[2] or "(untitled)"
+                        yield item
+
+            return await collect(rows())
+
+    if category == "inactive_users":
+        cutoff_time = int(time.time()) - (form_data.delete_inactive_users_days or 0) * 86400
+        users = (await Users.get_users())["users"] if form_data.delete_inactive_users_days else []
+        rows = (
+            {
+                "id": str(user.id),
+                "label": getattr(user, "email", None) or getattr(user, "name", None) or str(user.id),
+                "role": getattr(user, "role", None) or "",
+            }
+            for user in users
+            if (not form_data.exempt_admin_users or user.role != "admin")
+            and (not form_data.exempt_pending_users or user.role != "pending")
+            and user.last_active_at < cutoff_time
+        )
+        items = list(rows)[start : start + page_size]
+    elif category == "old_chats":
+        if form_data.days is None:
+            items = []
+        else:
+            cutoff_time = int(time.time()) - form_data.days * 86400
+            conditions = [Chat.updated_at < cutoff_time]
+            if form_data.exempt_archived_chats:
+                conditions.append(or_(Chat.archived == False, Chat.archived == None))
+            if form_data.exempt_pinned_chats and hasattr(Chat, "pinned"):
+                conditions.append(or_(Chat.pinned == False, Chat.pinned == None))
+            if form_data.exempt_chats_in_folders and hasattr(Chat, "folder_id"):
+                conditions.append(Chat.folder_id == None)
+            async with get_async_db_context() as db:
+                result = await db.execute(
+                    select(Chat.id, Chat.user_id, Chat.title)
+                    .where(and_(*conditions))
+                    .offset(start)
+                    .limit(page_size)
+                )
+                items = [
+                    {"id": str(row[0]), "owner": str(row[1]), "title": row[2] or "(untitled)"}
+                    for row in result.fetchall()
+                ]
+    elif category == "old_knowledge_bases":
+        if not form_data.delete_knowledge_bases_older_than_days:
+            items = []
+        else:
+            cutoff_time = int(time.time()) - form_data.delete_knowledge_bases_older_than_days * 86400
+            async with get_async_db_context() as db:
+                result = await db.execute(
+                    select(Knowledge.id, Knowledge.user_id, Knowledge.name)
+                    .where(_knowledge_age_column(form_data.knowledge_bases_age_field) < cutoff_time)
+                    .offset(start)
+                    .limit(page_size)
+                )
+                items = [
+                    {"id": str(row[0]), "owner": str(row[1]), "title": row[2] or "(unnamed)"}
+                    for row in result.fetchall()
+                ]
+    elif category in {
+        "orphaned_chats", "orphaned_tools", "orphaned_functions", "orphaned_prompts",
+        "orphaned_knowledge_bases", "orphaned_models", "orphaned_notes", "orphaned_skills",
+        "orphaned_folders",
+    }:
+        model_map = {
+            "orphaned_chats": (Chat, Chat.user_id, None, True, Chat.title),
+            "orphaned_tools": (Tool, Tool.user_id, "tool", form_data.exempt_shared_orphaned_tools, None),
+            "orphaned_functions": (Function, Function.user_id, None, True, None),
+            "orphaned_prompts": (Prompt, Prompt.user_id, "prompt", form_data.exempt_shared_orphaned_prompts, None),
+            "orphaned_knowledge_bases": (Knowledge, Knowledge.user_id, "knowledge", form_data.exempt_shared_orphaned_knowledge_bases, Knowledge.name),
+            "orphaned_models": (Model, Model.user_id, "model", form_data.exempt_shared_orphaned_models, None),
+            "orphaned_notes": (Note, Note.user_id, "note", form_data.exempt_shared_orphaned_notes, None),
+            "orphaned_skills": (Skill, Skill.user_id, "skill", form_data.exempt_shared_orphaned_skills, None),
+            "orphaned_folders": (Folder, Folder.user_id, None, True, None),
+        }
+        model, owner_column, shared_type, shared_exempt, label_column = model_map[category]
+        items = await owned_rows(
+            model, owner_column, shared_type, shared_exempt, label_column
+        )
+    elif category == "orphaned_chat_messages":
+        async with get_async_db_context() as db:
+            result = await db.execute(
+                select(ChatMessage.id, ChatMessage.chat_id)
+                .where(not_(ChatMessage.chat_id.in_(select(Chat.id))))
+                .offset(start)
+                .limit(page_size)
+            )
+            items = [{"id": str(row[0]), "parent": str(row[1])} for row in result.fetchall()]
+    elif category == "old_channel_messages":
+        if form_data.channel_message_max_age_days is None or Message is None:
+            items = []
+        else:
+            cutoff_ns = (int(time.time()) - form_data.channel_message_max_age_days * 86400) * 1_000_000_000
+            async with get_async_db_context() as db:
+                result = await db.execute(
+                    select(Message.id, Message.channel_id)
+                    .where(_old_channel_message_filter(cutoff_ns, form_data.exempt_pinned_channel_messages))
+                    .offset(start)
+                    .limit(page_size)
+                )
+                items = [{"id": str(row[0]), "parent": str(row[1])} for row in result.fetchall()]
+    elif category in {"orphaned_automations", "orphaned_automation_runs"}:
+        if Automation is None:
+            items = []
+        else:
+            all_users = (await Users.get_users())["users"]
+            active_user_ids = {str(user.id) for user in all_users}
+            async with get_async_db_context() as db:
+                all_automation_ids = set()
+                orphaned_automation_ids = set()
+                async for automation_id, owner_id in stream_rows(
+                    db, Automation.id, Automation.user_id
+                ):
+                    all_automation_ids.add(automation_id)
+                    if str(owner_id) not in active_user_ids:
+                        orphaned_automation_ids.add(automation_id)
+                if category == "orphaned_automations":
+                    async def rows():
+                        async for automation_id, owner_id in stream_rows(
+                            db, Automation.id, Automation.user_id
+                        ):
+                            if automation_id in orphaned_automation_ids:
+                                yield {"id": str(automation_id), "owner": str(owner_id)}
+
+                    items = await collect(rows())
+                elif AutomationRun is None:
+                    items = []
+                else:
+                    async def rows():
+                        async for run_id, automation_id in stream_rows(
+                            db, AutomationRun.id, AutomationRun.automation_id
+                        ):
+                            if (
+                                automation_id is None
+                                or automation_id not in all_automation_ids
+                                or automation_id in orphaned_automation_ids
+                            ):
+                                yield {"id": str(run_id), "parent": str(automation_id)}
+
+                    items = await collect(rows())
+    elif category in {"orphaned_channels", "orphaned_channel_messages"}:
+        if Channel is None or Message is None:
+            items = []
+        else:
+            all_users = (await Users.get_users())["users"]
+            active_user_ids = {str(user.id) for user in all_users}
+            async with get_async_db_context() as db:
+                all_channel_ids = set()
+                orphaned_channel_ids = set()
+                async for channel_id, owner_id in stream_rows(
+                    db, Channel.id, Channel.user_id
+                ):
+                    all_channel_ids.add(channel_id)
+                    if str(owner_id) not in active_user_ids:
+                        orphaned_channel_ids.add(channel_id)
+                if category == "orphaned_channels":
+                    async def rows():
+                        async for channel_id, owner_id in stream_rows(
+                            db, Channel.id, Channel.user_id
+                        ):
+                            if channel_id in orphaned_channel_ids:
+                                yield {"id": str(channel_id), "owner": str(owner_id)}
+
+                    items = await collect(rows())
+                else:
+                    async def rows():
+                        async for message_id, channel_id in stream_rows(
+                            db, Message.id, Message.channel_id
+                        ):
+                            if channel_id is None:
+                                continue
+                            if (
+                                form_data.delete_orphaned_channel_messages
+                                and channel_id not in all_channel_ids
+                            ) or (
+                                form_data.delete_orphaned_channels
+                                and channel_id in orphaned_channel_ids
+                            ):
+                                yield {"id": str(message_id), "parent": str(channel_id)}
+
+                    items = await collect(rows())
+    elif category == "orphaned_uploads":
+        active_paths = await _get_active_file_paths(set())
+        provider = (STORAGE_PROVIDER or "local").lower()
+
+        def scan_uploads():
+            items = []
+            index = 0
+            for ref, name, size in iter_storage_objects():
+                if ref in active_paths or name in active_paths:
+                    continue
+                if provider in ("gcs", "azure") and "/" in name:
+                    continue
+                if index >= start and len(items) < page_size:
+                    item = {"id": ref, "label": name}
+                    if size is not None:
+                        item["bytes"] = str(size)
+                    items.append(item)
+                index += 1
+                if len(items) == page_size:
+                    break
+            return items
+
+        items = await asyncio.to_thread(scan_uploads)
+    elif category == "audio_cache_files":
+        cutoff_time = time.time() - (form_data.audio_cache_max_age_days or 0) * 86400
+        paths = []
+        if form_data.audio_cache_max_age_days is not None:
+            for audio_dir in (Path(CACHE_DIR) / "audio" / "speech", Path(CACHE_DIR) / "audio" / "transcriptions"):
+                if audio_dir.exists():
+                    paths.extend(
+                        {"id": str(path), "label": path.name}
+                        for path in audio_dir.iterdir()
+                        if path.is_file() and path.stat().st_mtime < cutoff_time
+                    )
+        items = paths[start : start + page_size]
+    else:
+        return {"items": [], "available": False}
+
+    return {"items": items, "available": True}
+
+
 async def get_active_file_ids(
     knowledge_bases=None, active_user_ids=None, preserved_kb_ids=None
 ) -> Set[str]:
@@ -6296,6 +6564,31 @@ def mount_routes(app, settings: dict):
             )
         return _start_manual_run(body, user, dry_run=False)
 
+    @router.get(f"{prefix}/api/runs/{{run_id}}/details", include_in_schema=False)
+    async def preview_details(
+        run_id: str,
+        category: str,
+        page: int = 1,
+        page_size: int = 50,
+        user=Depends(get_admin_user),
+    ):
+        run = next((item for item in _STATE["runs"] if item["id"] == run_id), None)
+        if run is None or run["mode"] != "preview" or run["status"] != "done":
+            return JSONResponse(status_code=404, content={"error": "Preview not found"})
+        try:
+            details = await get_preview_detail_page(
+                PruneDataForm(**run["form"]), category, page, page_size
+            )
+            details.update(
+                {"page": max(1, page), "page_size": 100 if page_size == 100 else 50}
+            )
+            return details
+        except Exception as e:
+            log.warning(f"prune preview details failed for {category}: {e}")
+            return JSONResponse(
+                status_code=500, content={"error": "Could not load preview details"}
+            )
+
     @router.get(f"{prefix}/api/runs", include_in_schema=False)
     async def runs(user=Depends(get_admin_user)):
         return {"runs": [_run_summary(r, log_tail=5) for r in _STATE["runs"]]}
@@ -6642,6 +6935,14 @@ color:var(--muted);flex:none;user-select:none}
 .warn{display:none;margin:-2px 0 8px 27px;padding:7px 11px;border-radius:8px;
 background:var(--warn-bg);border:1px solid var(--warn);color:var(--warn);
 font-size:12px;line-height:1.45}
+.detail-row td{padding:8px 10px;background:var(--bg)}
+.detail-toggle{font:inherit;color:var(--accent);background:none;border:0;padding:0;cursor:pointer;text-align:left}
+.detail-icon{color:var(--muted);padding:2px 0 2px 8px}
+.detail-chevron{display:inline-block;transition:transform .15s ease}
+.detail-chevron.open{transform:rotate(180deg)}
+.detail-export{margin-left:auto}
+.detail-controls{display:flex;align-items:center;gap:8px;margin:4px 0 8px}
+.detail-list{margin:0;padding:0;list-style:none;max-height:260px;overflow:auto;font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:12px}
 </style>
 </head>
 <body data-prefix="__PREFIX__">
@@ -6875,18 +7176,93 @@ function showProgress(p,mode){
   }
 }
 
-function renderPreview(result){
+const SUMMARY_KEYS={
+    'Inactive users':'inactive_users','Old chats (age-based)':'old_chats','Orphaned chats':'orphaned_chats',
+    'Orphaned chat messages':'orphaned_chat_messages','Orphaned automations':'orphaned_automations',
+    'Orphaned automation runs':'orphaned_automation_runs','Old channel messages (age-based)':'old_channel_messages',
+    'Orphaned channels':'orphaned_channels','Orphaned channel messages':'orphaned_channel_messages',
+    'Orphaned file records':'orphaned_files','Orphaned upload files':'orphaned_uploads','Orphaned tools':'orphaned_tools',
+    'Orphaned functions':'orphaned_functions','Orphaned prompts':'orphaned_prompts','Orphaned knowledge bases':'orphaned_knowledge_bases',
+    'Old knowledge bases (age-based)':'old_knowledge_bases','Orphaned models':'orphaned_models','Orphaned notes':'orphaned_notes',
+    'Orphaned skills':'orphaned_skills','Orphaned folders':'orphaned_folders','Orphaned vector collections':'orphaned_vector_collections',
+    'Orphaned KB metadata embeddings':'orphaned_kb_metadata','Orphaned memories':'orphaned_memories','Old audio cache files':'audio_cache_files'
+};
+let previewRunId=null;
+function renderPreview(result,runId){
+    previewRunId=runId;
   document.getElementById('previewCard').style.display='';
   let html='';
   for(const [group,items] of Object.entries(result.summary||{})){
     const rows=Object.entries(items).filter(([,v])=>v>0);
     if(!rows.length)continue;
     html+=`<table><tr><th colspan="2">${group}</th></tr>`+
-      rows.map(([k,v])=>`<tr><td>${k}</td><td class="n">${fmt(v)}</td></tr>`).join('')+'</table>';
+            rows.map(([k,v])=>`<tr><td><button class="detail-toggle" data-category="${SUMMARY_KEYS[k]}" data-total="${v}" aria-expanded="false">${k}</button></td><td class="n">${fmt(v)} <button class="detail-toggle detail-icon" data-category="${SUMMARY_KEYS[k]}" data-total="${v}" aria-expanded="false" aria-label="Show details for ${k}"><span class="detail-chevron" aria-hidden="true">⌄</span></button></td></tr><tr class="detail-row" style="display:none"><td colspan="2"></td></tr>`).join('')+'</table>';
   }
   html+=`<p class="total">Total items: ${fmt(result.total)}</p>`;
   if(!result.total)html='<p>Nothing to delete — database is clean for the selected options.</p>';
-  document.getElementById('previewBody').innerHTML=html;
+    const body=document.getElementById('previewBody');body.innerHTML=html;
+    body.querySelectorAll('.detail-toggle').forEach(button=>button.onclick=()=>toggleDetails(button));
+}
+
+async function toggleDetails(button){
+    const row=button.parentElement.parentElement.nextElementSibling;
+    const controls=button.closest('tr').querySelectorAll('.detail-toggle');
+    const chevron=button.closest('tr').querySelector('.detail-chevron');
+    if(row.style.display!=='none'){row.style.display='none';controls.forEach(control=>control.setAttribute('aria-expanded','false'));chevron.classList.remove('open');return;}
+    row.style.display='';
+    controls.forEach(control=>control.setAttribute('aria-expanded','true'));
+    chevron.classList.add('open');
+    const cell=row.firstElementChild;cell.textContent='Loading…';
+    await loadDetails(button,cell,1,50);
+}
+
+async function loadDetails(button,cell,page,pageSize){
+    try{
+        const data=await api('/api/runs/'+previewRunId+'/details?category='+encodeURIComponent(button.dataset.category)+'&page='+page+'&page_size='+pageSize);
+        if(!data.available){cell.textContent='This backend reports this category as a count only.';return;}
+        cell.textContent='';
+        const controls=document.createElement('div');controls.className='detail-controls';
+        const size=document.createElement('select');
+        [50,100].forEach(value=>{const option=document.createElement('option');option.value=value;option.textContent=value+' per page';option.selected=value===pageSize;size.appendChild(option);});
+        size.onchange=()=>loadDetails(button,cell,1,Number(size.value));controls.appendChild(size);
+        const exportButton=document.createElement('button');exportButton.className='detail-export';exportButton.textContent='Export JSON';exportButton.onclick=()=>exportDetails(button,exportButton);controls.appendChild(exportButton);
+        const previous=document.createElement('button');previous.textContent='Previous';previous.disabled=page===1;previous.onclick=()=>loadDetails(button,cell,page-1,pageSize);controls.appendChild(previous);
+        const next=document.createElement('button');next.textContent='Next';next.disabled=data.items.length<pageSize||page*pageSize>=Number(button.dataset.total);next.onclick=()=>loadDetails(button,cell,page+1,pageSize);controls.appendChild(next);
+        const label=document.createElement('span');label.textContent='Page '+page;controls.appendChild(label);cell.appendChild(controls);
+        const list=document.createElement('ol');list.className='detail-list';
+        for(const [index,item] of data.items.entries()){const entry=document.createElement('li');entry.textContent=((page-1)*pageSize+index+1)+'. '+Object.entries(item).map(([key,value])=>key+': '+value).join(' · ');list.appendChild(entry);}
+        if(!data.items.length){const entry=document.createElement('li');entry.textContent='No matching items remain.';list.appendChild(entry);}
+        cell.appendChild(list);
+    }catch(error){cell.textContent='Could not load details: '+error.message;}
+}
+
+async function exportDetails(button,exportButton){
+    const category=button.dataset.category;
+    const total=Number(button.dataset.total);
+    const originalText=exportButton.textContent;
+    exportButton.disabled=true;exportButton.textContent='Exporting…';
+    try{
+        const pageSize=100,items=[];
+        for(let page=1;items.length<total;page++){
+            const data=await api('/api/runs/'+previewRunId+'/details?category='+encodeURIComponent(category)+'&page='+page+'&page_size='+pageSize);
+            if(!data.available)throw new Error('This category cannot be exported.');
+            items.push(...data.items);
+            if(data.items.length<pageSize)break;
+        }
+        const payload={
+            category,
+            preview_run_id:previewRunId,
+            exported_at:new Date().toISOString(),
+            item_count:items.length,
+            items
+        };
+        const blob=new Blob([JSON.stringify(payload,null,2)],{type:'application/json'});
+        const link=document.createElement('a');
+        link.href=URL.createObjectURL(blob);
+        link.download='prune-preview-'+category+'-'+previewRunId+'.json';
+        document.body.appendChild(link);link.click();link.remove();URL.revokeObjectURL(link.href);
+    }catch(error){alert('Export failed: '+error.message);}
+    finally{exportButton.disabled=false;exportButton.textContent=originalText;}
 }
 
 let pollTimer=null;
@@ -6906,7 +7282,7 @@ async function pollRun(id){
     if(r.status==='running'){pollTimer=setTimeout(()=>pollRun(id),1000);return;}
     setBusy(false);
     if(isPreview){
-      if(r.status==='done'&&r.result){msg('');renderPreview(r.result);}
+    if(r.status==='done'&&r.result){msg('');renderPreview(r.result,id);}
       else msg('Preview failed: '+((r.result&&r.result.error)||'see server log.'));
     }else{
       msg(r.status==='done'?'Run finished.':'Run failed — see log.');
