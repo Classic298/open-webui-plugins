@@ -3,7 +3,7 @@ title: Prune
 author: classic298
 author_url: https://github.com/Classic298
 funding_url: https://github.com/Classic298/prune-open-webui
-version: 0.10.6
+version: 0.10.7
 required_open_webui_version: 0.10.2
 description: Automatic, throttled database and storage cleanup. Configure retention via Valves (0 = disabled); pruning runs event-driven on one worker only, slowly, so a live instance stays responsive.
 """
@@ -6404,8 +6404,8 @@ class Event:
             description="Delete leftover search-index entries of knowledge bases that no longer exist (every knowledge base has one hidden embedding used for searching across knowledge bases).",
         )
         delete_orphaned_memories: bool = Field(
-            default=True,
-            description="Delete orphaned memories: leftover embeddings whose memory entry no longer exists, and the stored memories of deleted users.\n\n---\n\n#### 🧰 Orphaned: Workspace",
+            default=False,
+            description="Off by default: memory reconciliation probes each user's vector collection one by one (~1 min/user without dedicated DB indexes, so 1000 users can take 1000+ min on a constrained database). When on, removes leftover embeddings whose memory entry is gone, plus the stored memories of deleted users.\n\n---\n\n#### 🧰 Orphaned: Workspace",
         )
         delete_orphaned_prompts: bool = Field(
             default=True, description="Delete prompts that belonged to deleted users."
@@ -6589,10 +6589,12 @@ _PAGE_HTML = """<!doctype html>
 <style>
 :root{color-scheme:light dark;--bg:#f3f4f6;--surface:#fff;--text:#14171c;--muted:#666d78;
 --border:rgba(18,22,28,.12);--accent:#1f242c;--fg-on-accent:#fff;
---danger:#c5413f;--danger-bg:rgba(197,65,63,.1);--ok:#15935f;--r:12px}
+--danger:#c5413f;--danger-bg:rgba(197,65,63,.1);--ok:#15935f;
+--warn:#8a6410;--warn-bg:rgba(180,120,10,.11);--r:12px}
 @media(prefers-color-scheme:dark){:root{--bg:#0c0e12;--surface:#15181e;--text:#e8eaef;
 --muted:#a0a7b2;--border:rgba(255,255,255,.1);--accent:#e8eaef;--fg-on-accent:#14171c;
---danger:#f0726f;--danger-bg:rgba(240,114,111,.12);--ok:#46cf94}}
+--danger:#f0726f;--danger-bg:rgba(240,114,111,.12);--ok:#46cf94;
+--warn:#e8b765;--warn-bg:rgba(232,183,101,.13)}}
 *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);
 font:14px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif}
 .wrap{max-width:880px;margin:0 auto;padding:24px 16px 80px}
@@ -6637,6 +6639,9 @@ justify-content:space-between;gap:12px;flex-wrap:wrap}
 display:inline-flex;align-items:center;justify-content:center;font-size:10px;
 color:var(--muted);flex:none;user-select:none}
 .unit{color:var(--muted);font-size:12px}
+.warn{display:none;margin:-2px 0 8px 27px;padding:7px 11px;border-radius:8px;
+background:var(--warn-bg);border:1px solid var(--warn);color:var(--warn);
+font-size:12px;line-height:1.45}
 </style>
 </head>
 <body data-prefix="__PREFIX__">
@@ -6716,8 +6721,9 @@ const SECTIONS = [
    tip:'A knowledge base still reachable by a living user, an existing group or a public grant is kept, with all its files and vectors.'},
   {k:'delete_orphaned_kb_metadata',t:'chk',def:true,label:'Leftover search-index entries',
    tip:'Every knowledge base has one hidden embedding used for searching across knowledge bases; this removes entries whose knowledge base is gone.'},
-  {k:'delete_orphaned_memories',t:'chk',def:true,label:'Orphaned memories',
-   tip:'Leftover memory embeddings whose entry was deleted, and the stored memories of deleted users.'},
+  {k:'delete_orphaned_memories',t:'chk',def:false,label:'Orphaned memories',
+   tip:'Leftover memory embeddings whose entry was deleted, and the stored memories of deleted users.',
+   warn:'Not recommended yet: memory scanning runs per-user (~1 min each without DB indexes), so ~1000 users can take 1000+ minutes on a constrained database.'},
  ]},
  {title:'🧰 Orphaned: Workspace', fields:[
   {k:'delete_orphaned_prompts',t:'chk',def:true,label:'Prompts of deleted users',tip:'Prompts whose owner account no longer exists.'},
@@ -6785,6 +6791,13 @@ function build(){
         const l=document.createElement('label');l.className='row'+(f.parent?' sub':'');
         l.innerHTML=`<input type="checkbox" id="f_${f.k}" ${f.def?'checked':''}><span>${f.label}</span> ${tipIcon(f.tip)}`;
         card.appendChild(l);
+        if(f.warn){
+          const w=document.createElement('div');w.className='warn';w.textContent=f.warn;
+          card.appendChild(w);
+          const c=l.querySelector('input');
+          const syncWarn=()=>{w.style.display=c.checked?'block':'none';};
+          c.addEventListener('change',syncWarn);syncWarn();
+        }
         if(f.parent){
           const pEl=document.getElementById('f_'+f.parent),c=l.querySelector('input');
           const sync=()=>{c.disabled=!pEl.checked;l.style.opacity=pEl.checked?'':'0.45';};
