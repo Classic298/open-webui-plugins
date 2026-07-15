@@ -20,7 +20,6 @@ _IV_BUILD = "2.2.0"
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field
 
-
 # ---------------------------------------------------------------------------
 # Injected CSS — Theme variables (light default, dark via data-theme)
 # ---------------------------------------------------------------------------
@@ -3408,8 +3407,12 @@ INJECTED_SCRIPTS = BODY_SCRIPTS
 # raises at module load time so the plugin refuses to import if anyone
 # ever reintroduces one.
 _FORBIDDEN_SRCDOC_LITERALS = (
-    "<!--", "-->", "<![CDATA[", "]]>",
-    "<script", "</script",
+    "<!--",
+    "-->",
+    "<![CDATA[",
+    "]]>",
+    "<script",
+    "</script",
 )
 
 
@@ -3478,9 +3481,7 @@ DOWNLOAD_BUTTON = (
 # ---------------------------------------------------------------------------
 
 _KNOWN_CDNS = (
-    "https://cdnjs.cloudflare.com"
-    " https://cdn.jsdelivr.net"
-    " https://unpkg.com"
+    "https://cdnjs.cloudflare.com" " https://cdn.jsdelivr.net" " https://unpkg.com"
 )
 
 
@@ -3552,9 +3553,12 @@ def _build_csp_tag(level: str) -> str:
     )
 
 
-def _build_html(security_level: str = "strict",
-                title: str = "Visualization", lang: str = "en",
-                chime: bool = True) -> str:
+def _build_html(
+    security_level: str = "strict",
+    title: str = "Visualization",
+    lang: str = "en",
+    chime: bool = True,
+) -> str:
     """Wrap the streaming visualization shell: empty render area + observer.
 
     The observer tails the parent chat DOM for an ``@@@VIZ-START`` …
@@ -3565,17 +3569,21 @@ def _build_html(security_level: str = "strict",
     strict_script = (
         STRICT_SECURITY_SCRIPT if security_level in ("strict", "offline") else ""
     )
-    safe_title = (title.replace('&', '&amp;').replace('<', '&lt;')
-                       .replace('>', '&gt;').replace('"', '&quot;'))
+    safe_title = (
+        title.replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+        .replace('"', "&quot;")
+    )
     # Sanitize lang to a simple lowercase BCP-47 primary subtag.
     # Split on '-' first so "zh-CN" → "zh", not "zhcn".
-    safe_lang = re.sub(r'[^a-z]', '', lang.split('-')[0].lower()[:5]) or "en"
+    safe_lang = re.sub(r"[^a-z]", "", lang.split("-")[0].lower()[:5]) or "en"
 
     # Strip the chime script entirely when the valve is off — no bytes
     # shipped, no defined playDoneSound in the iframe. finalize()'s
     # typeof-function guard turns the missing definition into a no-op.
     body_scripts = BODY_SCRIPTS.replace(
-        '/*__CHIME_BLOCK__*/', CHIME_SCRIPT if chime else ''
+        "/*__CHIME_BLOCK__*/", CHIME_SCRIPT if chime else ""
     )
 
     # Loader sits *below* the render area so content appears to flow
@@ -3586,11 +3594,11 @@ def _build_html(security_level: str = "strict",
         '<div id="iv-loader" class="iv-loading" aria-live="polite">'
         '<div class="iv-loading-dots"><span></span><span></span><span></span></div>'
         '<div class="iv-loading-label">Rendering visualization\u2026</div>'
-        '</div>\n'
-        f'{DOWNLOAD_BUTTON}\n'
-        f'{body_scripts}'
-        f'{STREAMING_OBSERVER_SCRIPT}'
-        f'{strict_script}'
+        "</div>\n"
+        f"{DOWNLOAD_BUTTON}\n"
+        f"{body_scripts}"
+        f"{STREAMING_OBSERVER_SCRIPT}"
+        f"{strict_script}"
     )
 
     return (
@@ -3685,7 +3693,7 @@ class Tools:
         What this tool does: visualize() mounts an iframe sandbox directly in the chat.
         After this tool is called, the assistant must stream exactly one HTML/SVG visualization fragment between the plain-text delimiters @@@VIZ-START and @@@VIZ-END.
         The sandbox renders that fragment live for the user.
-        
+
         Use this tool ONLY for EXPLICIT visualization requests.
         Do NOT use this tool proactively. Do NOT infer that a visualization would be helpful.
         **If the user did not explicitly ask for a visual artifact, do not call visualize().**
@@ -3723,10 +3731,10 @@ class Tools:
         lang = "en"
         if __event_call__:
             try:
-                lang_result = await __event_call__({
-                    "type": "execute",
-                    "data": {
-                        "code": """
+                lang_result = await __event_call__(
+                    {
+                        "type": "execute",
+                        "data": {"code": """
 return (() => {
   try {
     const stored = localStorage.getItem('locale')
@@ -3742,9 +3750,9 @@ return (() => {
   } catch (e) {}
   return 'en';
 })();
-"""
-                    },
-                })
+"""},
+                    }
+                )
                 if isinstance(lang_result, str) and lang_result.strip():
                     lang = lang_result.strip()
             except Exception:
@@ -3768,7 +3776,7 @@ return (() => {
             f"TEXT markers — NOT a ``` code fence, NOT HTML tags, NOT a ::: fence. "
             f"Example:\n\n"
             f"    @@@VIZ-START\n"
-            f"    <svg viewBox=\"0 0 680 240\">…</svg>\n"
+            f'    <svg viewBox="0 0 680 240">…</svg>\n'
             f"    @@@VIZ-END\n\n"
             f"Write explanatory prose BEFORE and AFTER the block — do not describe "
             f"the HTML source itself. Emit exactly ONE @@@VIZ-START/@@@VIZ-END pair "
@@ -3778,8 +3786,6 @@ return (() => {
         # whereas the message-level "embeds" channel is path-independent and always renders (it is the same channel legacy already uses).
         # Fall back to the original HTMLResponse return when no event emitter is available to preserve prior behavior.
         if __event_emitter__:
-            await __event_emitter__(
-                {"type": "embeds", "data": {"embeds": [html]}}
-            )
+            await __event_emitter__({"type": "embeds", "data": {"embeds": [html]}})
             return result_context
         return response, result_context
