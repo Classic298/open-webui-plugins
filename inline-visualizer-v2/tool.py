@@ -3,7 +3,7 @@ title: Inline Visualizer
 author: Classic298
 author_url: https://github.com/Classic298
 funding_url: https://github.com/Classic298
-version: 2.1.3
+version: 2.1.4
 required_open_webui_version: 0.10.2
 description: Renders interactive HTML/SVG visualizations inline in chat. Requires "iframe Sandbox Allow Same Origin" to be enabled in Open WebUI Settings -> Interface. For design instructions, the model should call view_skill("visualize").
 """
@@ -15,7 +15,7 @@ from typing import Literal
 # version can be verified at runtime (search DevTools for
 # `data-iv-build` on <html>).  Bump on every protocol-level change
 # so stale cached iframes can be spotted immediately.
-_IV_BUILD = "2.1.3"
+_IV_BUILD = "2.1.4"
 
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field
@@ -1934,20 +1934,110 @@ STREAMING_OBSERVER_SCRIPT = """
   // Stash the original text when we blank a node in place — wrapping
   // breaks Svelte's tracked refs, but blanked nodes still need to
   // surface the marker substring to the state machine.
-  var _ivOriginalText = (typeof WeakMap !== 'undefined') ? new WeakMap() : null;
+  //
+  // The store lives on the PARENT window so every visualizer iframe in
+  // the page shares it: on a multi-visualization message, a sibling
+  // embed must still see the original text of nodes we blanked (the
+  // END marker included), or its marker state machine desyncs and it
+  // mis-hides prose. Keys are parent-document text nodes, so entries
+  // die with the DOM (WeakMap). Falls back to a local store when the
+  // parent is unreachable (no same-origin — observer bails anyway).
+  var _ivOriginalText = null;
+  try {
+    var _sharedMap = parent.__ivChatOriginalText;
+    if (!_sharedMap || typeof _sharedMap.get !== 'function' ||
+        typeof _sharedMap.set !== 'function' || typeof _sharedMap.has !== 'function') {
+      parent.__ivChatOriginalText = new parent.WeakMap();
+    }
+    _ivOriginalText = parent.__ivChatOriginalText;
+  } catch(e) {
+    _ivOriginalText = (typeof WeakMap !== 'undefined') ? new WeakMap() : null;
+  }
+  // Blanked/trimmed-node registry (shared for the same reason) so the
+  // restore pass in hideMarkerRange can revive nodes that stop being
+  // marked. Companion WeakSet dedupes pushes across re-blank cycles.
+  var _ivBlankedNodes = null;
+  try {
+    var _sharedList = parent.__ivChatBlankedNodes;
+    if (!_sharedList || typeof _sharedList.push !== 'function' ||
+        typeof _sharedList.splice !== 'function') {
+      parent.__ivChatBlankedNodes = new parent.Array();
+    }
+    _ivBlankedNodes = parent.__ivChatBlankedNodes;
+  } catch(e) { _ivBlankedNodes = []; }
+  var _ivBlankedSet = null;
+  try {
+    var _sharedSet = parent.__ivChatBlankedSet;
+    if (!_sharedSet || typeof _sharedSet.has !== 'function' ||
+        typeof _sharedSet.add !== 'function') {
+      parent.__ivChatBlankedSet = new parent.WeakSet();
+    }
+    _ivBlankedSet = parent.__ivChatBlankedSet;
+  } catch(e) {
+    _ivBlankedSet = (typeof WeakSet !== 'undefined') ? new WeakSet() : null;
+  }
+  // Store entries are { orig, written }: `orig` is the model's text,
+  // `written` is what WE last wrote (empty string for a blank, the
+  // prose-only remainder for a trim). Legacy plain-string entries from
+  // older builds are read as { orig: entry, written: '' }.
   function getEffectiveText(textNode) {
     if (!textNode) return '';
     var value = textNode.nodeValue || '';
-    if (value === '' && _ivOriginalText && _ivOriginalText.has(textNode)) {
-      return _ivOriginalText.get(textNode) || '';
-    }
+    if (!_ivOriginalText) return value;
+    var entry = null;
+    try { entry = _ivOriginalText.get(textNode); } catch(e) {}
+    if (entry == null) return value;
+    var orig = (typeof entry === 'object') ? entry.orig : entry;
+    var written = (typeof entry === 'object') ? (entry.written || '') : '';
+    // Surface the original ONLY while the node still holds what we
+    // wrote — if Svelte overwrote it with fresh text, that text wins.
+    if (value === written || value === '') return orig || '';
     return value;
+  }
+  function _ivStash(textNode, current, written) {
+    if (!_ivOriginalText) return;
+    try {
+      var entry = _ivOriginalText.get(textNode);
+      if (entry && typeof entry === 'object') {
+        var prevWritten = entry.written || '';
+        // Svelte handed the node new content since our last write —
+        // that becomes the new original (streaming growth on the node).
+        if (current !== prevWritten && current !== '') entry.orig = current;
+        entry.written = written;
+      } else if (typeof entry === 'string') {
+        _ivOriginalText.set(textNode, { orig: (current !== '' ? current : entry), written: written });
+      } else {
+        _ivOriginalText.set(textNode, { orig: current, written: written });
+      }
+    } catch(e) {}
+  }
+  function _ivRegisterBlanked(textNode) {
+    if (!_ivBlankedNodes) return;
+    if (_ivBlankedSet) {
+      try {
+        if (_ivBlankedSet.has(textNode)) return;
+        _ivBlankedSet.add(textNode);
+      } catch(e) {}
+    }
+    _ivBlankedNodes.push(textNode);
   }
   function blankPreserving(textNode) {
     var current = textNode.nodeValue || '';
     if (current === '') return;  // already blanked, idempotent no-op
-    if (_ivOriginalText) _ivOriginalText.set(textNode, current);
+    _ivStash(textNode, current, '');
     try { textNode.nodeValue = ''; } catch(e) {}
+    _ivRegisterBlanked(textNode);
+  }
+  // Trim a node that MIXES prose and marker content down to its
+  // prose-only remainder ('Here is the chart: @@@VIZ-START' keeps
+  // 'Here is the chart: '). Blanking such a node would destroy the
+  // prose; hiding its block even more so.
+  function trimPreserving(textNode, kept) {
+    var current = textNode.nodeValue || '';
+    if (current === kept) return;  // already trimmed, idempotent
+    _ivStash(textNode, current, kept);
+    try { textNode.nodeValue = kept; } catch(e) {}
+    _ivRegisterBlanked(textNode);
   }
   // `+?` (not `*?`): require ≥1 body char so a freshly emitted
   // @@@VIZ-START with no content yet doesn't match an empty capture
@@ -2104,6 +2194,18 @@ STREAMING_OBSERVER_SCRIPT = """
             var ancestor = node.parentNode;
             while (ancestor && ancestor !== msg) {
               if (ancestor.nodeType === 1) {
+                // Markers inside code are documentation, not protocol:
+                // a fenced example must neither become the rendered
+                // block nor trip the hide state machine. cm-editor is
+                // Open WebUI's CodeMirror-rendered fence container.
+                if (ancestor.tagName === 'CODE' || ancestor.tagName === 'PRE') {
+                  return NodeFilter.FILTER_REJECT;
+                }
+                try {
+                  if (ancestor.classList && ancestor.classList.contains('cm-editor')) {
+                    return NodeFilter.FILTER_REJECT;
+                  }
+                } catch(e) {}
                 if (ancestor.tagName === 'DETAILS') {
                   var detailsType = ancestor.getAttribute && ancestor.getAttribute('type');
                   if (detailsType === 'tool_calls' ||
@@ -2169,9 +2271,28 @@ STREAMING_OBSERVER_SCRIPT = """
     return match ? match[1] : null;
   }
 
-  // Hide markers + between-marker content. Single-pass walker with
-  // an OUTSIDE/INSIDE state machine. Runs every tick, idempotent.
-  // Inline `display:none !important` survives Svelte re-renders.
+  // Hide markers + between-marker content. Multi-pass walker, run
+  // every tick, idempotent and self-correcting.
+  //
+  // Pass 1 marks candidate text nodes with an OUTSIDE/INSIDE state
+  // machine (full markers, in-range nodes, and speculative partial
+  // marker tails still streaming in).
+  //
+  // Pass 2 hides a block ancestor ONLY when every non-whitespace
+  // text node inside it is marked. A container that also holds prose
+  // must never be display:none'd — Open WebUI 0.10+ renders raw html
+  // tokens as bare text nodes directly under the single div that
+  // wraps the whole message content, and unconditionally hiding that
+  // div nuked the entire response, prose included (issue #60). Marked
+  // nodes whose block fails the check are blanked in place instead
+  // (preserves Svelte's node refs). Text-free elements between the
+  // first and last marked nodes (markdown 'space' tokens render as
+  // empty margin divs) are swept too so the hidden source leaves no
+  // gap. Inline `display:none !important` survives Svelte re-renders.
+  //
+  // Pass 3 un-hides / un-blanks anything no longer marked, so a
+  // speculative partial hit (prose that transiently ends in '@@@')
+  // self-corrects on a later tick instead of staying hidden forever.
 
   function hideEl(el) {
     if (!el || el.nodeType !== 1) return;
@@ -2214,15 +2335,50 @@ STREAMING_OBSERVER_SCRIPT = """
     return null;
   }
 
-  // True when `s` ends with a non-empty prefix of START_MARK (>= '@@@').
-  // Lets us hide the marker paragraph while it is still streaming in
-  // char-by-char (e.g. "@@@V"), so the raw start marker never flashes
-  // before the full token matches.
-  function endsWithPartialStart(text) {
+  // Length of the longest non-empty prefix of START_MARK (>= '@@@')
+  // that `text` ends with, or 0. Lets us hide a marker still streaming
+  // in char-by-char (e.g. "@@@V") before the full token matches —
+  // '@@@…' prefixes shared with a partial END_MARK are covered too.
+  function partialStartSuffixLength(text) {
     for (var k = Math.min(text.length, START_MARK.length); k >= 3; k--) {
-      if (START_MARK.substr(0, k) === text.substr(text.length - k)) return true;
+      if (START_MARK.substr(0, k) === text.substr(text.length - k)) return k;
     }
-    return false;
+    return 0;
+  }
+
+  // Order-aware scan of ONE text node. Walks marker occurrences in
+  // position order starting from `insideAtEntry`; returns the exit
+  // state plus the text lying OUTSIDE all marker ranges (the marker
+  // tokens themselves count as inside). Position order matters: a
+  // node reading '…@@@VIZ-END @@@VIZ-START…' must exit INSIDE, or the
+  // next visualization's body leaks into the chat as raw source. A
+  // stray END with no open range swallows just the marker token and
+  // stays OUTSIDE.
+  function scanNodeText(text, insideAtEntry) {
+    var kept = '';
+    var pos = 0;
+    var inside = insideAtEntry;
+    while (pos < text.length) {
+      if (inside) {
+        var endIdx = text.indexOf(END_MARK, pos);
+        if (endIdx === -1) { pos = text.length; break; }
+        pos = endIdx + END_MARK.length;
+        inside = false;
+      } else {
+        var startIdx = text.indexOf(START_MARK, pos);
+        var strayEnd = text.indexOf(END_MARK, pos);
+        if (strayEnd !== -1 && (startIdx === -1 || strayEnd < startIdx)) {
+          kept += text.slice(pos, strayEnd);
+          pos = strayEnd + END_MARK.length;
+          continue;
+        }
+        if (startIdx === -1) { kept += text.slice(pos); break; }
+        kept += text.slice(pos, startIdx);
+        pos = startIdx + START_MARK.length;
+        inside = true;
+      }
+    }
+    return { inside: inside, kept: kept };
   }
 
   // allowWrap=false during streaming (wrapping a text node breaks
@@ -2250,6 +2406,17 @@ STREAMING_OBSERVER_SCRIPT = """
             var ancestor = node.parentNode;
             while (ancestor && ancestor !== msg) {
               if (ancestor.nodeType === 1) {
+                // Same code-skip as getSearchableText: markers inside
+                // code/fences are documentation — never hide them or
+                // let them drive the state machine.
+                if (ancestor.tagName === 'CODE' || ancestor.tagName === 'PRE') {
+                  return NodeFilter.FILTER_REJECT;
+                }
+                try {
+                  if (ancestor.classList && ancestor.classList.contains('cm-editor')) {
+                    return NodeFilter.FILTER_REJECT;
+                  }
+                } catch(e) {}
                 if (ancestor.tagName === 'DETAILS') {
                   var detailsType = ancestor.getAttribute && ancestor.getAttribute('type');
                   if (detailsType === 'tool_calls' ||
@@ -2272,54 +2439,271 @@ STREAMING_OBSERVER_SCRIPT = """
       );
     } catch(e) { return; }
 
+    // ---- Pass 1: mark nodes via the OUTSIDE/INSIDE state machine ----
+    // `segments` tracks runs of consecutively marked nodes (broken by
+    // any node with visible prose) so the element sweep below stays
+    // scoped to actual marker ranges and never reaches across the
+    // prose between two visualization pairs.
     var inside = false;
     var textNode;
-    var toHideEls = [];
-    var toBlankText = [];
+    var walked = [];
+    var hideNodes = [];
+    var hideNodeSet = (typeof WeakSet !== 'undefined') ? new WeakSet() : null;
+    // Nodes that MIX prose and marker content in one text node — they
+    // get trimmed to the prose remainder instead of blanked/hidden.
+    var partialTrims = [];
+    var partialSet = (typeof WeakSet !== 'undefined') ? new WeakSet() : null;
+    var segments = [];
+    var currentSegment = null;
+    function isMarked(node) {
+      if (hideNodeSet) return hideNodeSet.has(node);
+      return hideNodes.indexOf(node) !== -1;
+    }
+    function isTrimmed(node) {
+      if (partialSet) return partialSet.has(node);
+      for (var q = 0; q < partialTrims.length; q++) {
+        if (partialTrims[q].node === node) return true;
+      }
+      return false;
+    }
+    function markNode(node) {
+      hideNodes.push(node);
+      if (hideNodeSet) hideNodeSet.add(node);
+      if (!currentSegment) {
+        currentSegment = { first: node, last: node };
+        segments.push(currentSegment);
+      } else {
+        currentSegment.last = node;
+      }
+    }
+    function trimNodeTo(node, kept) {
+      partialTrims.push({ node: node, kept: kept });
+      if (partialSet) partialSet.add(node);
+      currentSegment = null;  // visible prose breaks the sweep segment
+    }
 
     while ((textNode = walker.nextNode())) {
       if (embedsRoot && embedsRoot.contains(textNode)) continue;
       if (myEmbedContainer && myEmbedContainer.contains(textNode)) continue;
+      walked.push(textNode);
+    }
 
-      // getEffectiveText surfaces the original (pre-blank) text so
-      // blanked nodes still match.
-      var text = getEffectiveText(textNode);
-      var hadStartLocal = text.indexOf(START_MARK) !== -1;
-      var hadEndLocal = text.indexOf(END_MARK) !== -1;
+    for (var w = 0; w < walked.length; w++) {
+      var node = walked[w];
+      // getEffectiveText surfaces the original (pre-blank/pre-trim)
+      // text so already-processed nodes still match.
+      var text = getEffectiveText(node);
+      var scan = scanNodeText(text, inside);
+      inside = scan.inside;
 
-      var hadPartialStart = !hadStartLocal && !hadEndLocal && endsWithPartialStart(text);
+      if (scan.kept !== text) {
+        // Node overlaps a marker range. Fully consumed -> hide it;
+        // mixed with prose -> trim to the prose-only remainder.
+        if (scan.kept.trim() === '') markNode(node);
+        else trimNodeTo(node, scan.kept);
+        continue;
+      }
 
-      var hideThis = inside || hadStartLocal || hadEndLocal || hadPartialStart;
-
-      if (hideThis) {
-        var block = nearestBlockAncestor(textNode.parentNode, msg);
-        if (block && block !== msg && !block.contains(myFrame)) {
-          // Clean block ancestor — hide wholesale, no text touched.
-          toHideEls.push(block);
-        } else {
-          // Block contains our iframe — can't hide the block. Blank
-          // in place: nodeValue = '' preserves Svelte's ref identity.
-          toBlankText.push(textNode);
+      // Speculative partial marker tail: only the LAST streamed text
+      // node can be a marker still arriving char-by-char, and once
+      // this embed finalized nothing is left to stream. Without these
+      // gates, settled prose that legitimately ends in '@@@' would be
+      // re-hidden on every tick, unrecoverably.
+      if (!finalized && !inside && w === walked.length - 1) {
+        var partialLen = partialStartSuffixLength(text);
+        if (partialLen > 0) {
+          var keptHead = text.slice(0, text.length - partialLen);
+          if (keptHead.trim() === '') markNode(node);
+          else trimNodeTo(node, keptHead);
+          continue;
         }
       }
 
-      // Flip state AFTER processing so the END-bearing node is hidden.
-      if (hadStartLocal && hadEndLocal) {
-        inside = false;
-      } else if (hadStartLocal) {
-        inside = true;
-      } else if (hadEndLocal) {
-        inside = false;
+      if (text.trim() !== '') currentSegment = null;
+    }
+
+    // ---- Pass 2: pick hideable elements ----
+    var toHideEls = [];
+    var toHideSet = (typeof WeakSet !== 'undefined') ? new WeakSet() : null;
+    function noteHidden(el) {
+      toHideEls.push(el);
+      if (toHideSet) toHideSet.add(el);
+    }
+    function isNotedHidden(el) {
+      if (toHideSet) return toHideSet.has(el);
+      return toHideEls.indexOf(el) !== -1;
+    }
+    var failedEls = [];
+    var failedSet = (typeof WeakSet !== 'undefined') ? new WeakSet() : null;
+    function noteFailed(el) {
+      failedEls.push(el);
+      if (failedSet) failedSet.add(el);
+    }
+    function isNotedFailed(el) {
+      if (failedSet) return failedSet.has(el);
+      return failedEls.indexOf(el) !== -1;
+    }
+
+    // Structural safety: never collapse the message root, anything
+    // that owns an iframe (ours or a sibling embed's), or the embeds
+    // containers themselves.
+    function safeToHide(el) {
+      if (!el || el === msg) return false;
+      try { if (myFrame && el.contains(myFrame)) return false; } catch(e) {}
+      try {
+        if (el.tagName === 'IFRAME' || el.querySelector('iframe') !== null) return false;
+      } catch(e) { return false; }
+      if (el.id && String(el.id).indexOf('-embeds') !== -1) return false;
+      try {
+        if (embedsRoot && (el.contains(embedsRoot) || embedsRoot.contains(el))) return false;
+      } catch(e) {}
+      return true;
+    }
+
+    // Content safety: every non-whitespace text node under `el` must
+    // be marked — a block holding ANY prose is never hidden wholesale.
+    function fullyMarked(el) {
+      try {
+        var check = parent.document.createTreeWalker(el, NodeFilter.SHOW_TEXT, null);
+        var node;
+        while ((node = check.nextNode())) {
+          var value = getEffectiveText(node);
+          if (value === '' || value.trim() === '') continue;
+          if (!isMarked(node)) return false;
+        }
+        return true;
+      } catch(e) { return false; }
+    }
+
+    var toBlankText = [];
+    for (var i = 0; i < hideNodes.length; i++) {
+      var block = nearestBlockAncestor(hideNodes[i].parentNode, msg);
+      if (block && isNotedHidden(block)) continue;
+      if (block && !isNotedFailed(block) && safeToHide(block) && fullyMarked(block)) {
+        noteHidden(block);
+      } else {
+        if (block && !isNotedFailed(block)) noteFailed(block);
+        // Block also holds prose (or an iframe) — can't hide it.
+        // Blank in place: nodeValue = '' preserves Svelte's refs.
+        toBlankText.push(hideNodes[i]);
       }
     }
 
-    for (var i = 0; i < toHideEls.length; i++) hideEl(toHideEls[i]);
+    // Sweep text-free elements strictly inside each marked segment —
+    // markdown 'space' tokens render as empty margin divs that would
+    // otherwise leave a gap where the source was. Segment-scoped so an
+    // <hr>/<img> in the prose between two visualization pairs is never
+    // touched. (compareDocumentPosition bitmasks: 4 = FOLLOWING,
+    // 2 = PRECEDING.)
+    // Text-free is NOT content-free: images, rules, form controls and
+    // friends carry meaning without text nodes. Never sweep them (or
+    // anything containing them) — segments can legitimately span such
+    // an element when two pairs are separated only by, say, an image.
+    var CONTENT_EL = { IMG:1, SVG:1, HR:1, CANVAS:1, VIDEO:1, AUDIO:1,
+                       PICTURE:1, OBJECT:1, EMBED:1, INPUT:1, BUTTON:1,
+                       SELECT:1, TEXTAREA:1, IFRAME:1, MATH:1 };
+    var CONTENT_EL_SELECTOR = 'img,svg,hr,canvas,video,audio,picture,' +
+                              'object,embed,input,button,select,textarea,iframe,math';
+    if (segments.length > 0) {
+      var allEls;
+      try { allEls = msg.getElementsByTagName('*'); } catch(e) { allEls = []; }
+      for (var s = 0; s < allEls.length; s++) {
+        var candidate = allEls[s];
+        if (isNotedHidden(candidate)) continue;
+        if ((candidate.textContent || '').trim() !== '') continue;
+        if (CONTENT_EL[String(candidate.tagName).toUpperCase()]) continue;
+        try { if (candidate.querySelector(CONTENT_EL_SELECTOR) !== null) continue; }
+        catch(e) { continue; }
+        if (!safeToHide(candidate)) continue;
+        for (var g = 0; g < segments.length; g++) {
+          var seg = segments[g];
+          var within = false;
+          try {
+            within = !candidate.contains(seg.first) &&
+                     !candidate.contains(seg.last) &&
+                     (seg.first.compareDocumentPosition(candidate) & 4) !== 0 &&
+                     (seg.last.compareDocumentPosition(candidate) & 2) !== 0;
+          } catch(e) {}
+          if (within) { noteHidden(candidate); break; }
+        }
+      }
+    }
+
+    // ---- Pass 3: apply, then self-correct stale hides / blanks ----
+    // Un-hide first: elements we hid on an earlier tick that are no
+    // longer justified (partial-marker false positive, message edit,
+    // Svelte re-render shuffling content).
+    var previouslyHidden = [];
+    try { previouslyHidden = msg.querySelectorAll('[data-iv-chat-hidden="1"]'); }
+    catch(e) {}
+    for (var p = 0; p < previouslyHidden.length; p++) {
+      var hiddenEl = previouslyHidden[p];
+      if (isNotedHidden(hiddenEl)) continue;
+      if (hiddenEl.getAttribute('data-iv-chat-wrap') === '1') continue;
+      try {
+        hiddenEl.style.removeProperty('display');
+        hiddenEl.removeAttribute('data-iv-chat-hidden');
+      } catch(e) {}
+    }
+
+    for (var h = 0; h < toHideEls.length; h++) hideEl(toHideEls[h]);
     if (allowWrap) {
       // Finalize: wrap for tighter visual collapse (safe — Svelte
       // has stopped streaming chunks).
       for (var j = 0; j < toBlankText.length; j++) wrapAndHideText(toBlankText[j]);
     } else {
       for (var k = 0; k < toBlankText.length; k++) blankPreserving(toBlankText[k]);
+    }
+    for (var t = 0; t < partialTrims.length; t++) {
+      trimPreserving(partialTrims[t].node, partialTrims[t].kept);
+    }
+
+    // Restore nodes that are no longer marked or trimmed (speculative
+    // partials that turned out to be prose, message edits). Registry
+    // is shared across sibling iframes — only judge nodes inside OUR
+    // message; drop detached entries outright.
+    if (_ivBlankedNodes) {
+      for (var r = _ivBlankedNodes.length - 1; r >= 0; r--) {
+        var blanked = _ivBlankedNodes[r];
+        var connected = false;
+        try {
+          if (!blanked) connected = false;
+          else if (typeof blanked.isConnected === 'boolean') {
+            connected = blanked.isConnected;
+          } else {
+            var ownerDoc = blanked.ownerDocument;
+            connected = !!(ownerDoc && ownerDoc.documentElement &&
+                           ownerDoc.documentElement.contains(blanked));
+          }
+        } catch(e) {}
+        if (!connected) {
+          try { if (_ivBlankedSet) _ivBlankedSet.delete(blanked); } catch(e) {}
+          _ivBlankedNodes.splice(r, 1);
+          continue;
+        }
+        var inMyMsg = false;
+        try { inMyMsg = msg.contains(blanked); } catch(e) {}
+        if (!inMyMsg) continue;
+        if (isMarked(blanked) || isTrimmed(blanked)) continue;
+        // No longer ours to suppress: put the original back if the
+        // node still holds our write; if Svelte already overwrote it
+        // with fresh text, the fresh text wins — just drop the stash.
+        try {
+          var entry = _ivOriginalText ? _ivOriginalText.get(blanked) : null;
+          if (entry != null) {
+            var orig = (typeof entry === 'object') ? entry.orig : entry;
+            var written = (typeof entry === 'object') ? (entry.written || '') : '';
+            var currentValue = blanked.nodeValue || '';
+            if (typeof orig === 'string' &&
+                (currentValue === written || currentValue === '')) {
+              blanked.nodeValue = orig;
+            }
+          }
+        } catch(e) {}
+        try { if (_ivOriginalText) _ivOriginalText.delete(blanked); } catch(e) {}
+        try { if (_ivBlankedSet) _ivBlankedSet.delete(blanked); } catch(e) {}
+        _ivBlankedNodes.splice(r, 1);
+      }
     }
   }
 
@@ -2705,15 +3089,24 @@ STREAMING_OBSERVER_SCRIPT = """
       var value = textNode.nodeValue || '';
       if (!value) continue;
       if (value.indexOf(START_MARK) === -1 && value.indexOf(END_MARK) === -1) continue;
-      var ancestor = textNode.parentNode, isCode = false;
+      // Skip code/pre AND anything hideMarkerRange already hid: the
+      // hide pass needs the marker text intact inside hidden blocks —
+      // stripping it there would make a later pass consider the block
+      // unjustified and un-hide the raw source.
+      var ancestor = textNode.parentNode, isProtected = false;
       while (ancestor && ancestor !== msg) {
-        if (ancestor.nodeType === 1 &&
-            (ancestor.tagName === 'CODE' || ancestor.tagName === 'PRE')) {
-          isCode = true; break;
+        if (ancestor.nodeType === 1) {
+          if (ancestor.tagName === 'CODE' || ancestor.tagName === 'PRE') {
+            isProtected = true; break;
+          }
+          if (ancestor.getAttribute &&
+              ancestor.getAttribute('data-iv-chat-hidden') === '1') {
+            isProtected = true; break;
+          }
         }
         ancestor = ancestor.parentNode;
       }
-      if (isCode) continue;
+      if (isProtected) continue;
       var cleaned = value
         .split(START_MARK).join('')
         .split(END_MARK).join('')
@@ -2729,14 +3122,20 @@ STREAMING_OBSERVER_SCRIPT = """
     finalized = true;
     // withScripts=true so the reconciler materializes script tags.
     renderSafeInto(fullText, true);
-    // Multi-shot strip — Svelte may flush chunks several seconds after
-    // finalize fires (slow networks, large messages, post-render
-    // re-hydrations). Run once immediately, then every 1s for 30s; each
-    // run is idempotent and cheap. Regular cadence catches late flushes
-    // within 1s instead of waiting for the next backoff slot.
+    // Multi-shot self-heal — Svelte may flush chunks several seconds
+    // after finalize fires (slow networks, large messages, post-render
+    // re-hydrations), restoring text nodes we hid. Run once
+    // immediately, then every 1s for 30s; each run is idempotent and
+    // cheap. ORDER MATTERS: re-assert hiding BEFORE stripping — the
+    // stripper deletes marker text from visible nodes, and if it ran
+    // first on a freshly restored flush the hide pass would no longer
+    // find the markers and the raw source would stay visible.
+    try { hideMarkerRange(false); } catch(e) {}
     try { stripFinalizeArtifacts(); } catch(e) {}
     var stripInterval = setInterval(function() {
+      try { hideMarkerRange(false); } catch(e) {}
       try { stripFinalizeArtifacts(); } catch(e) {}
+      _ivHealDirty = false;
     }, 1000);
     setTimeout(function() { clearInterval(stripInterval); }, 30000);
     hideLoader();
@@ -2769,11 +3168,29 @@ STREAMING_OBSERVER_SCRIPT = """
   var lastMsgText = null;
   var wasStreaming = false;
   var firstSeenLen = null;
+  // Set by the mutation observers whenever the message subtree (or the
+  // chat body's child list) changes; gates the post-finalize self-heal
+  // so idle 400ms polls stay free.
+  var _ivHealDirty = false;
 
   function tick(forceHide) {
-    if (finalized) return;
     var msg = findMyMessage();
     if (!msg) return;
+
+    if (finalized) {
+      // Post-finalize self-heal: the observers and the 400ms poll stay
+      // alive, and Svelte can flush restored text nodes long after
+      // finalize (late chunks, rehydration, branch switches). Only act
+      // when the message subtree actually mutated (cheap gate — no
+      // text walk on idle polls), and hide BEFORE stripping so the
+      // stripper never erases markers the hide pass still needs.
+      if (_ivHealDirty) {
+        try { hideMarkerRange(false); } catch(e) {}
+        try { stripFinalizeArtifacts(); } catch(e) {}
+        _ivHealDirty = false;
+      }
+      return;
+    }
 
     // Lax: tick on any text change, including reasoning-block edits
     // (Bedrock-routed Haiku 4.5 streams the response inside reasoning).
@@ -2790,8 +3207,7 @@ STREAMING_OBSERVER_SCRIPT = """
     }
 
     // allowWrap=false: streaming-safe (no text-node wrapping — would
-    // break Svelte's diff and stall post-VIZ chunks). finalize() runs
-    // the wrap-allowed pass once the response is complete.
+    // break Svelte's diff and stall post-VIZ chunks).
     if (textChanged || forceHide) hideMarkerRange(false);
 
     // Source-dependent work only runs on actual changes.
@@ -2824,6 +3240,23 @@ STREAMING_OBSERVER_SCRIPT = """
     if (!records) return false;
     for (var i = 0; i < records.length; i++) {
       if (records[i] && records[i].type === 'childList') return true;
+    }
+    return false;
+  }
+
+  // True when any mutation record touches OUR message subtree (or an
+  // ancestor of it — a wholesale rebuild mutates the parent's child
+  // list). Errs on true when the message can't be resolved.
+  function _ivRecordsTouchMyMessage(records) {
+    var msg = null;
+    try { msg = findMyMessage(); } catch(e) {}
+    if (!msg || !records) return true;
+    for (var i = 0; i < records.length; i++) {
+      var target = records[i] && records[i].target;
+      if (!target) continue;
+      try {
+        if (msg.contains(target) || target.contains(msg)) return true;
+      } catch(e) { return true; }
     }
     return false;
   }
@@ -2904,7 +3337,8 @@ STREAMING_OBSERVER_SCRIPT = """
     if (!msg) return;
     try {
       innerObserver = new MutationObserver(function(records) {
-        tick(_ivHasChildListMutation(records));
+        _ivHealDirty = true;
+        try { tick(_ivHasChildListMutation(records)); } catch(e) {}
       });
       innerObserver.observe(msg, {
         childList: true, subtree: true, characterData: true
@@ -2924,7 +3358,13 @@ STREAMING_OBSERVER_SCRIPT = """
   try { attachInnerObserver(); } catch(e) {}
   try {
     new MutationObserver(function(records) {
-      try { tick(_ivHasChildListMutation(records)); } catch(e) {}
+      // childList touching OUR message can mean it was rebuilt
+      // wholesale — flag the self-heal for that case too. Scoped so a
+      // busy chat (other messages streaming) doesn't make every
+      // settled viz iframe re-walk its message on each flush.
+      var hasChildList = _ivHasChildListMutation(records);
+      if (hasChildList && _ivRecordsTouchMyMessage(records)) _ivHealDirty = true;
+      try { tick(hasChildList); } catch(e) {}
       try { attachInnerObserver(); } catch(e) {}
     }).observe(parent.document.body, {
       childList: true, subtree: true, characterData: true
