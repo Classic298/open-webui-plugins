@@ -81,11 +81,12 @@ Auto-detects the user's language from `<html data-iv-lang>` (injected server-sid
 
 ### 🔒 Configurable CSP
 
-| Level | Outbound fetch | External images | Use case |
-|---|:-:|:-:|---|
-| **Strict** (default) | ❌ | ❌ | Maximum sandboxing. All core visuals work. |
-| **Balanced** | ❌ | ✅ | Flags, logos, external image references. |
-| **None** | ✅ | ✅ | Live API data pulls from inside the iframe. |
+| Level | Outbound fetch | External images | Script CDNs | Use case |
+|---|:-:|:-:|:-:|---|
+| **Offline** | ❌ | ❌ | ❌ self-hosted only | Air-gapped / zero external connections. [Self-hosting tutorial ↓](#-offline-mode--self-hosting-the-cdn-libraries) |
+| **Strict** (default) | ❌ | ❌ | ✅ 3 allowlisted | Maximum sandboxing, CDN charts still work. |
+| **Balanced** | ❌ | ✅ | ✅ 3 allowlisted | Flags, logos, external image references. |
+| **None** | ✅ | ✅ | ✅ any | Live API data pulls from inside the iframe. |
 
 ### 🎉 Done toast + chime
 When a live stream finalizes, a localized "Visualization ready" toast slides in top-right and a soft three-note C-major arpeggio plays on Web Audio sine oscillators. Refreshes of completed messages are silent — the observer only celebrates when it actually witnessed the stream. Mute via `saveState('iv-sound', false)` per viz, or `localStorage['iv-sound-off']='1'` globally.
@@ -301,7 +302,8 @@ Every visualization renders in a sandboxed iframe with a configurable Content Se
 
 | Level | Outbound requests | External images | URL param stripping | Use case |
 |-------|:-:|:-:|:-:|---|
-| **Strict** (default) | ❌ | ❌ | ✅ | Max safety. All core features work normally. |
+| **Offline** *(new in 2.2.0)* | ❌ | ❌ | ✅ | **Zero outgoing connections** — even the three script CDNs are blocked. Libraries can be self-hosted on your instance ([tutorial ↓](#-offline-mode--self-hosting-the-cdn-libraries)). |
+| **Strict** (default) | ❌ | ❌ | ✅ | Max safety with CDN charts. All core features work normally. |
 | **Balanced** | ❌ | ✅ | — | Visualizations displaying external images (flags, logos). |
 | **None** | ✅ | ✅ | — | Visualizations fetching live API data from within the iframe. |
 
@@ -310,6 +312,8 @@ Every visualization renders in a sandboxed iframe with a configurable Content Se
 Chart.js, D3.js, Vega-Lite, and any other pure-client-side library load and render normally — the three major CDN hosts (cdnjs, jsdelivr, unpkg) are on the `script-src` allowlist, and `'unsafe-eval'` is granted so runtime expression compilers (Vega's `new Function(...)`, some templating libs) work. Visualizations with **inline data** (data arrays hardcoded in the SVG/HTML source) work without limits. The SKILL tells the model to inline data by default, so this covers 99% of prompts.
 
 **What Strict blocks:** runtime `fetch()` calls, `d3.csv('https://…')`, Vega-Lite specs with `data: { url: '…' }`, external images, form submits. If you want a live-updating weather widget or a chart that pulls a CSV at render time, switch to **None**.
+
+**What Offline additionally blocks:** the three CDN hosts themselves. In Offline mode the iframe cannot make a single request that leaves your Open WebUI server — `script-src` drops the CDN allowlist and permits `'self'` instead, so the only scripts that load are inline ones and files served by your own instance. Pure inline SVG/HTML visualizations (the skill's default) work unchanged; library charts (Chart.js, D3, …) keep working too **if you self-host the files** — see [Offline mode](#-offline-mode--self-hosting-the-cdn-libraries) below.
 
 > [!NOTE]
 > Strict allows `'unsafe-inline'` and `'unsafe-eval'` for scripts because LLM-generated visualizations ship their own inline code and some libraries compile expressions at runtime. Those relaxations don't create exfil channels — the real outbound blockers (`connect-src 'none'`, `form-action 'none'`, `img-src` restricted, `object-src 'none'`) stay in place regardless. If you need a truly locked-down iframe, disable JavaScript entirely at the Open WebUI level; the tool can't render anything useful without `'unsafe-inline'` scripts.
@@ -327,6 +331,81 @@ When DevTools is open, the browser attempts to fetch `.map` files for loaded lib
 
 > [!NOTE]
 > Even in **None** mode, external API calls may still fail due to CORS — that's the remote server's policy, not ours.
+
+---
+
+## 🔌 Offline mode — self-hosting the CDN libraries
+
+*(new in v2.2.0)* The **Offline** security level guarantees the visualization iframe makes **zero outgoing connections**: no CDNs, no external images, fonts, or media — nothing leaves your Open WebUI host. It exists for air-gapped networks and privacy-hardened deployments.
+
+Two ways to use it:
+
+### Option A — no libraries at all (zero setup)
+
+Just set the valve: **Workspace → Tools → Inline Visualizer → gear icon → `security_level` → `offline`**. Done.
+
+Everything the design system ships — inline SVG diagrams, themed HTML components, interactive explainers, sparklines, KPI cards, `sendPrompt` drill-downs — is baked into the iframe itself and needs no network. Only *library* charts (Chart.js, D3, ECharts, Plotly, Vega-Lite, vis-network, Tone.js) normally come from a CDN. If you can live without those, you're finished. Optionally delete the **CDN libraries** section from `SKILL.md` before importing it, so the model doesn't try to load them in the first place.
+
+### Option B — keep the libraries, serve them yourself
+
+Open WebUI already serves a static folder at `https://<your-instance>/static/` — and in Offline mode the CSP allows `'self'`, so anything you drop in there loads fine inside visualizations. Small tutorial:
+
+**1. Set the valve to `offline`** (see Option A).
+
+**2. Download the libraries you want** (these are the exact pinned builds from `SKILL.md`):
+
+```bash
+mkdir iv-libs && cd iv-libs
+curl -LO https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js
+curl -LO https://cdnjs.cloudflare.com/ajax/libs/d3/7.8.5/d3.min.js
+curl -LO https://cdnjs.cloudflare.com/ajax/libs/echarts/5.5.0/echarts.min.js
+curl -Lo plotly.min.js https://cdn.jsdelivr.net/npm/plotly.js-dist@2
+curl -Lo vega.min.js https://cdn.jsdelivr.net/npm/vega@5
+curl -Lo vega-lite.min.js https://cdn.jsdelivr.net/npm/vega-lite@5
+curl -Lo vega-embed.min.js https://cdn.jsdelivr.net/npm/vega-embed@6
+curl -Lo vis-network.min.js https://cdn.jsdelivr.net/npm/vis-network@9.1.9/standalone/umd/vis-network.min.js
+curl -Lo Tone.js https://cdnjs.cloudflare.com/ajax/libs/tone/15.0.4/Tone.js
+```
+
+(Only grab what you actually use — Chart.js alone covers most chart prompts.)
+
+**3. Put the folder inside Open WebUI's static directory.**
+
+*Docker (recommended — survives image updates):* bind-mount the folder into the static dir when starting the container:
+
+```bash
+docker run -d ... -v /path/on/host/iv-libs:/app/backend/open_webui/static/iv-libs ...
+```
+
+*Docker (quick test — lost on image update):*
+
+```bash
+docker exec open-webui mkdir -p /app/backend/open_webui/static/iv-libs
+docker cp iv-libs/. open-webui:/app/backend/open_webui/static/iv-libs/
+```
+
+*Bare-metal / pip:* the served folder is the `static/` directory of the installed `open_webui` package (or wherever the `STATIC_DIR` environment variable points, if you set one). Create `iv-libs/` inside it and copy the files there.
+
+**4. Verify.** Open `https://<your-instance>/static/iv-libs/chart.umd.min.js` in your browser — you should see minified JavaScript. If you get a 404, the files aren't in the folder Open WebUI is actually serving.
+
+**5. Teach the model the local paths.** The model writes the `<script src=…>` tags, so `SKILL.md` must point it at your copies instead of the CDNs. Before importing the skill, search-replace the loader URLs in the **CDN libraries** section (and the Chart.js setup example), e.g.:
+
+```html
+<!-- before -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+<!-- after -->
+<script src="/static/iv-libs/chart.umd.min.js"></script>
+```
+
+Keeping the filenames identical makes this a plain search-replace. If you already imported the skill, just edit it in **Workspace → Knowledge/Skills** and save.
+
+**6. Done.** New visualizations now load every byte from your own server. You can confirm in DevTools → Network: the only requests are same-origin.
+
+> [!NOTE]
+> **Sub-path deployments:** if Open WebUI is served under a sub-path (e.g. `https://example.com/webui/`), use the full path in the skill: `/webui/static/iv-libs/…`. The iframe inherits the parent page's origin and base URL, so absolute paths resolve against your domain root.
+
+> [!NOTE]
+> **Why not just mirror the CDN hostnames?** You can (DNS override + an internally-trusted TLS cert for the CDN hosts works with zero plugin changes), but it's operationally heavy. The `/static` route is two files and one valve.
 
 ---
 
@@ -361,6 +440,12 @@ The 30s window is deliberately much longer than any realistic inter-chunk stall.
 <summary><b>Chart.js / D3 renders but nothing appears</b></summary>
 
 Chart.js needs `<div style="position: relative; height: Xpx;">` around its canvas and `maintainAspectRatio: false` in options. See **Library init** in SKILL.md.
+</details>
+
+<details>
+<summary><b>I switched to Offline and Chart.js / D3 stopped loading</b></summary>
+
+Expected — Offline blocks the CDNs by design. Either self-host the libraries under `/static/iv-libs/` and point `SKILL.md` at them (see [Offline mode](#-offline-mode--self-hosting-the-cdn-libraries)), or stay on **Strict**, which allowlists the three public CDNs while still blocking every data-exfiltration channel.
 </details>
 
 <details>
