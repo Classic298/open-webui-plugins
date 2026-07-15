@@ -161,33 +161,42 @@ def m_vision(a1,a2):  # image + scan + arrow + text card + eye
       <g stroke="#cfd6ff" stroke-width="4" stroke-linecap="round"><line x1="260" y1="126" x2="340" y2="126"/><line x1="260" y1="146" x2="340" y2="146"/><line x1="260" y1="166" x2="340" y2="166"/><line x1="260" y1="186" x2="316" y2="186"/></g>
     </svg>'''
 
-def m_prune(a1,a2):  # database + throttle gauge + metered trickle + progress + clean sparkles
-    # ---- throttle gauge: needle sits low, i.e. deliberately slow ----
+def m_prune(a1, a2):  # database, throttle gauge, metered trickle, progress bar, sparkles
+    # Gauge geometry: a 248-degree dial centred at (gx, gy). Points are polar,
+    # so a helper turns an angle + radius into an (x, y) on the dial.
     gx, gy, gr = 306, 70, 27
-    start, end = 214.0, -34.0            # 248-deg sweep, gap at the bottom
-    span = start - end
-    val = start - 0.30 * span            # ~30%: a metered, throttled rate
-    def gp(deg, r):
-        a = math.radians(deg)
-        return (gx + r * math.cos(a), gy - r * math.sin(a))
-    def arc(d0, d1, r):
-        x0, y0 = gp(d0, r); x1, y1 = gp(d1, r)
-        large = 1 if abs(d0 - d1) > 180 else 0
-        return f"M{x0:.1f} {y0:.1f} A{r} {r} 0 {large} 1 {x1:.1f} {y1:.1f}"
-    ticks = "".join(
-        (lambda p0, p1: f'<line x1="{p0[0]:.1f}" y1="{p0[1]:.1f}" x2="{p1[0]:.1f}" y2="{p1[1]:.1f}" stroke="#5d6d67" stroke-width="2" stroke-linecap="round"/>')(gp(start - i * span / 6, gr + 3), gp(start - i * span / 6, gr + 8))
-        for i in range(7)
-    )
-    nx, ny = gp(val, gr - 6)
-    # ---- metered trickle draining from the db base (evenly spaced, fading) ----
+    sweep_start, sweep_end = 214.0, -34.0
+    span = sweep_start - sweep_end
+    needle_deg = sweep_start - 0.30 * span  # needle reads ~30%: deliberately slow
+
+    def polar(deg, radius):
+        angle = math.radians(deg)
+        return gx + radius * math.cos(angle), gy - radius * math.sin(angle)
+
+    def arc(from_deg, to_deg, radius):
+        (x0, y0), (x1, y1) = polar(from_deg, radius), polar(to_deg, radius)
+        long_arc = 1 if abs(from_deg - to_deg) > 180 else 0
+        return f"M{x0:.1f} {y0:.1f} A{radius} {radius} 0 {long_arc} 1 {x1:.1f} {y1:.1f}"
+
+    def tick(deg):
+        (ix, iy), (ox, oy) = polar(deg, gr + 3), polar(deg, gr + 8)
+        return (f'<line x1="{ix:.1f}" y1="{iy:.1f}" x2="{ox:.1f}" y2="{oy:.1f}" '
+                f'stroke="#5d6d67" stroke-width="2" stroke-linecap="round"/>')
+
+    def spark(cx, cy, radius, fill, op):
+        waist = radius * 0.28  # inner waist of the four-point star
+        return (f'<path transform="translate({cx},{cy})" '
+                f'd="M0 {-radius} L{waist:.1f} {-waist:.1f} L{radius} 0 L{waist:.1f} {waist:.1f} '
+                f'L0 {radius} L{-waist:.1f} {waist:.1f} L{-radius} 0 L{-waist:.1f} {-waist:.1f} Z" '
+                f'fill="{fill}" opacity="{op}"/>')
+
+    needle_x, needle_y = polar(needle_deg, gr - 6)
+    ticks = "".join(tick(sweep_start - i * span / 6) for i in range(7))
+    # Metered trickle draining from the db base: evenly spaced, fading out.
     drops = "".join(
         f'<circle cx="{cx}" cy="{cy}" r="{r}" fill="{a2}" opacity="{op}"/>'
-        for cx, cy, r, op in [(160,184,6,.95),(186,204,5.2,.7),(210,223,4.3,.48),(232,240,3.5,.3)]
+        for cx, cy, r, op in [(160, 184, 6, .95), (186, 204, 5.2, .7), (210, 223, 4.3, .48), (232, 240, 3.5, .3)]
     )
-    def spark(cx, cy, R, fill, op):
-        w = R * 0.28
-        return (f'<path transform="translate({cx},{cy})" d="M0 {-R} L{w:.1f} {-w:.1f} L{R} 0 '
-                f'L{w:.1f} {w:.1f} L0 {R} L{-w:.1f} {w:.1f} L{-R} 0 L{-w:.1f} {-w:.1f} Z" fill="{fill}" opacity="{op}"/>')
     return f'''<svg width="384" height="300" viewBox="0 0 384 300" fill="none">
       <defs>
         <linearGradient id="prDb" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#13231f"/><stop offset="1" stop-color="#0b1512"/></linearGradient>
@@ -211,9 +220,9 @@ def m_prune(a1,a2):  # database + throttle gauge + metered trickle + progress + 
       <!-- throttle gauge -->
       <circle cx="{gx}" cy="{gy}" r="{gr+13}" fill="#0d1a17" stroke="rgba(255,255,255,.08)" stroke-width="1.5"/>
       {ticks}
-      <path d="{arc(start, end, gr)}" fill="none" stroke="#28352f" stroke-width="6" stroke-linecap="round"/>
-      <path d="{arc(start, val, gr)}" fill="none" stroke="url(#prBar)" stroke-width="6" stroke-linecap="round"/>
-      <line x1="{gx}" y1="{gy}" x2="{nx:.1f}" y2="{ny:.1f}" stroke="#fff" stroke-width="3" stroke-linecap="round"/>
+      <path d="{arc(sweep_start, sweep_end, gr)}" fill="none" stroke="#28352f" stroke-width="6" stroke-linecap="round"/>
+      <path d="{arc(sweep_start, needle_deg, gr)}" fill="none" stroke="url(#prBar)" stroke-width="6" stroke-linecap="round"/>
+      <line x1="{gx}" y1="{gy}" x2="{needle_x:.1f}" y2="{needle_y:.1f}" stroke="#fff" stroke-width="3" stroke-linecap="round"/>
       <circle cx="{gx}" cy="{gy}" r="5" fill="{a2}" stroke="#08120f" stroke-width="1.5"/>
       <!-- progress -->
       <rect x="28" y="260" width="328" height="7" rx="3.5" fill="#233029"/>
