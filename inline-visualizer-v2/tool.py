@@ -3,7 +3,7 @@ title: Inline Visualizer
 author: Classic298
 author_url: https://github.com/Classic298
 funding_url: https://github.com/Classic298
-version: 2.1.4
+version: 2.2.0
 required_open_webui_version: 0.10.2
 description: Renders interactive HTML/SVG visualizations inline in chat. Requires "iframe Sandbox Allow Same Origin" to be enabled in Open WebUI Settings -> Interface. For design instructions, the model should call view_skill("visualize").
 """
@@ -15,7 +15,7 @@ from typing import Literal
 # version can be verified at runtime (search DevTools for
 # `data-iv-build` on <html>).  Bump on every protocol-level change
 # so stale cached iframes can be spotted immediately.
-_IV_BUILD = "2.1.4"
+_IV_BUILD = "2.2.0"
 
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field
@@ -3497,6 +3497,28 @@ def _build_csp_tag(level: str) -> str:
     if level == "none":
         return ""
 
+    if level == "offline":
+        # STRICT minus the public CDN allowlist: nothing loads from
+        # outside the Open WebUI origin. 'self' replaces the CDN hosts
+        # so admins can serve pinned libraries from the instance's own
+        # /static directory (srcdoc iframes inherit the parent page's
+        # origin and base URL, so 'self' == the Open WebUI host and
+        # paths like /static/iv-libs/chart.umd.min.js resolve locally).
+        return (
+            '<meta http-equiv="Content-Security-Policy" content="'
+            "default-src 'self'; "
+            "script-src 'unsafe-inline' 'unsafe-eval' 'self'; "
+            "style-src 'self' 'unsafe-inline'; "
+            "connect-src 'none'; "
+            "form-action 'none'; "
+            "img-src 'self' data: blob:; "
+            "font-src 'self' data:; "
+            "media-src 'self'; "
+            "object-src 'none'; "
+            "base-uri 'self'; "
+            '">'
+        )
+
     if level == "strict":
         return (
             '<meta http-equiv="Content-Security-Policy" content="'
@@ -3540,7 +3562,9 @@ def _build_html(security_level: str = "strict",
     its contents live into #iv-render.
     """
     csp_tag = _build_csp_tag(security_level)
-    strict_script = STRICT_SECURITY_SCRIPT if security_level == "strict" else ""
+    strict_script = (
+        STRICT_SECURITY_SCRIPT if security_level in ("strict", "offline") else ""
+    )
     safe_title = (title.replace('&', '&amp;').replace('<', '&lt;')
                        .replace('>', '&gt;').replace('"', '&quot;'))
     # Sanitize lang to a simple lowercase BCP-47 primary subtag.
@@ -3605,6 +3629,17 @@ def _build_html(security_level: str = "strict",
 #              requests. Use only for visualizations that fetch live API
 #              data (CORS restrictions still apply).
 #
+#   OFFLINE  — Zero outgoing connections of any kind. Same as STRICT but
+#              the public CDN hosts are dropped from script-src and
+#              'self' is allowed instead, so chart libraries must be
+#              served by the Open WebUI instance itself (drop the pinned
+#              files under its /static directory — see the README
+#              section "Offline mode"). External scripts, images, fonts
+#              and media are all blocked; only same-origin, data: and
+#              blob: sources load. For air-gapped / privacy-hardened
+#              deployments. URL parameter stripping is applied like in
+#              STRICT.
+#
 # Limitations that apply to ALL levels:
 # - Script execution is always permitted (required for core features).
 # - When iframe Same-Origin is enabled at the platform level, JS inside
@@ -3617,16 +3652,19 @@ class Tools:
 
     Security is controlled via the ``security_level`` valve, which applies
     a Content Security Policy to the rendered iframe.  Defaults to STRICT,
-    which blocks outbound network requests (fetch/XHR) and form submissions.
+    which blocks outbound network requests (fetch/XHR) and form submissions
+    while allowlisting three public script CDNs.  OFFLINE additionally
+    drops the CDN allowlist for zero external connections (self-hosted
+    libraries under the instance's /static directory still load).
     Script execution is always permitted — it is required for interactive
     visualizations, Chart.js, and D3.  See the developer reference above
     for the full security model and its limitations.
     """
 
     class Valves(BaseModel):
-        security_level: Literal["strict", "balanced", "none"] = Field(
+        security_level: Literal["strict", "balanced", "none", "offline"] = Field(
             default="strict",
-            description="Strict (default): blocks outbound fetch/XHR, images, and forms; scripts always allowed. Balanced: also allows external images. None: no restrictions.",
+            description="Strict (default): blocks outbound fetch/XHR, images, and forms; scripts always allowed (3 public CDNs allowlisted). Offline: like Strict but with ZERO external connections — even the CDNs are blocked; libraries self-hosted under Open WebUI's /static folder still load (see README). Balanced: like Strict but also allows external images. None: no restrictions.",
         )
         chime: bool = Field(
             default=True,
