@@ -3,7 +3,7 @@ title: Prune
 author: classic298
 author_url: https://github.com/Classic298
 funding_url: https://github.com/Classic298/prune-open-webui
-version: 0.10.8
+version: 0.10.9
 required_open_webui_version: 0.10.2
 description: Automatic, throttled database and storage cleanup. Configure retention via Valves (0 = disabled); pruning runs event-driven on one worker only, slowly, so a live instance stays responsive.
 """
@@ -30,8 +30,25 @@ _PACE = {
     "run_scan_rows_per_second": None,
 }
 
+# Cooperative cancellation. The manual UI can cancel the running pass; the flag
+# is checked at every throttle point and stage boundary so cancellation lands at
+# a batch boundary, never mid-transaction. BaseException (like asyncio's own
+# CancelledError) so the engine's broad `except Exception` guards cannot swallow
+# it. run_prune clears it at the start of every pass, so it never leaks forward.
+_CANCEL = {"active": False}
+
+
+class PruneCancelled(BaseException):
+    """Raised at a checkpoint when an admin cancels the running pass."""
+
+
+def _raise_if_cancelled():
+    if _CANCEL["active"]:
+        raise PruneCancelled()
+
 
 async def _pace(rows: int = 1):
+    _raise_if_cancelled()
     rate = _PACE["run_rows_per_second"]
     if rate is None:
         rate = _PACE["rows_per_second"]
@@ -41,6 +58,7 @@ async def _pace(rows: int = 1):
 
 async def _scan_pace(rows: int = 1):
     # Read-side throttle; at minimum yields the loop so other requests run
+    _raise_if_cancelled()
     rate = _PACE["run_scan_rows_per_second"]
     if rate is None:
         rate = _PACE["scan_rows_per_second"]
@@ -70,6 +88,7 @@ def _prog_begin(mode):
 def _prog_stage(stage, total=None):
     if not _PROGRESS.get("active"):
         return
+    _raise_if_cancelled()  # stage boundary: catches the vector/storage phases
     _PROGRESS.update(
         stage=stage,
         stages_done=_PROGRESS.get("stages_done", 0) + 1,
@@ -5356,6 +5375,7 @@ async def run_prune(form_data: PruneDataForm) -> dict:
             "error": "A prune operation is already in progress. Please wait for it to complete.",
         }
 
+    _CANCEL["active"] = False  # a stale cancel must never abort a fresh pass
     try:
         _prog_begin("preview" if form_data.dry_run else "execute")
         # Get vector database cleaner based on configuration
@@ -5661,6 +5681,7 @@ async def run_prune(form_data: PruneDataForm) -> dict:
                         orphan_kb_ids.append(str(kb_id))
                 _prog_tick(0, len(orphan_kb_ids))
                 for kb_id in orphan_kb_ids:
+                    _raise_if_cancelled()  # per-collection to_thread has no _pace
                     _prog_tick()
                     if await asyncio.to_thread(
                         vector_cleaner.delete_collection, kb_id
@@ -5999,7 +6020,9 @@ async def run_prune(form_data: PruneDataForm) -> dict:
         log.exception(f"Error during data pruning: {e}")
         return {"ok": False, "error": str(e)}
     finally:
-        # Always release lock, even if operation fails
+        # Always release lock, even if operation fails or is cancelled
+        # (PruneCancelled is a BaseException and passes straight through here).
+        _CANCEL["active"] = False
         _prog_end()
         PruneLock.release()
 
@@ -6009,7 +6032,7 @@ async def run_prune(form_data: PruneDataForm) -> dict:
 # manual admin UI + API (same deletion engine as the automatic passes)
 # ============================================================================
 
-PLUGIN_VERSION = "0.10.8"
+PLUGIN_VERSION = "0.10.9"
 MAX_RUN_LOG_LINES = 4000
 MAX_RUNS_KEPT = 20
 
@@ -6472,6 +6495,14 @@ async def _manual_execute(form_data: "PruneDataForm", run: dict, rates: dict = N
         else:
             run["result"] = outcome
         run["status"] = "done" if outcome.get("ok") else "failed"
+    except PruneCancelled:
+        verb = "scan" if run["mode"] == "preview" else "deletion"
+        log.warning(
+            f"Prune {run['mode']} cancelled by admin; the {verb} stopped at a "
+            "batch boundary. Anything already deleted stays deleted."
+        )
+        run["result"] = {"ok": False, "cancelled": True}
+        run["status"] = "cancelled"
     except Exception as e:
         log.exception(f"Prune run failed: {e}")
         run["result"] = {"ok": False, "error": str(e)}
@@ -6683,6 +6714,29 @@ def mount_routes(app, settings: dict):
             return JSONResponse(
                 status_code=500, content={"error": "Could not load preview details"}
             )
+
+    @router.post(f"{prefix}/api/runs/{{run_id}}/cancel", include_in_schema=False)
+    async def cancel_run(request: Request, run_id: str, user=Depends(get_admin_user)):
+        # Bearer-gated like preview/execute: a state-changing control on the run.
+        if not request.headers.get("authorization", "").lower().startswith("bearer "):
+            return JSONResponse(
+                status_code=403, content={"ok": False, "error": "Bearer token required"}
+            )
+        run = next((item for item in _STATE["runs"] if item["id"] == run_id), None)
+        if run is None:
+            return JSONResponse(
+                status_code=404, content={"ok": False, "error": "not found"}
+            )
+        if run["status"] != "running":
+            # Already finished; nothing to stop. Not an error.
+            return {"ok": True, "run_id": run_id, "status": run["status"]}
+        # One manual run holds the lock at a time, so this only signals that run.
+        # The pass stops at its next batch/stage checkpoint and marks itself
+        # cancelled; already-committed deletions are kept.
+        run["cancel_requested"] = True
+        _CANCEL["active"] = True
+        log.info(f"prune: cancel requested for {run['mode']} run {run_id} by {user.email}")
+        return {"ok": True, "run_id": run_id, "status": "cancelling"}
 
     @router.get(f"{prefix}/api/runs", include_in_schema=False)
     async def runs(user=Depends(get_admin_user)):
@@ -7002,6 +7056,7 @@ button{border:1px solid var(--border);border-radius:10px;padding:8px 16px;cursor
 font-weight:600;background:var(--surface);color:var(--text)}
 button.primary{background:var(--accent);color:var(--fg-on-accent);border-color:transparent}
 button.danger{background:var(--danger);color:#fff;border-color:transparent}
+button.ghost{background:none;color:var(--danger);border-color:var(--danger)}
 button:disabled{opacity:.5;cursor:default}
 .actions{display:flex;gap:10px;margin-top:16px;align-items:center}
 table{width:100%;border-collapse:collapse;font-size:13px}
@@ -7050,6 +7105,7 @@ font-size:12px;line-height:1.45}
 <div class="actions">
   <button class="primary" id="btnPreview">Preview</button>
   <button class="danger" id="btnExecute">Execute…</button>
+  <button class="ghost" id="btnCancel" style="display:none">Cancel</button>
   <span id="status"></span>
 </div>
 <div class="prog" id="prog">
@@ -7229,9 +7285,21 @@ async function api(path,opts={}){
 const msg=t=>{document.getElementById('msg').textContent=t||'';};
 const fmt=n=>(n||0).toLocaleString();
 
+let currentRunId=null;
 function setBusy(b){
   document.getElementById('btnPreview').disabled=b;
   document.getElementById('btnExecute').disabled=b;
+  const cancel=document.getElementById('btnCancel');
+  cancel.style.display=b?'':'none';
+  if(b){cancel.disabled=false;cancel.textContent='Cancel';}
+}
+
+async function doCancel(){
+  if(!currentRunId)return;
+  const cancel=document.getElementById('btnCancel');
+  cancel.disabled=true;cancel.textContent='Cancelling…';
+  try{await api('/api/runs/'+currentRunId+'/cancel',{method:'POST'});}
+  catch(e){cancel.disabled=false;cancel.textContent='Cancel';msg('Cancel failed: '+e.message);}
 }
 
 // A preview is an unthrottled scan that often finishes inside a single
@@ -7382,7 +7450,9 @@ async function pollRun(id){
     }
     if(r.status==='running'){pollTimer=setTimeout(()=>pollRun(id),1000);return;}
     setBusy(false);
-    if(isPreview){
+    if(r.status==='cancelled'){
+      msg(isPreview?'Preview cancelled.':'Run cancelled — anything already deleted was kept. Re-run to finish (safe, every write is idempotent).');
+    }else if(isPreview){
       if(r.status==='done'&&r.result){msg('');renderPreview(r.result,id);}
       else msg('Preview failed: '+((r.result&&r.result.error)||'see server log.'));
     }else{
@@ -7400,7 +7470,7 @@ async function startRun(path,startMsg){
   showProgress({},path.indexOf('preview')>=0?'preview':'manual');
   try{
     const data=await api(path,{method:'POST',body:JSON.stringify(form())});
-    msg('');pollRun(data.run_id);
+    currentRunId=data.run_id;msg('');pollRun(data.run_id);
   }catch(e){msg(e.message);showProgress(null);setBusy(false);}
 }
 
@@ -7418,7 +7488,7 @@ function doExecute(){
 async function initStatus(){
   try{
     const s=await api('/api/status');
-    if(s.running&&s.current){msg('A prune run is already in progress.');setBusy(true);pollRun(s.current.id);}
+    if(s.running&&s.current){msg('A prune run is already in progress.');currentRunId=s.current.id;setBusy(true);pollRun(s.current.id);}
     else if(s.running){
       document.getElementById('status').textContent='An automatic prune pass is currently running.';
       showProgress(s.progress||{},s.progress&&s.progress.mode);
@@ -7433,6 +7503,7 @@ async function initStatus(){
 build();
 document.getElementById('btnPreview').onclick=doPreview;
 document.getElementById('btnExecute').onclick=doExecute;
+document.getElementById('btnCancel').onclick=doCancel;
 if(!token)msg('No session token found — log in to Open WebUI in this browser first.');
 else initStatus();
 </script>
