@@ -3,7 +3,7 @@ title: Prune
 author: classic298
 author_url: https://github.com/Classic298
 funding_url: https://github.com/Classic298/prune-open-webui
-version: 0.10.7
+version: 0.10.8
 required_open_webui_version: 0.10.2
 description: Automatic, throttled database and storage cleanup. Configure retention via Valves (0 = disabled); pruning runs event-driven on one worker only, slowly, so a live instance stays responsive.
 """
@@ -4155,24 +4155,87 @@ def count_audio_cache_files(max_age_days: Optional[int]) -> int:
     return count
 
 
+# Cross-request caches for the preview detail pages. Cursors let page N+1
+# resume a streamed scan after page N's last primary key instead of
+# re-walking the table from row zero (an export would otherwise be O(n^2)).
+# Classification sets are reused across the pages of one export burst.
+_DETAIL_CURSORS: dict = {}  # (run_id, category, page, page_size) -> resume-after PK
+_DETAIL_SETS: dict = {}  # (run_id, category) -> (expires_at, payload)
+_DETAIL_SETS_TTL = 120
+
+
+def _detail_sets_get(run_id, category):
+    entry = _DETAIL_SETS.get((run_id, category)) if run_id else None
+    if entry and entry[0] > time.time():
+        return entry[1]
+    _DETAIL_SETS.pop((run_id, category), None)
+    return None
+
+
+def _detail_sets_put(run_id, category, payload):
+    if not run_id:
+        return
+    if len(_DETAIL_SETS) > 32:
+        _DETAIL_SETS.clear()
+    _DETAIL_SETS[(run_id, category)] = (time.time() + _DETAIL_SETS_TTL, payload)
+
+
 async def get_preview_detail_page(
-    form_data: PruneDataForm, category: str, page: int, page_size: int
+    form_data: PruneDataForm, category: str, page: int, page_size: int, run_id=None
 ) -> dict:
     """Return one read-only page of identifiers selected by the preview rules."""
     page = max(1, page)
     page_size = 100 if page_size == 100 else 50
     start = (page - 1) * page_size
 
-    async def collect(rows):
-        items = []
-        index = 0
-        async for row in rows:
-            if index >= start and len(items) < page_size:
-                items.append(row)
-            index += 1
+    resume_after = _DETAIL_CURSORS.get((run_id, category, page, page_size)) if page > 1 else None
+    skip = 0 if resume_after is not None else start
+
+    def remember_next_cursor(last_pk):
+        if run_id is not None and last_pk is not None:
+            if len(_DETAIL_CURSORS) > 4096:
+                _DETAIL_CURSORS.clear()
+            _DETAIL_CURSORS[(run_id, category, page + 1, page_size)] = last_pk
+
+    async def collect(keyed_rows):
+        """Collect one page from an async stream of (primary_key, item)."""
+        items, last_pk, seen = [], None, 0
+        async for pk, item in keyed_rows:
+            seen += 1
+            if seen <= skip:
+                continue
+            items.append(item)
+            last_pk = pk
             if len(items) == page_size:
                 break
+        remember_next_cursor(last_pk)
         return items
+
+    async def page_query(stmt, pk_column):
+        """One page of a plain SELECT, keyset-resumed when a cursor is known."""
+        if resume_after is not None:
+            stmt = stmt.where(pk_column > resume_after)
+        else:
+            stmt = stmt.offset(start)
+        async with get_async_db_context() as db:
+            result = await db.execute(stmt.order_by(pk_column).limit(page_size))
+            rows = result.fetchall()
+        remember_next_cursor(rows[-1][0] if rows else None)
+        return rows
+
+    async def liveness_sets(shared_resource_type, shared_exempt):
+        cached = _detail_sets_get(run_id, category)
+        if cached is not None:
+            return cached
+        all_users = (await Users.get_users())["users"]
+        active_user_ids = {str(user.id) for user in all_users}
+        exempt_ids = set()
+        if shared_resource_type and shared_exempt:
+            exempt_ids = await get_shared_resource_ids(
+                shared_resource_type, active_user_ids
+            )
+        _detail_sets_put(run_id, category, (active_user_ids, exempt_ids))
+        return active_user_ids, exempt_ids
 
     async def owned_rows(
         model,
@@ -4181,19 +4244,14 @@ async def get_preview_detail_page(
         shared_exempt=True,
         label_column=None,
     ):
-        all_users = (await Users.get_users())["users"]
-        active_user_ids = {str(user.id) for user in all_users}
-        exempt_ids = set()
-        if shared_resource_type and shared_exempt:
-            exempt_ids = await get_shared_resource_ids(
-                shared_resource_type, active_user_ids
-            )
+        active_user_ids, exempt_ids = await liveness_sets(shared_resource_type, shared_exempt)
+        resume_clause = model.id > resume_after if resume_after is not None else None
         async with get_async_db_context() as db:
-            async def rows():
+            async def matching_rows():
                 columns = (model.id, owner_column)
                 if label_column is not None:
                     columns += (label_column,)
-                async for row in stream_rows(db, *columns):
+                async for row in stream_rows(db, *columns, filter_clause=resume_clause):
                     record_id, owner_id = row[:2]
                     if (
                         str(owner_id) not in active_user_ids
@@ -4202,14 +4260,14 @@ async def get_preview_detail_page(
                         item = {"id": str(record_id), "owner": str(owner_id)}
                         if label_column is not None:
                             item["title"] = row[2] or "(untitled)"
-                        yield item
+                        yield record_id, item
 
-            return await collect(rows())
+            return await collect(matching_rows())
 
     if category == "inactive_users":
         cutoff_time = int(time.time()) - (form_data.delete_inactive_users_days or 0) * 86400
         users = (await Users.get_users())["users"] if form_data.delete_inactive_users_days else []
-        rows = (
+        matching_users = (
             {
                 "id": str(user.id),
                 "label": getattr(user, "email", None) or getattr(user, "name", None) or str(user.id),
@@ -4220,7 +4278,7 @@ async def get_preview_detail_page(
             and (not form_data.exempt_pending_users or user.role != "pending")
             and user.last_active_at < cutoff_time
         )
-        items = list(rows)[start : start + page_size]
+        items = list(matching_users)[start : start + page_size]
     elif category == "old_chats":
         if form_data.days is None:
             items = []
@@ -4233,33 +4291,29 @@ async def get_preview_detail_page(
                 conditions.append(or_(Chat.pinned == False, Chat.pinned == None))
             if form_data.exempt_chats_in_folders and hasattr(Chat, "folder_id"):
                 conditions.append(Chat.folder_id == None)
-            async with get_async_db_context() as db:
-                result = await db.execute(
-                    select(Chat.id, Chat.user_id, Chat.title)
-                    .where(and_(*conditions))
-                    .offset(start)
-                    .limit(page_size)
-                )
-                items = [
-                    {"id": str(row[0]), "owner": str(row[1]), "title": row[2] or "(untitled)"}
-                    for row in result.fetchall()
-                ]
+            rows = await page_query(
+                select(Chat.id, Chat.user_id, Chat.title).where(and_(*conditions)),
+                Chat.id,
+            )
+            items = [
+                {"id": str(row[0]), "owner": str(row[1]), "title": row[2] or "(untitled)"}
+                for row in rows
+            ]
     elif category == "old_knowledge_bases":
         if not form_data.delete_knowledge_bases_older_than_days:
             items = []
         else:
             cutoff_time = int(time.time()) - form_data.delete_knowledge_bases_older_than_days * 86400
-            async with get_async_db_context() as db:
-                result = await db.execute(
-                    select(Knowledge.id, Knowledge.user_id, Knowledge.name)
-                    .where(_knowledge_age_column(form_data.knowledge_bases_age_field) < cutoff_time)
-                    .offset(start)
-                    .limit(page_size)
-                )
-                items = [
-                    {"id": str(row[0]), "owner": str(row[1]), "title": row[2] or "(unnamed)"}
-                    for row in result.fetchall()
-                ]
+            rows = await page_query(
+                select(Knowledge.id, Knowledge.user_id, Knowledge.name).where(
+                    _knowledge_age_column(form_data.knowledge_bases_age_field) < cutoff_time
+                ),
+                Knowledge.id,
+            )
+            items = [
+                {"id": str(row[0]), "owner": str(row[1]), "title": row[2] or "(unnamed)"}
+                for row in rows
+            ]
     elif category in {
         "orphaned_chats", "orphaned_tools", "orphaned_functions", "orphaned_prompts",
         "orphaned_knowledge_bases", "orphaned_models", "orphaned_notes", "orphaned_skills",
@@ -4281,94 +4335,110 @@ async def get_preview_detail_page(
             model, owner_column, shared_type, shared_exempt, label_column
         )
     elif category == "orphaned_chat_messages":
-        async with get_async_db_context() as db:
-            result = await db.execute(
-                select(ChatMessage.id, ChatMessage.chat_id)
-                .where(not_(ChatMessage.chat_id.in_(select(Chat.id))))
-                .offset(start)
-                .limit(page_size)
-            )
-            items = [{"id": str(row[0]), "parent": str(row[1])} for row in result.fetchall()]
+        rows = await page_query(
+            select(ChatMessage.id, ChatMessage.chat_id).where(
+                not_(ChatMessage.chat_id.in_(select(Chat.id)))
+            ),
+            ChatMessage.id,
+        )
+        items = [{"id": str(row[0]), "parent": str(row[1])} for row in rows]
     elif category == "old_channel_messages":
         if form_data.channel_message_max_age_days is None or Message is None:
             items = []
         else:
             cutoff_ns = (int(time.time()) - form_data.channel_message_max_age_days * 86400) * 1_000_000_000
-            async with get_async_db_context() as db:
-                result = await db.execute(
-                    select(Message.id, Message.channel_id)
-                    .where(_old_channel_message_filter(cutoff_ns, form_data.exempt_pinned_channel_messages))
-                    .offset(start)
-                    .limit(page_size)
-                )
-                items = [{"id": str(row[0]), "parent": str(row[1])} for row in result.fetchall()]
+            rows = await page_query(
+                select(Message.id, Message.channel_id).where(
+                    _old_channel_message_filter(cutoff_ns, form_data.exempt_pinned_channel_messages)
+                ),
+                Message.id,
+            )
+            items = [{"id": str(row[0]), "parent": str(row[1])} for row in rows]
     elif category in {"orphaned_automations", "orphaned_automation_runs"}:
-        if Automation is None:
+        if Automation is None or (
+            category == "orphaned_automation_runs" and AutomationRun is None
+        ):
             items = []
         else:
-            all_users = (await Users.get_users())["users"]
-            active_user_ids = {str(user.id) for user in all_users}
-            async with get_async_db_context() as db:
+            automation_sets = _detail_sets_get(run_id, category)
+            if automation_sets is None:
+                all_users = (await Users.get_users())["users"]
+                active_user_ids = {str(user.id) for user in all_users}
                 all_automation_ids = set()
                 orphaned_automation_ids = set()
-                async for automation_id, owner_id in stream_rows(
-                    db, Automation.id, Automation.user_id
-                ):
-                    all_automation_ids.add(automation_id)
-                    if str(owner_id) not in active_user_ids:
-                        orphaned_automation_ids.add(automation_id)
+                async with get_async_db_context() as db:
+                    async for automation_id, owner_id in stream_rows(
+                        db, Automation.id, Automation.user_id
+                    ):
+                        all_automation_ids.add(automation_id)
+                        if str(owner_id) not in active_user_ids:
+                            orphaned_automation_ids.add(automation_id)
+                _detail_sets_put(run_id, category, (all_automation_ids, orphaned_automation_ids))
+            else:
+                all_automation_ids, orphaned_automation_ids = automation_sets
+            async with get_async_db_context() as db:
                 if category == "orphaned_automations":
-                    async def rows():
+                    resume_clause = Automation.id > resume_after if resume_after is not None else None
+
+                    async def matching_rows():
                         async for automation_id, owner_id in stream_rows(
-                            db, Automation.id, Automation.user_id
+                            db, Automation.id, Automation.user_id, filter_clause=resume_clause
                         ):
                             if automation_id in orphaned_automation_ids:
-                                yield {"id": str(automation_id), "owner": str(owner_id)}
+                                yield automation_id, {"id": str(automation_id), "owner": str(owner_id)}
 
-                    items = await collect(rows())
-                elif AutomationRun is None:
-                    items = []
                 else:
-                    async def rows():
-                        async for run_id, automation_id in stream_rows(
-                            db, AutomationRun.id, AutomationRun.automation_id
+                    resume_clause = AutomationRun.id > resume_after if resume_after is not None else None
+
+                    async def matching_rows():
+                        async for automation_run_id, automation_id in stream_rows(
+                            db, AutomationRun.id, AutomationRun.automation_id, filter_clause=resume_clause
                         ):
                             if (
                                 automation_id is None
                                 or automation_id not in all_automation_ids
                                 or automation_id in orphaned_automation_ids
                             ):
-                                yield {"id": str(run_id), "parent": str(automation_id)}
+                                yield automation_run_id, {"id": str(automation_run_id), "parent": str(automation_id)}
 
-                    items = await collect(rows())
+                items = await collect(matching_rows())
     elif category in {"orphaned_channels", "orphaned_channel_messages"}:
         if Channel is None or Message is None:
             items = []
         else:
-            all_users = (await Users.get_users())["users"]
-            active_user_ids = {str(user.id) for user in all_users}
-            async with get_async_db_context() as db:
+            channel_sets = _detail_sets_get(run_id, category)
+            if channel_sets is None:
+                all_users = (await Users.get_users())["users"]
+                active_user_ids = {str(user.id) for user in all_users}
                 all_channel_ids = set()
                 orphaned_channel_ids = set()
-                async for channel_id, owner_id in stream_rows(
-                    db, Channel.id, Channel.user_id
-                ):
-                    all_channel_ids.add(channel_id)
-                    if str(owner_id) not in active_user_ids:
-                        orphaned_channel_ids.add(channel_id)
+                async with get_async_db_context() as db:
+                    async for channel_id, owner_id in stream_rows(
+                        db, Channel.id, Channel.user_id
+                    ):
+                        all_channel_ids.add(channel_id)
+                        if str(owner_id) not in active_user_ids:
+                            orphaned_channel_ids.add(channel_id)
+                _detail_sets_put(run_id, category, (all_channel_ids, orphaned_channel_ids))
+            else:
+                all_channel_ids, orphaned_channel_ids = channel_sets
+            async with get_async_db_context() as db:
                 if category == "orphaned_channels":
-                    async def rows():
+                    resume_clause = Channel.id > resume_after if resume_after is not None else None
+
+                    async def matching_rows():
                         async for channel_id, owner_id in stream_rows(
-                            db, Channel.id, Channel.user_id
+                            db, Channel.id, Channel.user_id, filter_clause=resume_clause
                         ):
                             if channel_id in orphaned_channel_ids:
-                                yield {"id": str(channel_id), "owner": str(owner_id)}
+                                yield channel_id, {"id": str(channel_id), "owner": str(owner_id)}
 
-                    items = await collect(rows())
                 else:
-                    async def rows():
+                    resume_clause = Message.id > resume_after if resume_after is not None else None
+
+                    async def matching_rows():
                         async for message_id, channel_id in stream_rows(
-                            db, Message.id, Message.channel_id
+                            db, Message.id, Message.channel_id, filter_clause=resume_clause
                         ):
                             if channel_id is None:
                                 continue
@@ -4379,10 +4449,13 @@ async def get_preview_detail_page(
                                 form_data.delete_orphaned_channels
                                 and channel_id in orphaned_channel_ids
                             ):
-                                yield {"id": str(message_id), "parent": str(channel_id)}
+                                yield message_id, {"id": str(message_id), "parent": str(channel_id)}
 
-                    items = await collect(rows())
+                items = await collect(matching_rows())
     elif category == "orphaned_uploads":
+        # Positional paging: storage listings have no primary key to keyset on,
+        # so every page re-enumerates the backend. Exports of huge buckets are
+        # size-confirmed in the UI.
         active_paths = await _get_active_file_paths(set())
         provider = (STORAGE_PROVIDER or "local").lower()
 
@@ -4406,17 +4479,32 @@ async def get_preview_detail_page(
 
         items = await asyncio.to_thread(scan_uploads)
     elif category == "audio_cache_files":
-        cutoff_time = time.time() - (form_data.audio_cache_max_age_days or 0) * 86400
-        paths = []
-        if form_data.audio_cache_max_age_days is not None:
-            for audio_dir in (Path(CACHE_DIR) / "audio" / "speech", Path(CACHE_DIR) / "audio" / "transcriptions"):
-                if audio_dir.exists():
-                    paths.extend(
-                        {"id": str(path), "label": path.name}
-                        for path in audio_dir.iterdir()
-                        if path.is_file() and path.stat().st_mtime < cutoff_time
-                    )
-        items = paths[start : start + page_size]
+        if form_data.audio_cache_max_age_days is None:
+            items = []
+        else:
+            cutoff_time = time.time() - form_data.audio_cache_max_age_days * 86400
+
+            def scan_audio_cache():
+                matches = []
+                for audio_dir in (
+                    Path(CACHE_DIR) / "audio" / "speech",
+                    Path(CACHE_DIR) / "audio" / "transcriptions",
+                ):
+                    # The cache churns concurrently; a file vanishing mid-walk
+                    # must not fail the page (mirrors count_audio_cache_files).
+                    try:
+                        if not audio_dir.exists():
+                            continue
+                        matches.extend(
+                            {"id": str(path), "label": path.name}
+                            for path in audio_dir.iterdir()
+                            if path.is_file() and path.stat().st_mtime < cutoff_time
+                        )
+                    except OSError:
+                        continue
+                return matches[start : start + page_size]
+
+            items = await asyncio.to_thread(scan_audio_cache)
     else:
         return {"items": [], "available": False}
 
@@ -5921,7 +6009,7 @@ async def run_prune(form_data: PruneDataForm) -> dict:
 # manual admin UI + API (same deletion engine as the automatic passes)
 # ============================================================================
 
-PLUGIN_VERSION = "0.10.6"
+PLUGIN_VERSION = "0.10.8"
 MAX_RUN_LOG_LINES = 4000
 MAX_RUNS_KEPT = 20
 
@@ -6566,18 +6654,25 @@ def mount_routes(app, settings: dict):
 
     @router.get(f"{prefix}/api/runs/{{run_id}}/details", include_in_schema=False)
     async def preview_details(
+        request: Request,
         run_id: str,
         category: str,
         page: int = 1,
         page_size: int = 50,
         user=Depends(get_admin_user),
     ):
+        # Same bearer requirement as preview: whole-database scans must not
+        # be reachable with cookie-only auth. The UI always sends the header.
+        if not request.headers.get("authorization", "").lower().startswith("bearer "):
+            return JSONResponse(
+                status_code=403, content={"error": "Bearer token required"}
+            )
         run = next((item for item in _STATE["runs"] if item["id"] == run_id), None)
         if run is None or run["mode"] != "preview" or run["status"] != "done":
             return JSONResponse(status_code=404, content={"error": "Preview not found"})
         try:
             details = await get_preview_detail_page(
-                PruneDataForm(**run["form"]), category, page, page_size
+                PruneDataForm(**run["form"]), category, page, page_size, run_id=run_id
             )
             details.update(
                 {"page": max(1, page), "page_size": 100 if page_size == 100 else 50}
@@ -7177,92 +7272,98 @@ function showProgress(p,mode){
 }
 
 const SUMMARY_KEYS={
-    'Inactive users':'inactive_users','Old chats (age-based)':'old_chats','Orphaned chats':'orphaned_chats',
-    'Orphaned chat messages':'orphaned_chat_messages','Orphaned automations':'orphaned_automations',
-    'Orphaned automation runs':'orphaned_automation_runs','Old channel messages (age-based)':'old_channel_messages',
-    'Orphaned channels':'orphaned_channels','Orphaned channel messages':'orphaned_channel_messages',
-    'Orphaned file records':'orphaned_files','Orphaned upload files':'orphaned_uploads','Orphaned tools':'orphaned_tools',
-    'Orphaned functions':'orphaned_functions','Orphaned prompts':'orphaned_prompts','Orphaned knowledge bases':'orphaned_knowledge_bases',
-    'Old knowledge bases (age-based)':'old_knowledge_bases','Orphaned models':'orphaned_models','Orphaned notes':'orphaned_notes',
-    'Orphaned skills':'orphaned_skills','Orphaned folders':'orphaned_folders','Orphaned vector collections':'orphaned_vector_collections',
-    'Orphaned KB metadata embeddings':'orphaned_kb_metadata','Orphaned memories':'orphaned_memories','Old audio cache files':'audio_cache_files'
+  'Inactive users':'inactive_users','Old chats (age-based)':'old_chats','Orphaned chats':'orphaned_chats',
+  'Orphaned chat messages':'orphaned_chat_messages','Orphaned automations':'orphaned_automations',
+  'Orphaned automation runs':'orphaned_automation_runs','Old channel messages (age-based)':'old_channel_messages',
+  'Orphaned channels':'orphaned_channels','Orphaned channel messages':'orphaned_channel_messages',
+  'Orphaned file records':'orphaned_files','Orphaned upload files':'orphaned_uploads','Orphaned tools':'orphaned_tools',
+  'Orphaned functions':'orphaned_functions','Orphaned prompts':'orphaned_prompts','Orphaned knowledge bases':'orphaned_knowledge_bases',
+  'Old knowledge bases (age-based)':'old_knowledge_bases','Orphaned models':'orphaned_models','Orphaned notes':'orphaned_notes',
+  'Orphaned skills':'orphaned_skills','Orphaned folders':'orphaned_folders','Orphaned vector collections':'orphaned_vector_collections',
+  'Orphaned KB metadata embeddings':'orphaned_kb_metadata','Orphaned memories':'orphaned_memories','Old audio cache files':'audio_cache_files'
 };
 let previewRunId=null;
 function renderPreview(result,runId){
-    previewRunId=runId;
+  previewRunId=runId;
   document.getElementById('previewCard').style.display='';
   let html='';
   for(const [group,items] of Object.entries(result.summary||{})){
     const rows=Object.entries(items).filter(([,v])=>v>0);
     if(!rows.length)continue;
     html+=`<table><tr><th colspan="2">${group}</th></tr>`+
-            rows.map(([k,v])=>`<tr><td><button class="detail-toggle" data-category="${SUMMARY_KEYS[k]}" data-total="${v}" aria-expanded="false">${k}</button></td><td class="n">${fmt(v)} <button class="detail-toggle detail-icon" data-category="${SUMMARY_KEYS[k]}" data-total="${v}" aria-expanded="false" aria-label="Show details for ${k}"><span class="detail-chevron" aria-hidden="true">⌄</span></button></td></tr><tr class="detail-row" style="display:none"><td colspan="2"></td></tr>`).join('')+'</table>';
+      rows.map(([k,v])=>
+        `<tr><td><button class="detail-toggle" data-category="${SUMMARY_KEYS[k]}" data-total="${v}" aria-expanded="false">${k}</button></td>`+
+        `<td class="n">${fmt(v)} <button class="detail-toggle detail-icon" data-category="${SUMMARY_KEYS[k]}" data-total="${v}" aria-expanded="false" aria-label="Show details for ${k}">`+
+        `<span class="detail-chevron" aria-hidden="true">⌄</span></button></td></tr>`+
+        `<tr class="detail-row" style="display:none"><td colspan="2"></td></tr>`
+      ).join('')+'</table>';
   }
   html+=`<p class="total">Total items: ${fmt(result.total)}</p>`;
   if(!result.total)html='<p>Nothing to delete — database is clean for the selected options.</p>';
-    const body=document.getElementById('previewBody');body.innerHTML=html;
-    body.querySelectorAll('.detail-toggle').forEach(button=>button.onclick=()=>toggleDetails(button));
+  const body=document.getElementById('previewBody');body.innerHTML=html;
+  body.querySelectorAll('.detail-toggle').forEach(button=>button.onclick=()=>toggleDetails(button));
 }
 
 async function toggleDetails(button){
-    const row=button.parentElement.parentElement.nextElementSibling;
-    const controls=button.closest('tr').querySelectorAll('.detail-toggle');
-    const chevron=button.closest('tr').querySelector('.detail-chevron');
-    if(row.style.display!=='none'){row.style.display='none';controls.forEach(control=>control.setAttribute('aria-expanded','false'));chevron.classList.remove('open');return;}
-    row.style.display='';
-    controls.forEach(control=>control.setAttribute('aria-expanded','true'));
-    chevron.classList.add('open');
-    const cell=row.firstElementChild;cell.textContent='Loading…';
-    await loadDetails(button,cell,1,50);
+  const row=button.parentElement.parentElement.nextElementSibling;
+  const controls=button.closest('tr').querySelectorAll('.detail-toggle');
+  const chevron=button.closest('tr').querySelector('.detail-chevron');
+  if(row.style.display!=='none'){row.style.display='none';controls.forEach(control=>control.setAttribute('aria-expanded','false'));chevron.classList.remove('open');return;}
+  row.style.display='';
+  controls.forEach(control=>control.setAttribute('aria-expanded','true'));
+  chevron.classList.add('open');
+  const cell=row.firstElementChild;cell.textContent='Loading…';
+  await loadDetails(button,cell,1,50);
 }
 
 async function loadDetails(button,cell,page,pageSize){
-    try{
-        const data=await api('/api/runs/'+previewRunId+'/details?category='+encodeURIComponent(button.dataset.category)+'&page='+page+'&page_size='+pageSize);
-        if(!data.available){cell.textContent='This backend reports this category as a count only.';return;}
-        cell.textContent='';
-        const controls=document.createElement('div');controls.className='detail-controls';
-        const size=document.createElement('select');
-        [50,100].forEach(value=>{const option=document.createElement('option');option.value=value;option.textContent=value+' per page';option.selected=value===pageSize;size.appendChild(option);});
-        size.onchange=()=>loadDetails(button,cell,1,Number(size.value));controls.appendChild(size);
-        const exportButton=document.createElement('button');exportButton.className='detail-export';exportButton.textContent='Export JSON';exportButton.onclick=()=>exportDetails(button,exportButton);controls.appendChild(exportButton);
-        const previous=document.createElement('button');previous.textContent='Previous';previous.disabled=page===1;previous.onclick=()=>loadDetails(button,cell,page-1,pageSize);controls.appendChild(previous);
-        const next=document.createElement('button');next.textContent='Next';next.disabled=data.items.length<pageSize||page*pageSize>=Number(button.dataset.total);next.onclick=()=>loadDetails(button,cell,page+1,pageSize);controls.appendChild(next);
-        const label=document.createElement('span');label.textContent='Page '+page;controls.appendChild(label);cell.appendChild(controls);
-        const list=document.createElement('ol');list.className='detail-list';
-        for(const [index,item] of data.items.entries()){const entry=document.createElement('li');entry.textContent=((page-1)*pageSize+index+1)+'. '+Object.entries(item).map(([key,value])=>key+': '+value).join(' · ');list.appendChild(entry);}
-        if(!data.items.length){const entry=document.createElement('li');entry.textContent='No matching items remain.';list.appendChild(entry);}
-        cell.appendChild(list);
-    }catch(error){cell.textContent='Could not load details: '+error.message;}
+  try{
+    const data=await api('/api/runs/'+previewRunId+'/details?category='+encodeURIComponent(button.dataset.category)+'&page='+page+'&page_size='+pageSize);
+    if(!data.available){cell.textContent='This backend reports this category as a count only.';return;}
+    cell.textContent='';
+    const controls=document.createElement('div');controls.className='detail-controls';
+    const size=document.createElement('select');
+    [50,100].forEach(value=>{const option=document.createElement('option');option.value=value;option.textContent=value+' per page';option.selected=value===pageSize;size.appendChild(option);});
+    size.onchange=()=>loadDetails(button,cell,1,Number(size.value));controls.appendChild(size);
+    const exportButton=document.createElement('button');exportButton.className='detail-export';exportButton.textContent='Export JSON';exportButton.onclick=()=>exportDetails(button,exportButton);controls.appendChild(exportButton);
+    const previous=document.createElement('button');previous.textContent='Previous';previous.disabled=page===1;previous.onclick=()=>loadDetails(button,cell,page-1,pageSize);controls.appendChild(previous);
+    const next=document.createElement('button');next.textContent='Next';next.disabled=data.items.length<pageSize||page*pageSize>=Number(button.dataset.total);next.onclick=()=>loadDetails(button,cell,page+1,pageSize);controls.appendChild(next);
+    const label=document.createElement('span');label.textContent='Page '+page;controls.appendChild(label);cell.appendChild(controls);
+    const list=document.createElement('ol');list.className='detail-list';
+    for(const [index,item] of data.items.entries()){const entry=document.createElement('li');entry.textContent=((page-1)*pageSize+index+1)+'. '+Object.entries(item).map(([key,value])=>key+': '+value).join(' · ');list.appendChild(entry);}
+    if(!data.items.length){const entry=document.createElement('li');entry.textContent='No matching items remain.';list.appendChild(entry);}
+    cell.appendChild(list);
+  }catch(error){cell.textContent='Could not load details: '+error.message;}
 }
 
 async function exportDetails(button,exportButton){
-    const category=button.dataset.category;
-    const total=Number(button.dataset.total);
-    const originalText=exportButton.textContent;
-    exportButton.disabled=true;exportButton.textContent='Exporting…';
-    try{
-        const pageSize=100,items=[];
-        for(let page=1;items.length<total;page++){
-            const data=await api('/api/runs/'+previewRunId+'/details?category='+encodeURIComponent(category)+'&page='+page+'&page_size='+pageSize);
-            if(!data.available)throw new Error('This category cannot be exported.');
-            items.push(...data.items);
-            if(data.items.length<pageSize)break;
-        }
-        const payload={
-            category,
-            preview_run_id:previewRunId,
-            exported_at:new Date().toISOString(),
-            item_count:items.length,
-            items
-        };
-        const blob=new Blob([JSON.stringify(payload,null,2)],{type:'application/json'});
-        const link=document.createElement('a');
-        link.href=URL.createObjectURL(blob);
-        link.download='prune-preview-'+category+'-'+previewRunId+'.json';
-        document.body.appendChild(link);link.click();link.remove();URL.revokeObjectURL(link.href);
-    }catch(error){alert('Export failed: '+error.message);}
-    finally{exportButton.disabled=false;exportButton.textContent=originalText;}
+  const category=button.dataset.category;
+  const total=Number(button.dataset.total);
+  if(total>10000&&!confirm('Export will fetch '+total.toLocaleString()+' items in about '+Math.ceil(total/100).toLocaleString()+' requests and may take a while. Continue?'))return;
+  const originalText=exportButton.textContent;
+  exportButton.disabled=true;exportButton.textContent='Exporting…';
+  try{
+    const pageSize=100,items=[];
+    for(let page=1;items.length<total;page++){
+      const data=await api('/api/runs/'+previewRunId+'/details?category='+encodeURIComponent(category)+'&page='+page+'&page_size='+pageSize);
+      if(!data.available)throw new Error('This category cannot be exported.');
+      items.push(...data.items);
+      if(data.items.length<pageSize)break;
+    }
+    const payload={
+      category,
+      preview_run_id:previewRunId,
+      exported_at:new Date().toISOString(),
+      item_count:items.length,
+      items
+    };
+    const blob=new Blob([JSON.stringify(payload,null,2)],{type:'application/json'});
+    const link=document.createElement('a');
+    link.href=URL.createObjectURL(blob);
+    link.download='prune-preview-'+category+'-'+previewRunId+'.json';
+    document.body.appendChild(link);link.click();link.remove();URL.revokeObjectURL(link.href);
+  }catch(error){alert('Export failed: '+error.message);}
+  finally{exportButton.disabled=false;exportButton.textContent=originalText;}
 }
 
 let pollTimer=null;
@@ -7282,7 +7383,7 @@ async function pollRun(id){
     if(r.status==='running'){pollTimer=setTimeout(()=>pollRun(id),1000);return;}
     setBusy(false);
     if(isPreview){
-    if(r.status==='done'&&r.result){msg('');renderPreview(r.result,id);}
+      if(r.status==='done'&&r.result){msg('');renderPreview(r.result,id);}
       else msg('Preview failed: '+((r.result&&r.result.error)||'see server log.'));
     }else{
       msg(r.status==='done'?'Run finished.':'Run failed — see log.');
