@@ -830,43 +830,46 @@ _KNOWN_CDNS = (
     " https://unpkg.com"
 )
 
+# The strict and balanced tags interpolate the (constant) CDN allowlist, so
+# assemble them once at import instead of rebuilding the string on every render.
+_CSP_STRICT = (
+    '<meta http-equiv="Content-Security-Policy" content="'
+    f"default-src 'self'; "
+    f"script-src 'unsafe-inline' {_KNOWN_CDNS}; "
+    "style-src 'self' 'unsafe-inline'; "
+    "connect-src 'none'; "
+    "form-action 'none'; "
+    "img-src 'self' data: blob:; "
+    "font-src 'self' data:; "
+    "media-src 'self'; "
+    "object-src 'none'; "
+    "base-uri 'self'; "
+    '">'
+)
+_CSP_BALANCED = (
+    '<meta http-equiv="Content-Security-Policy" content="'
+    f"default-src 'self'; "
+    f"script-src 'unsafe-inline' {_KNOWN_CDNS}; "
+    "style-src 'self' 'unsafe-inline'; "
+    "connect-src 'none'; "
+    "form-action 'none'; "
+    "img-src * data: blob:; "
+    "font-src 'self' data:; "
+    "media-src 'self'; "
+    "object-src 'none'; "
+    "base-uri 'self'; "
+    '">'
+)
+
 
 def _build_csp_tag(level: str) -> str:
     """Return a <meta> CSP tag for the given security level, or empty string."""
     if level == "none":
         return ""
-
     if level == "strict":
-        return (
-            '<meta http-equiv="Content-Security-Policy" content="'
-            f"default-src 'self'; "
-            f"script-src 'unsafe-inline' {_KNOWN_CDNS}; "
-            "style-src 'self' 'unsafe-inline'; "
-            "connect-src 'none'; "
-            "form-action 'none'; "
-            "img-src 'self' data: blob:; "
-            "font-src 'self' data:; "
-            "media-src 'self'; "
-            "object-src 'none'; "
-            "base-uri 'self'; "
-            '">' 
-        )
-
+        return _CSP_STRICT
     # balanced: block outbound connections & forms, allow external images
-    return (
-        '<meta http-equiv="Content-Security-Policy" content="'
-        f"default-src 'self'; "
-        f"script-src 'unsafe-inline' {_KNOWN_CDNS}; "
-        "style-src 'self' 'unsafe-inline'; "
-        "connect-src 'none'; "
-        "form-action 'none'; "
-        "img-src * data: blob:; "
-        "font-src 'self' data:; "
-        "media-src 'self'; "
-        "object-src 'none'; "
-        "base-uri 'self'; "
-        '">' 
-    )
+    return _CSP_BALANCED
 
 
 def _build_html(content: str, security_level: str = "strict",

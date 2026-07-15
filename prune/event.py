@@ -3,7 +3,7 @@ title: Prune
 author: classic298
 author_url: https://github.com/Classic298
 funding_url: https://github.com/Classic298/prune-open-webui
-version: 0.10.9
+version: 0.10.10
 required_open_webui_version: 0.10.2
 description: Automatic, throttled database and storage cleanup. Configure retention via Valves (0 = disabled); pruning runs event-driven on one worker only, slowly, so a live instance stays responsive.
 """
@@ -1570,9 +1570,10 @@ class PGVectorDatabaseCleaner(VectorDatabaseCleaner):
             for collection_name, pid in rows:
                 if not collection_name or pid is None:
                     continue
-                if not str(collection_name).startswith(prefix):
+                collection_name = str(collection_name)
+                if not collection_name.startswith(prefix):
                     continue
-                uid = str(collection_name)[len(prefix) :]
+                uid = collection_name[len(prefix) :]
                 bucket = present.get(uid)
                 if bucket is not None:  # only active users we were asked about
                     bucket.add(str(pid))
@@ -1640,10 +1641,12 @@ class MilvusDatabaseCleaner(VectorDatabaseCleaner):
 
             # Count collections with our prefix that are not expected
             count = 0
+            prefix = f"{self.collection_prefix}_"
+            prefix_len = len(self.collection_prefix) + 1
             for collection_name in all_collections:
-                if collection_name.startswith(f"{self.collection_prefix}_"):
+                if collection_name.startswith(prefix):
                     # Extract the original name (remove prefix)
-                    original_name = collection_name[len(self.collection_prefix) + 1 :]
+                    original_name = collection_name[prefix_len:]
                     # Restore dashes (Milvus converts - to _)
                     original_name = original_name.replace("_", "-")
 
@@ -1672,9 +1675,11 @@ class MilvusDatabaseCleaner(VectorDatabaseCleaner):
             )
             all_collections = self.vector_db_client.client.list_collections()
 
+            prefix = f"{self.collection_prefix}_"
+            prefix_len = len(self.collection_prefix) + 1
             for collection_name in all_collections:
-                if collection_name.startswith(f"{self.collection_prefix}_"):
-                    original_name = collection_name[len(self.collection_prefix) + 1 :]
+                if collection_name.startswith(prefix):
+                    original_name = collection_name[prefix_len:]
                     original_name = original_name.replace("_", "-")
 
                     if original_name not in expected_collections:
@@ -1701,10 +1706,12 @@ class MilvusDatabaseCleaner(VectorDatabaseCleaner):
             deleted_count = 0
             errors = []
 
+            prefix = f"{self.collection_prefix}_"
+            prefix_len = len(self.collection_prefix) + 1
             for collection_name in all_collections:
-                if collection_name.startswith(f"{self.collection_prefix}_"):
+                if collection_name.startswith(prefix):
                     # Extract the original name (remove prefix)
-                    original_name = collection_name[len(self.collection_prefix) + 1 :]
+                    original_name = collection_name[prefix_len:]
                     # Restore dashes (Milvus converts - to _)
                     original_name = original_name.replace("_", "-")
 
@@ -2222,11 +2229,13 @@ class QdrantDatabaseCleaner(VectorDatabaseCleaner):
             all_collections = self.client.get_collections().collections
             count = 0
 
+            prefix = f"{self.collection_prefix}_"
+            prefix_len = len(self.collection_prefix) + 1
             for collection in all_collections:
                 collection_name = collection.name
-                if collection_name.startswith(f"{self.collection_prefix}_"):
+                if collection_name.startswith(prefix):
                     # Remove prefix to get original name
-                    original_name = collection_name[len(self.collection_prefix) + 1 :]
+                    original_name = collection_name[prefix_len:]
 
                     if original_name not in expected_collections:
                         count += 1
@@ -2250,10 +2259,12 @@ class QdrantDatabaseCleaner(VectorDatabaseCleaner):
             )
             all_collections = self.client.get_collections().collections
 
+            prefix = f"{self.collection_prefix}_"
+            prefix_len = len(self.collection_prefix) + 1
             for collection in all_collections:
                 collection_name = collection.name
-                if collection_name.startswith(f"{self.collection_prefix}_"):
-                    original_name = collection_name[len(self.collection_prefix) + 1 :]
+                if collection_name.startswith(prefix):
+                    original_name = collection_name[prefix_len:]
                     if original_name not in expected_collections:
                         yield (original_name, collection_name)
         except Exception as e:
@@ -2276,11 +2287,13 @@ class QdrantDatabaseCleaner(VectorDatabaseCleaner):
             deleted_count = 0
             errors = []
 
+            prefix = f"{self.collection_prefix}_"
+            prefix_len = len(self.collection_prefix) + 1
             for collection in all_collections:
                 collection_name = collection.name
-                if collection_name.startswith(f"{self.collection_prefix}_"):
+                if collection_name.startswith(prefix):
                     # Remove prefix to get original name
-                    original_name = collection_name[len(self.collection_prefix) + 1 :]
+                    original_name = collection_name[prefix_len:]
 
                     if original_name not in expected_collections:
                         try:
@@ -6032,7 +6045,7 @@ async def run_prune(form_data: PruneDataForm) -> dict:
 # manual admin UI + API (same deletion engine as the automatic passes)
 # ============================================================================
 
-PLUGIN_VERSION = "0.10.9"
+PLUGIN_VERSION = "0.10.10"
 MAX_RUN_LOG_LINES = 4000
 MAX_RUNS_KEPT = 20
 
@@ -6560,6 +6573,9 @@ def mount_routes(app, settings: dict):
     prefix = "/" + settings["route_prefix"].strip("/ ")
     if prefix == "/":
         prefix = "/prune"  # an empty valve would shadow the SPA at '/'
+    # __PREFIX__ resolves to a fixed value for this router's life, so substitute
+    # once here rather than rescanning the multi-KB template on every page load.
+    page_html = _PAGE_HTML.replace("__PREFIX__", prefix)
     stale = [
         r
         for r in app.router.routes
@@ -6601,7 +6617,7 @@ def mount_routes(app, settings: dict):
                     redirect.raw_headers.append((header_key, header_value))
             return redirect
         return HTMLResponse(
-            _PAGE_HTML.replace("__PREFIX__", prefix),
+            page_html,
             headers={"Cache-Control": "no-store"},
         )
 
