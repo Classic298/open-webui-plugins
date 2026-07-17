@@ -158,6 +158,8 @@ class PruneDataForm(BaseModel):
     delete_orphaned_folders: bool = True
     delete_orphaned_chat_messages: bool = True
     delete_orphaned_automations: bool = True
+    delete_empty_groups: bool = False
+    empty_group_grace_days: int = 30
     # Channel pruning
     channel_message_max_age_days: Optional[int] = (
         None  # age-based channel message cleanup; opt-in
@@ -207,6 +209,7 @@ class PrunePreviewResult(BaseModel):
     orphaned_chat_messages: int = 0
     orphaned_automations: int = 0
     orphaned_automation_runs: int = 0
+    empty_groups: int = 0
     old_channel_messages: int = 0
     orphaned_channels: int = 0
     orphaned_channel_messages: int = 0
@@ -235,6 +238,7 @@ class PrunePreviewResult(BaseModel):
             + self.orphaned_chat_messages
             + self.orphaned_automations
             + self.orphaned_automation_runs
+            + self.empty_groups
             + self.old_channel_messages
             + self.orphaned_channels
             + self.orphaned_channel_messages
@@ -281,6 +285,7 @@ class PrunePreviewResult(BaseModel):
             },
             "Organization": {
                 "Orphaned folders": self.orphaned_folders,
+                "Empty groups": self.empty_groups,
             },
             "Storage": {
                 "Orphaned vector collections": self.orphaned_vector_collections,
@@ -2991,6 +2996,7 @@ from open_webui.models.functions import Function, Functions
 from open_webui.models.tools import Tool, Tools
 from open_webui.models.skills import Skill, Skills
 from open_webui.models.folders import Folder, Folders, FolderModel
+from open_webui.models.groups import Group, GroupMember
 from open_webui.internal.db import get_async_db, get_async_db_context
 from open_webui.config import CACHE_DIR, UPLOAD_DIR, STORAGE_PROVIDER
 from open_webui.config import (
@@ -3130,6 +3136,56 @@ async def get_shared_resource_ids(
             log.debug(f"access_grant table does not exist: {e}")
             return set()
         raise
+
+
+async def get_group_cleanup_candidates(form_data: PruneDataForm) -> dict:
+    """Return empty groups whose last update satisfies the configured grace."""
+    candidates = {"empty_groups": []}
+    if not form_data.delete_empty_groups:
+        return candidates
+
+    now = int(time.time())
+    empty_cutoff = now - max(0, int(form_data.empty_group_grace_days or 0)) * 86400
+
+    try:
+        async with get_async_db_context() as db:
+            group_result = await db.execute(select(Group.id).limit(1))
+            if group_result.first() is None:
+                return candidates
+            member_result = await db.execute(
+                select(GroupMember.group_id)
+                .join(User, User.id == GroupMember.user_id)
+                .distinct()
+            )
+            member_group_ids = {str(row[0]) for row in member_result.fetchall()}
+            async for group_id, owner_id, name, updated_at in stream_rows(
+                db,
+                Group.id,
+                Group.user_id,
+                Group.name,
+                Group.updated_at,
+            ):
+                await _scan_pace()
+                group_id = str(group_id)
+                item = {
+                    "id": group_id,
+                    "owner": str(owner_id),
+                    "title": name or "(unnamed)",
+                }
+                if group_id not in member_group_ids:
+                    if (
+                        form_data.delete_empty_groups
+                        and (updated_at is not None or form_data.empty_group_grace_days == 0)
+                        and (updated_at or 0) <= empty_cutoff
+                    ):
+                        candidates["empty_groups"].append(item)
+    except _TABLE_MISSING_ERRORS as e:
+        if _is_table_missing_error(e):
+            log.warning(f"Group pruning skipped: required table is unavailable: {e}")
+            return {"empty_groups": []}
+        raise
+
+    return candidates
 
 
 async def get_preserved_kb_ids(form_data, active_user_ids: Set[str]) -> Set[str]:
@@ -4346,6 +4402,9 @@ async def get_preview_detail_page(
                 {"id": str(row[0]), "owner": str(row[1]), "title": row[2] or "(unnamed)"}
                 for row in rows
             ]
+    elif category == "empty_groups":
+        group_candidates = await get_group_cleanup_candidates(form_data)
+        items = group_candidates[category][start : start + page_size]
     elif category in {
         "orphaned_chats", "orphaned_tools", "orphaned_functions", "orphaned_prompts",
         "orphaned_knowledge_bases", "orphaned_models", "orphaned_notes", "orphaned_skills",
@@ -5323,6 +5382,63 @@ async def delete_orphaned_memory_rows(active_user_ids) -> int:
     return deleted
 
 
+async def delete_group_cleanup_candidates(form_data: PruneDataForm) -> dict:
+    """Delete eligible empty groups and all membership/grant references."""
+    candidates = await get_group_cleanup_candidates(form_data)
+    deleted = {"empty_groups": 0}
+    category = "empty_groups"
+    if candidates[category]:
+        _prog_stage("Deleting empty groups", len(candidates[category]))
+        async with get_async_db_context() as db:
+            for item in candidates[category]:
+                group_id = item["id"]
+                group_result = await db.execute(
+                    select(Group.id, Group.updated_at)
+                    .where(Group.id == group_id)
+                    .with_for_update()
+                )
+                group_row = group_result.first()
+                if group_row is None:
+                    continue
+                member_result = await db.execute(
+                    select(GroupMember.id)
+                    .join(User, User.id == GroupMember.user_id)
+                    .where(GroupMember.group_id == group_id)
+                    .limit(1)
+                )
+                has_members = member_result.first() is not None
+                grace_days = form_data.empty_group_grace_days
+                cutoff = int(time.time()) - max(0, int(grace_days or 0)) * 86400
+                updated_at = group_row[1]
+                old_enough = (
+                    updated_at is not None or grace_days == 0
+                ) and (updated_at or 0) <= cutoff
+                still_eligible = not has_members
+                if not old_enough or not still_eligible:
+                    await db.rollback()
+                    continue
+                if AccessGrant is not None:
+                    await db.execute(
+                        delete(AccessGrant).where(
+                            AccessGrant.principal_type == "group",
+                            AccessGrant.principal_id == group_id,
+                        )
+                    )
+                await db.execute(
+                    delete(GroupMember).where(GroupMember.group_id == group_id)
+                )
+                result = await db.execute(delete(Group).where(Group.id == group_id))
+                await db.commit()
+                deleted[category] += result.rowcount or 0
+                _prog_tick()
+                await _pace()
+        if deleted[category]:
+            log.info(
+                f"Deleted {deleted[category]} {category.replace('_', ' ')}"
+            )
+    return deleted
+
+
 def cleanup_audio_cache(max_age_days: Optional[int] = 30) -> int:
     """
     Clean up audio cache files older than specified days.
@@ -5429,6 +5545,8 @@ async def run_prune(form_data: PruneDataForm) -> dict:
                 form_data.exempt_pending_users,
                 all_users,
             )
+            _prog_stage("Finding groups eligible for deletion")
+            group_candidates = await get_group_cleanup_candidates(form_data)
             _prog_stage("Counting old chats")
             old_chats = await count_old_chats(
                 form_data.days,
@@ -5498,6 +5616,7 @@ async def run_prune(form_data: PruneDataForm) -> dict:
                 orphaned_chat_messages=orphaned_counts["chat_messages"],
                 orphaned_automations=orphaned_counts["automations"],
                 orphaned_automation_runs=orphaned_counts["automation_runs"],
+                empty_groups=len(group_candidates["empty_groups"]),
                 old_channel_messages=old_channel_messages,
                 orphaned_channels=orphaned_counts["channels"],
                 orphaned_channel_messages=orphaned_counts["channel_messages"],
@@ -5528,6 +5647,11 @@ async def run_prune(form_data: PruneDataForm) -> dict:
                 log.info("No inactive users found to delete")
         else:
             log.info("Skipping inactive user deletion (disabled)")
+
+        # Membership cleanup during user deletion can make groups eligible.
+        # Remove groups before preservation sets are built so their revoked
+        # grants cannot keep ownerless resources alive in this same sweep.
+        await delete_group_cleanup_candidates(form_data)
 
         # Stage 1: Delete old chats — stream IDs only to avoid loading full chat JSON
         if form_data.days is not None:
@@ -6045,7 +6169,7 @@ async def run_prune(form_data: PruneDataForm) -> dict:
 # manual admin UI + API (same deletion engine as the automatic passes)
 # ============================================================================
 
-PLUGIN_VERSION = "0.10.10"
+PLUGIN_VERSION = "0.10.11"
 MAX_RUN_LOG_LINES = 4000
 MAX_RUNS_KEPT = 20
 
@@ -6263,6 +6387,15 @@ def _days(value) -> Optional[int]:
     return value if value > 0 else None
 
 
+def _grace_days(value, default: int = 30) -> int:
+    """Grace periods accept zero, but invalid or negative values fail closed."""
+    try:
+        value = int(value)
+    except (TypeError, ValueError):
+        return default
+    return value if value >= 0 else default
+
+
 def _make_cleaner():
     return get_vector_database_cleaner(
         VECTOR_DB,
@@ -6309,6 +6442,8 @@ def _form_from_valves(v: dict) -> PruneDataForm:
         delete_orphaned_folders=v["delete_orphaned_folders"],
         delete_orphaned_chat_messages=v["delete_orphaned_chat_messages"],
         delete_orphaned_automations=v["delete_orphaned_automations"],
+        delete_empty_groups=v.get("delete_empty_groups", False),
+        empty_group_grace_days=_grace_days(v.get("empty_group_grace_days", 30)),
         channel_message_max_age_days=_days(v["channel_message_max_age_days"]),
         exempt_pinned_channel_messages=v["exempt_pinned_channel_messages"],
         delete_orphaned_channels=v["delete_orphaned_channels"],
@@ -6564,6 +6699,13 @@ def _sanitize_manual_form(body: dict) -> dict:
         except (TypeError, ValueError):
             grace = -1
         out["orphan_file_grace_hours"] = grace if grace >= 0 else 24
+    for key in ("empty_group_grace_days",):
+        if key in out:
+            try:
+                grace = int(out[key])
+            except (TypeError, ValueError):
+                grace = -1
+            out[key] = grace if grace >= 0 else 30
     return out
 
 
@@ -6910,7 +7052,15 @@ class Event:
         )
         delete_orphaned_automations: bool = Field(
             default=True,
-            description="Delete automations, including their run history, that belonged to deleted users.\n\n---\n\n#### 💬 Channels",
+            description="Delete automations, including their run history, that belonged to deleted users.\n\n---\n\n#### 👥 Groups",
+        )
+        delete_empty_groups: bool = Field(
+            default=False,
+            description="⚠️ Delete groups that have no members after their grace period. This deletes the group and its access grants. Keep off for externally synchronized groups unless you understand that synchronization lifecycle.",
+        )
+        empty_group_grace_days: int = Field(
+            default=30,
+            description="↳ Keep empty groups for this many days after their last membership change before deleting them. 0 = no grace period.\n\n---\n\n#### 💬 Channels",
         )
         channel_message_max_age_days: int = Field(
             default=0,
@@ -7215,6 +7365,13 @@ const SECTIONS = [
   {k:'delete_orphaned_folders',t:'chk',def:true,label:'Folders of deleted users',tip:'Chat folders whose owner account no longer exists.'},
   {k:'delete_orphaned_automations',t:'chk',def:true,label:'Automations of deleted users',tip:'Automations and their run history.'},
  ]},
+ {title:'👥 Groups', fields:[
+    {k:'delete_empty_groups',t:'chk',def:false,label:'Empty groups',
+     tip:'Delete groups with no members after the grace period.',
+     warn:'Destructive: deletes the group and its access grants. Keep this off for externally synchronized groups unless you understand their synchronization lifecycle. Preview the candidates before executing.'},
+    {k:'empty_group_grace_days',t:'num',label:'↳ Empty-group grace period',unit:'days',val:30,
+     tip:'Measured from the group last-updated timestamp, which Open WebUI updates when membership changes. 0 = delete eligible groups immediately.'},
+ ]},
  {title:'💬 Channels', fields:[
   {k:'channel_message_max_age_days',t:'num',label:'Delete channel messages older than',unit:'days',
    tip:'Age-based cleanup of channel messages; the channels themselves are kept. Empty = off.'},
@@ -7276,7 +7433,7 @@ function build(){
   }
 }
 
-const ZERO_OK=new Set(['orphan_file_grace_hours','scan_rows_per_second','deletion_rows_per_second']);
+const ZERO_OK=new Set(['orphan_file_grace_hours','empty_group_grace_days','scan_rows_per_second','deletion_rows_per_second']);
 function form(){
   const f={};
   for(const sec of SECTIONS)for(const fl of sec.fields){
@@ -7364,6 +7521,7 @@ const SUMMARY_KEYS={
   'Orphaned functions':'orphaned_functions','Orphaned prompts':'orphaned_prompts','Orphaned knowledge bases':'orphaned_knowledge_bases',
   'Old knowledge bases (age-based)':'old_knowledge_bases','Orphaned models':'orphaned_models','Orphaned notes':'orphaned_notes',
   'Orphaned skills':'orphaned_skills','Orphaned folders':'orphaned_folders','Orphaned vector collections':'orphaned_vector_collections',
+    'Empty groups':'empty_groups',
   'Orphaned KB metadata embeddings':'orphaned_kb_metadata','Orphaned memories':'orphaned_memories','Old audio cache files':'audio_cache_files'
 };
 let previewRunId=null;
