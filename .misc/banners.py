@@ -1,5 +1,6 @@
 # Generates one self-contained banner HTML per plugin. Rendered to PNG by renderall.mjs.
 import html
+import math
 
 W, H = 1600, 400
 
@@ -160,23 +161,73 @@ def m_vision(a1,a2):  # image + scan + arrow + text card + eye
       <g stroke="#cfd6ff" stroke-width="4" stroke-linecap="round"><line x1="260" y1="126" x2="340" y2="126"/><line x1="260" y1="146" x2="340" y2="146"/><line x1="260" y1="166" x2="340" y2="166"/><line x1="260" y1="186" x2="316" y2="186"/></g>
     </svg>'''
 
-def m_prune(a1,a2):  # db cylinder + declining bars + trickle + broom + check
+def m_prune(a1, a2):  # database, throttle gauge, metered trickle, progress bar, sparkles
+    # Gauge geometry: a 248-degree dial centred at (gx, gy). Points are polar,
+    # so a helper turns an angle + radius into an (x, y) on the dial.
+    gx, gy, gr = 306, 70, 27
+    sweep_start, sweep_end = 214.0, -34.0
+    span = sweep_start - sweep_end
+    needle_deg = sweep_start - 0.30 * span  # needle reads ~30%: deliberately slow
+
+    def polar(deg, radius):
+        angle = math.radians(deg)
+        return gx + radius * math.cos(angle), gy - radius * math.sin(angle)
+
+    def arc(from_deg, to_deg, radius):
+        (x0, y0), (x1, y1) = polar(from_deg, radius), polar(to_deg, radius)
+        long_arc = 1 if abs(from_deg - to_deg) > 180 else 0
+        return f"M{x0:.1f} {y0:.1f} A{radius} {radius} 0 {long_arc} 1 {x1:.1f} {y1:.1f}"
+
+    def tick(deg):
+        (ix, iy), (ox, oy) = polar(deg, gr + 3), polar(deg, gr + 8)
+        return (f'<line x1="{ix:.1f}" y1="{iy:.1f}" x2="{ox:.1f}" y2="{oy:.1f}" '
+                f'stroke="#5d6d67" stroke-width="2" stroke-linecap="round"/>')
+
+    def spark(cx, cy, radius, fill, op):
+        waist = radius * 0.28  # inner waist of the four-point star
+        return (f'<path transform="translate({cx},{cy})" '
+                f'd="M0 {-radius} L{waist:.1f} {-waist:.1f} L{radius} 0 L{waist:.1f} {waist:.1f} '
+                f'L0 {radius} L{-waist:.1f} {waist:.1f} L{-radius} 0 L{-waist:.1f} {-waist:.1f} Z" '
+                f'fill="{fill}" opacity="{op}"/>')
+
+    needle_x, needle_y = polar(needle_deg, gr - 6)
+    ticks = "".join(tick(sweep_start - i * span / 6) for i in range(7))
+    # Metered trickle draining from the db base: evenly spaced, fading out.
+    drops = "".join(
+        f'<circle cx="{cx}" cy="{cy}" r="{r}" fill="{a2}" opacity="{op}"/>'
+        for cx, cy, r, op in [(160, 184, 6, .95), (186, 204, 5.2, .7), (210, 223, 4.3, .48), (232, 240, 3.5, .3)]
+    )
     return f'''<svg width="384" height="300" viewBox="0 0 384 300" fill="none">
+      <defs>
+        <linearGradient id="prDb" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#13231f"/><stop offset="1" stop-color="#0b1512"/></linearGradient>
+        <linearGradient id="prBar" x1="0" y1="0" x2="1" y2="0"><stop offset="0" stop-color="{a1}"/><stop offset="1" stop-color="{a2}"/></linearGradient>
+      </defs>
+      <!-- database (hero) -->
       <g stroke="{a1}" stroke-width="3">
-        <ellipse cx="96" cy="70" rx="62" ry="20" fill="#101c19"/>
-        <path d="M34 70 v96 a62 20 0 0 0 124 0 v-96" fill="#101c19"/>
-        <path d="M34 110 a62 20 0 0 0 124 0" fill="none" stroke-width="2.5" opacity=".6"/>
-        <path d="M34 146 a62 20 0 0 0 124 0" fill="none" stroke-width="2.5" opacity=".6"/>
+        <path d="M42 76 v100 a54 17 0 0 0 108 0 v-100" fill="url(#prDb)"/>
+        <ellipse cx="96" cy="76" rx="54" ry="17" fill="url(#prDb)"/>
+        <path d="M42 110 a54 17 0 0 0 108 0" fill="none" stroke-width="2.4" opacity=".55"/>
+        <path d="M42 143 a54 17 0 0 0 108 0" fill="none" stroke-width="2.4" opacity=".55"/>
       </g>
-      <!-- declining bars -->
-      <g>{"".join(f'<rect x="{214+i*32}" y="{210-h}" width="22" height="{h}" rx="4" fill="{a2}" opacity="{1-i*0.16}"/>' for i,h in enumerate([124,86,54,30]))}</g>
-      <rect x="206" y="216" width="150" height="4" rx="2" fill="rgba(255,255,255,.14)"/>
-      <!-- trickle dots -->
-      <g fill="{a2}"><circle cx="188" cy="118" r="5" opacity=".9"/><circle cx="192" cy="150" r="4" opacity=".7"/><circle cx="196" cy="180" r="3" opacity=".5"/></g>
-      <!-- broom -->
-      <g transform="translate(120,196) rotate(18)"><rect x="0" y="0" width="7" height="56" rx="3.5" fill="{a1}"/><path d="M-14 56 h35 l-6 28 h-23 Z" fill="{a2}"/><g stroke="#0b0c12" stroke-width="1.5"><line x1="-6" y1="62" x2="-9" y2="84"/><line x1="3.5" y1="62" x2="3.5" y2="84"/><line x1="13" y1="62" x2="16" y2="84"/></g></g>
-      <!-- check -->
-      <g transform="translate(150,44)"><circle r="16" fill="{a2}"/><path d="M-7 0 l5 6 l9 -11" fill="none" stroke="#0b0c12" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round"/></g>
+      <path d="M55 71 a44 12 0 0 1 82 0" fill="none" stroke="#7fe6d2" stroke-width="2" stroke-linecap="round" opacity=".5"/>
+      <!-- clean sparkles -->
+      {spark(150,44,9,'#ffffff',.95)}{spark(128,32,5,a2,.85)}{spark(62,54,4.5,'#eafff8',.7)}
+      <!-- verified-safe badge -->
+      <g transform="translate(146,92)"><circle r="14" fill="{a2}"/><path d="M-6 0 l4.5 5.5 l8.5 -10.5" fill="none" stroke="#08120f" stroke-width="3.4" stroke-linecap="round" stroke-linejoin="round"/></g>
+      <!-- metered trickle out -->
+      <path d="M150 176 C 176 198, 205 210, 234 236" fill="none" stroke="{a2}" stroke-width="2" stroke-dasharray="1 11" stroke-linecap="round" opacity=".55"/>
+      {drops}
+      <!-- throttle gauge -->
+      <circle cx="{gx}" cy="{gy}" r="{gr+13}" fill="#0d1a17" stroke="rgba(255,255,255,.08)" stroke-width="1.5"/>
+      {ticks}
+      <path d="{arc(sweep_start, sweep_end, gr)}" fill="none" stroke="#28352f" stroke-width="6" stroke-linecap="round"/>
+      <path d="{arc(sweep_start, needle_deg, gr)}" fill="none" stroke="url(#prBar)" stroke-width="6" stroke-linecap="round"/>
+      <line x1="{gx}" y1="{gy}" x2="{needle_x:.1f}" y2="{needle_y:.1f}" stroke="#fff" stroke-width="3" stroke-linecap="round"/>
+      <circle cx="{gx}" cy="{gy}" r="5" fill="{a2}" stroke="#08120f" stroke-width="1.5"/>
+      <!-- progress -->
+      <rect x="28" y="260" width="328" height="7" rx="3.5" fill="#233029"/>
+      <rect x="28" y="260" width="206" height="7" rx="3.5" fill="url(#prBar)"/>
+      <circle cx="234" cy="263.5" r="6" fill="#fff"/>
     </svg>'''
 
 banners = {
@@ -200,9 +251,9 @@ banners = {
     badges=["Filter + Tool","No core changes","On-demand","Re-queryable"],
     tag="Give a <b>text-only model</b> the ability to work with images. Call <b>analyze_image()</b> on demand and re-query with new questions any time.",
     motif=m_vision("#f59e0b","#fb7185")),
-  "prune": dict(a1="#14b8a6", a2="#22c55e", emoji="🧹", title="Prune", title_size=86,
-    badges=["Event function","Throttled","Dry-run default","Redis-coordinated"],
-    tag="Automatic, <b>throttled</b> database &amp; storage cleanup driven by system events. Purposefully slow, so a live instance never notices.",
+  "prune": dict(a1="#14b8a6", a2="#22c55e", emoji="🧹", title="Prune", title_size=90,
+    badges=["Event function","Throttled deletes","Dry-run preview","Multi-worker safe"],
+    tag="Automatic, <b>throttled</b> database &amp; storage cleanup driven by system events. Purposefully slow, so a live instance <b>never even notices</b>.",
     motif=m_prune("#14b8a6","#22c55e")),
 }
 
