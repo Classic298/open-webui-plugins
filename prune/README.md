@@ -1,5 +1,7 @@
 # 🧹 Prune
 
+<img width="6400" height="1600" alt="banner-prune" src="https://github.com/user-attachments/assets/1815585b-1171-4bf9-ac17-a228f319f15e" />
+
 Automatic, **throttled** database and storage cleanup for your entire instance, driven by one Event function. Old chats, inactive users, orphaned records, orphaned uploads and orphaned vector collections are cleaned up in the background, slowly on purpose, so a live instance never notices. A built-in admin page (default `/prune`) lets you preview and run cleanups manually.
 
 > [!IMPORTANT]
