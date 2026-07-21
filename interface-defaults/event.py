@@ -271,12 +271,7 @@ class Event:
         floatingActionButtons: str = Field(
             title="Floating Quick Action Buttons (JSON)",
             default="",
-            description='The actual quick-action buttons shown when text is selected, as a JSON array (leave Default to keep Open WebUI\'s built-in Ask/Explain). Each button is {"id","label","input","prompt"}; prompt supports {{SELECTED_CONTENT}}, {{CONTENT}} and {{INPUT_CONTENT}}. See the plugin README for a copy-paste tutorial and admin ideas. Invalid JSON is ignored.',
-        )
-        splitLargeChunks: bool = Field(
-            title="Split Large Chunks",
-            default=False,
-            description="Split large chunks\n\n---\n\n#### ⌨️ Input",
+            description='The actual quick-action buttons shown when text is selected, as a JSON array (leave Default to keep Open WebUI\'s built-in Ask/Explain). Each button is {"id","label","input","prompt"}; prompt supports {{SELECTED_CONTENT}}, {{CONTENT}} and {{INPUT_CONTENT}}. See the plugin README for a copy-paste tutorial and admin ideas. Invalid JSON is ignored.\n\n---\n\n#### ⌨️ Input',
         )
 
         # ── Input ───────────────────────────────────────────────────────────
