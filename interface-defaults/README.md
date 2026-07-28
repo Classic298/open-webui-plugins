@@ -10,6 +10,18 @@ Set the **Settings → Interface** defaults for your entire instance from one fu
 > [!TIP]
 > **🚀 [Jump to Setup](#setup)** — paste, enable, configure. Under a minute, no restart.
 
+<img width="2800" height="940" alt="04-functions-list" src="https://github.com/user-attachments/assets/00b08fb7-c7cc-4ab1-a317-58b504a1e621" />
+
+<img width="2360" height="2480" alt="01-valves-overview" src="https://github.com/user-attachments/assets/78fdbf34-1b0b-44cb-8307-7d5db58af1b2" />
+
+<img width="2360" height="2480" alt="02-valves-quick-actions" src="https://github.com/user-attachments/assets/10e842ad-fc67-4384-ab05-5fd398ceaa9d" />
+
+<img width="2360" height="2480" alt="03-valves-triggers" src="https://github.com/user-attachments/assets/de57c9e2-a267-4a6c-be26-a454964378a6" />
+
+<img width="2800" height="1280" alt="05-quick-actions-live" src="https://github.com/user-attachments/assets/f2407d82-f325-4f77-b777-33ce9ad4e84c" />
+
+<img width="2600" height="2000" alt="06-user-settings-interface" src="https://github.com/user-attachments/assets/b287a5d0-8532-45c1-8f15-6328cf3fc567" />
+
 ## ✨ Features
 
 - **You manage only what you set** — a setting left on **Default** in the Valves is never written to anyone, so each user keeps their own choice for it. Flip a setting to **Custom** and it becomes instance policy, even if the value you pick happens to equal Open WebUI's factory value.
