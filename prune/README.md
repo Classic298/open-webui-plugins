@@ -10,6 +10,26 @@ Automatic, **throttled** database and storage cleanup for your entire instance, 
 > [!TIP]
 > **🚀 [Jump to Setup](#setup)** — paste, enable, configure Valves. Deletion stays off until you flip the master switch, and the **Preview** button in the manual UI shows you exactly what any configuration would delete before you commit to anything.
 
+<img width="2800" height="2200" alt="05-ui-options-top" src="https://github.com/user-attachments/assets/adc689c5-1877-4cc5-b697-41c02be44e09" />
+
+<img width="2800" height="2200" alt="06-ui-options-orphaned" src="https://github.com/user-attachments/assets/6ba97621-a10e-4d06-bc46-5c93939bbaf0" />
+
+<img width="2800" height="2200" alt="07-ui-preview-result" src="https://github.com/user-attachments/assets/81f2b31d-9c8a-4770-8422-4c620de6ef36" />
+
+<img width="2800" height="2200" alt="08-ui-preview-expanded" src="https://github.com/user-attachments/assets/e5006a4c-718c-4973-a92d-3df70a884cb9" />
+
+<img width="2800" height="2200" alt="09-ui-run-in-progress" src="https://github.com/user-attachments/assets/12cf35a6-e935-4e63-93a8-7ca9b938d213" />
+
+<img width="2800" height="2200" alt="10-ui-run-finished" src="https://github.com/user-attachments/assets/f4d098b9-7ea1-4e0c-8bb3-415c0c52e02e" />
+
+<img width="2360" height="2480" alt="01-valves-master-and-throttles" src="https://github.com/user-attachments/assets/b44d8d19-7004-4bc0-9bcf-d5e98f220142" />
+
+<img width="2360" height="2480" alt="02-valves-age-and-inactive-users" src="https://github.com/user-attachments/assets/00b16f38-7e70-4672-bf02-064654308bfe" />
+
+<img width="2360" height="2480" alt="03-valves-orphaned-data" src="https://github.com/user-attachments/assets/0d65c8dc-3fbc-416d-9b5b-01965fdaa2e6" />
+
+<img width="2360" height="2480" alt="04-valves-channels-and-retention" src="https://github.com/user-attachments/assets/1f87d59e-f27c-41a7-9166-85fbb14bcfb0" />
+
 ## ✨ Features
 
 - **Fully automatic, event-driven pruning** — no cron box, no external scripts. The instance cleans itself in reaction to its own activity (see the event table below).
