@@ -3,7 +3,7 @@ title: Vision Bridge
 author: Classic298
 author_url: https://github.com/Classic298
 funding_url: https://github.com/Classic298
-version: 1.0.0
+version: 1.0.1
 description: Let a text-only model handle images without core changes: strips each image in the request to a file-id marker (pair with the analyze_image tool), or in describe mode swaps it for a text description.
 """
 
@@ -19,6 +19,8 @@ from open_webui.models.files import Files
 from open_webui.models.chats import Chats
 from open_webui.storage.provider import Storage
 from open_webui.socket.main import get_event_emitter
+from open_webui.utils.misc import get_message_list
+from open_webui.utils.chat_id import is_saved_chat_id
 from open_webui.utils.chat import generate_chat_completion
 from open_webui.utils.files import get_image_base64_from_file_id
 
@@ -30,6 +32,47 @@ _FILE_ID_RE = re.compile(r"/files/([^/]+)/content")
 def _file_id_of(url: str) -> Optional[str]:
     m = _FILE_ID_RE.search(url or "")
     return m.group(1) if m else None
+
+
+def _has_image(content: Any) -> bool:
+    return isinstance(content, list) and any(isinstance(part, dict) and part.get("type") == "image_url" for part in content)
+
+
+def _is_image(file: dict) -> bool:
+    return file.get("type") == "image" or (file.get("content_type") or "").startswith("image/")
+
+
+async def _stored_image_message(chat_id: str, user) -> Optional[dict]:
+    """Newest message on the chat's current branch that still carries images."""
+    chat = await Chats.get_chat_by_id_and_user_id(chat_id, user.id)
+    if not chat:
+        return None
+    history = chat.chat.get("history", {})
+    for msg in reversed(get_message_list(history.get("messages", {}), history.get("currentId")) or []):
+        if msg.get("role") == "user" and any(isinstance(f, dict) and _is_image(f) for f in msg.get("files") or []):
+            return msg
+    return None
+
+
+def _strip_images(content: list, strip_only: bool) -> str:
+    """Keep the text parts, replace each image with a marker the text-only model can read."""
+    texts, markers = [], []
+    for part in content:
+        if not isinstance(part, dict):
+            continue
+        if part.get("type") == "text":
+            texts.append(part.get("text", ""))
+        elif part.get("type") == "image_url":
+            if not strip_only:
+                markers.append("[Image attached — not sent to this model.]")
+                continue
+            # Only images still referenced by url have a file id: uploads are inlined by then.
+            fid = _file_id_of((part.get("image_url") or {}).get("url", ""))
+            markers.append(
+                f'[Image attached — file_id: {fid}. Call analyze_image(file_id="{fid}", query="…") to inspect it.]'
+                if fid else '[Image attached. Call analyze_image(query="…") to inspect the most recent image.]'
+            )
+    return "\n\n".join([*(t for t in texts if t), *markers]).strip()
 
 
 class Filter:
@@ -74,122 +117,97 @@ class Filter:
 
         messages = body.get("messages") or []
 
-        # strip_only: replace each image in the request with a marker naming its file id, so the
-        # text-only model never receives the image but can call analyze_image to inspect it. The
-        # image is left untouched in the chat and can be re-queried with new questions later.
-        if self.valves.strip_only:
-            for msg in messages:
-                content = msg.get("content")
-                if not isinstance(content, list):
-                    continue
-                texts, markers = [], []
-                for p in content:
-                    if not isinstance(p, dict):
-                        continue
-                    if p.get("type") == "text":
-                        texts.append(p.get("text", ""))
-                    elif p.get("type") == "image_url":
-                        fid = _file_id_of((p.get("image_url") or {}).get("url", ""))
-                        markers.append(
-                            f'[Image attached — file_id: {fid}. Call analyze_image(file_id="{fid}", query="…") to inspect it.]'
-                            if fid else "[Image attached — no file id available.]"
-                        )
-                if markers:
-                    msg["content"] = "\n\n".join([*(t for t in texts if t), *markers]).strip()
-            return body
+        # Describe mode covers the newest image message; the strip below catches every other image.
+        if not self.valves.strip_only and self.valves.vision_model_id and (__user__ or {}).get("id"):
+            target = next(
+                (msg for msg in reversed(messages) if msg.get("role") == "user" and _has_image(msg.get("content"))),
+                None,
+            )
+            if target:
+                user = await Users.get_user_by_id(__user__["id"])
+                if user:
+                    await self._describe(target, user, __request__, __chat_id__, __event_emitter__)
 
-        # Describe-and-replace mode needs a configured vision model.
-        if not self.valves.vision_model_id:
-            return body
+        for msg in messages:
+            if _has_image(msg.get("content")):
+                msg["content"] = _strip_images(msg["content"], self.valves.strip_only)
+        return body
 
-        target = None
-        for msg in reversed(messages):
-            if msg.get("role") == "user" and isinstance(msg.get("content"), list):
-                if any(isinstance(p, dict) and p.get("type") == "image_url" for p in msg["content"]):
-                    target = msg
-                    break
-        if target is None:
-            return body
+    async def _describe(self, target, user, request, chat_id, event_emitter):
+        async def status(text, done=False):
+            if event_emitter:
+                await event_emitter({"type": "status", "data": {"description": text, "done": done}})
 
-        if not __user__ or not __user__.get("id"):
-            return body
-        user = await Users.get_user_by_id(__user__["id"])
-        if not user:
-            return body
-
-        async def status(d, done=False):
-            if __event_emitter__:
-                await __event_emitter__({"type": "status", "data": {"description": d, "done": done}})
-
-        texts, data_urls, file_ids = [], [], []
+        texts, data_urls, image_count = [], [], 0
         for part in target["content"]:
             if not isinstance(part, dict):
                 continue
             if part.get("type") == "text":
                 texts.append(part.get("text", ""))
             elif part.get("type") == "image_url":
+                image_count += 1
                 url = (part.get("image_url") or {}).get("url", "")
                 if url.startswith("data:"):
                     data_urls.append(url)
                 else:
                     fid = _file_id_of(url)
-                    if fid:
-                        file_ids.append(fid)
-                        du = await get_image_base64_from_file_id(fid, user=user)
-                        if du:
-                            data_urls.append(du)
+                    du = await get_image_base64_from_file_id(fid, user=user) if fid else None
+                    if du:
+                        data_urls.append(du)
 
         data_urls = data_urls[: self.valves.max_images]
         if not data_urls:
-            return body
+            return
 
+        user_text = "\n\n".join(t for t in texts if t).strip()
         await status(f"Analyzing {len(data_urls)} image(s) with {self.valves.vision_model_id}…")
         try:
             parts = [{"type": "text", "text": self.valves.analysis_prompt}]
             parts += [{"type": "image_url", "image_url": {"url": du}} for du in data_urls]
             resp = await generate_chat_completion(
-                __request__,
+                request,
                 {"model": self.valves.vision_model_id, "messages": [{"role": "user", "content": parts}], "stream": False},
                 user=user, bypass_filter=True,
             )
             description = resp["choices"][0]["message"]["content"]
         except Exception as e:
             log.exception("Vision Bridge analysis failed")
-            description = f"(image analysis failed: {e})"
+            # Keep the image: a failed analysis must not consume it.
+            target["content"] = f"{user_text}\n\n[image analysis failed: {e}]".strip()
+            await status("Image analysis failed", done=True)
+            return
 
-        user_text = "\n\n".join(t for t in texts if t).strip()
         merged = f"{user_text}\n\n[{self.valves.label}]\n{description}".strip()
+        skipped = image_count - len(data_urls)
+        if skipped:
+            merged += f"\n\n[{skipped} further image(s) attached — not sent to this model.]"
         target["content"] = merged
         await status("Done", done=True)
 
-        if __chat_id__ and not __chat_id__.startswith(("local:", "channel:")) and file_ids:
-            await self._persist(__chat_id__, user, set(file_ids), merged)
-        return body
+        # Purge only when every image was described (_persist drops all of the message's images).
+        if not skipped and is_saved_chat_id(chat_id):
+            stored = await _stored_image_message(chat_id, user)
+            if stored:
+                await self._persist(chat_id, user, stored, merged)
 
-    async def _persist(self, chat_id, user, target_ids, new_content):
-        def matches(f):
-            return (f.get("id") or _file_id_of(f.get("url", ""))) in target_ids
+    async def _persist(self, chat_id, user, message, new_content):
+        files = message.get("files") or []
+        images = [f for f in files if isinstance(f, dict) and _is_image(f)]
         if self.valves.purge_from_history:
-            owned = await Chats.get_chat_by_id_and_user_id(chat_id, user.id)
-            if owned:
-                mm = await Chats.get_messages_map_by_chat_id(chat_id) or {}
-                for mid, msg in mm.items():
-                    files = msg.get("files") or []
-                    if not any(isinstance(f, dict) and matches(f) for f in files):
-                        continue
-                    kept = [f for f in files if not (isinstance(f, dict) and matches(f))]
-                    await Chats.upsert_message_to_chat_by_id_and_message_id(chat_id, mid, {"files": kept, "content": new_content})
-                    try:
-                        emit = await get_event_emitter({"chat_id": chat_id, "message_id": mid, "user_id": user.id}, update_db=False)
-                        await emit({"type": "files", "data": {"files": kept}})
-                        await emit({"type": "replace", "data": {"content": new_content}})
-                    except Exception:
-                        log.exception("Vision Bridge: client sync failed for %s", mid)
-                    break
+            kept = [f for f in files if not (isinstance(f, dict) and _is_image(f))]
+            mid = message["id"]
+            await Chats.upsert_message_to_chat_by_id_and_message_id(chat_id, mid, {"files": kept, "content": new_content})
+            try:
+                emit = await get_event_emitter({"chat_id": chat_id, "message_id": mid, "user_id": user.id}, update_db=False)
+                await emit({"type": "files", "data": {"files": kept}})
+                await emit({"type": "replace", "data": {"content": new_content}})
+            except Exception:
+                log.exception("Vision Bridge: client sync failed for %s", mid)
         if self.valves.delete_file_record:
-            for fid in target_ids:
+            for image in images:
+                fid = image.get("id") or _file_id_of(image.get("url", ""))
                 try:
-                    f = await Files.get_file_by_id(fid)
+                    f = await Files.get_file_by_id(fid) if fid else None
                     if f and (f.user_id == user.id or user.role == "admin"):
                         if await Files.delete_file_by_id(fid) and f.path:
                             await asyncio.to_thread(Storage.delete_file, f.path)
