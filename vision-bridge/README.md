@@ -4,6 +4,9 @@
 
 Give a **text-only model the ability to work with images**, with no core changes. A filter takes the image out of the request (so the text-only model never 404s on an image it cannot accept) and leaves a marker in its place. A tool then lets the model send that image to a separate vision model on demand, asking whatever it wants, as many times as it wants. The image itself stays in the chat untouched.
 
+> [!IMPORTANT]
+> **Requires Open WebUI `0.11.0` or newer.** Both parts resolve chat ids through the core helper added in that release. They will not load on older versions.
+
 > [!TIP]
 > **🚀 [Jump to Setup](#setup)** — install both parts, set two valves, done in about a minute.
 
@@ -126,5 +129,5 @@ In `strip_only` mode it stays in the chat and in storage, unchanged. In describe
 
 ## 📝 Changelog
 
-- **1.0.1** — Fixed images reaching the text-only model. Describe mode only replaced the newest image message, so images from earlier turns were sent as-is (Ollama `500 image input is not supported`, or a confident description of an image the model cannot see); anything the vision pass does not cover is now replaced by a marker in both modes. Describe mode also purges the analyzed image from the chat again: Open WebUI inlines uploaded images as data URIs before filters run, so the file id is now taken from the stored chat instead of the request url, which also restores a usable `analyze_image` hint in `strip_only` mode.
+- **1.0.1** — Fixed images reaching the text-only model. Describe mode only replaced the newest image message, so images from earlier turns were sent as-is (Ollama `500 image input is not supported`, or a confident description of an image the model cannot see); anything the vision pass does not cover is now replaced by a marker in both modes. Describe mode also purges the analyzed image from the chat again: Open WebUI inlines uploaded images as data URIs before filters run, so the file id is now taken from the stored chat instead of the request url, which also restores a usable `analyze_image` hint in `strip_only` mode. The tool now recognises the `temporary:` chat id prefix added in 0.11.0, so it no longer looks a temporary chat up in the database.
 - **1.0.0** — Initial release. `strip_only` tool-driven mode: the image is kept in the chat and inspected on demand via `analyze_image`, so it can be re-queried with new questions. Describe-and-replace mode is available for models that cannot tool-call.
