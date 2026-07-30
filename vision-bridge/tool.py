@@ -3,7 +3,7 @@ title: Vision Bridge
 author: Classic298
 author_url: https://github.com/Classic298
 funding_url: https://github.com/Classic298
-version: 1.0.0
+version: 1.0.1
 description: Let a text-only model inspect images on demand via analyze_image(file_id, query), sending them to a configured vision model; pair with the Vision Bridge filter so the image never reaches the text-only model.
 """
 
@@ -16,6 +16,7 @@ from pydantic import BaseModel, Field
 from open_webui.models.users import Users
 from open_webui.models.chats import Chats
 from open_webui.utils.misc import get_message_list
+from open_webui.utils.chat_id import is_saved_chat_id
 from open_webui.utils.chat import generate_chat_completion
 from open_webui.utils.files import get_image_base64_from_file_id
 
@@ -113,7 +114,7 @@ class Tools:
     async def _resolve(self, file_id, user, chat_id, messages):
         if file_id:
             return await get_image_base64_from_file_id(file_id, user=user)
-        if chat_id and not chat_id.startswith(("local:", "channel:")):
+        if is_saved_chat_id(chat_id):
             chat = await Chats.get_chat_by_id_and_user_id(chat_id, user.id)
             if chat:
                 history = chat.chat.get("history", {})
