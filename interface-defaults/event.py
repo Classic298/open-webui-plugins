@@ -3,14 +3,15 @@ title: Interface Defaults
 author: Classic298
 author_url: https://github.com/Classic298
 funding_url: https://github.com/Classic298
-version: 1.1.1
+version: 1.2.2
 required_open_webui_version: 0.11.0
-description: Manage Settings > Interface defaults instance-wide from this function's Valves. Only settings you switch to Custom are managed; anything left on Default is never written, so users keep their own choice for it. New users are seeded automatically (subscribes to user.created, which fires for signup, OAuth, LDAP, SCIM and admin-created accounts). Two trigger toggles act as one-shot buttons: "Apply to all existing users" pushes your Custom settings to everyone (normally only needed once, right after install), and "Reset all users to factory" clears the interface settings this function manages from every user AND puts this config back to Default. Both only touch those interface settings; a user's system prompt, default model, audio and other preferences are preserved unchanged. Tick a trigger and Save; it unticks itself and runs in the background over the users in chunks. Booleans render as toggles, direction as a dropdown, text scale as a number. No custom UI, no monkey-patching, no startup hooks. Defaults below match Open WebUI's factory values.
+description: Manage Settings > Interface defaults instance-wide from this function's Valves. Only settings you switch to Custom are managed; anything left on Default is never written, so users keep their own choice for it. New users are seeded automatically (subscribes to user.created, which fires for signup, OAuth, LDAP, SCIM and admin-created accounts, pending ones included) and every seed is logged. Because that seed races the browser, which can write back a settings snapshot it read a moment too early, a short built-in repair window right after signup re-checks the account on login and on every settings save, restoring a lost seed within milliseconds and then marking the account once the settings are seen to have stuck; nothing outside that window is ever read, so existing users are untouched. Two trigger toggles act as one-shot buttons: "Apply to all existing users" pushes your Custom settings to everyone (normally only needed once, right after install), and "Reset all users to factory" clears the interface settings this function manages from every user AND puts this config back to Default. Both only touch those interface settings; a user's system prompt, default model, audio and other preferences are preserved unchanged. Tick a trigger and Save; it unticks itself and runs in the background over the users in chunks. Booleans render as toggles, direction as a dropdown, text scale as a number. No custom UI, no monkey-patching, no startup hooks. Defaults below match Open WebUI's factory values.
 """
 
 import asyncio
 import json
 import logging
+import time
 from copy import deepcopy
 from typing import Literal, Optional
 
@@ -21,6 +22,19 @@ log = logging.getLogger(__name__)
 # Valve fields that are NOT interface settings (excluded when building ui).
 _TRIGGERS = ("apply_to_all_existing_users", "reset_all_users_to_factory")
 _NON_UI = _TRIGGERS + ("bulk_users_per_second",)
+
+# How long after account creation the seed is still repaired. Covers only the
+# browser's start-up: it reads the settings once, and a read that beat the seed
+# gets written back stale on its next save. Both triggers are events, so the
+# repair is immediate and this is just the cut-off past which an account is
+# never read again - not a retry interval.
+_REPAIR_WINDOW_SECONDS = 300
+
+# Sibling of `ui` in the user's settings blob, marking a seed we have since seen
+# survive. It has to live OUTSIDE `ui`: the frontend rewrites `ui` wholesale on
+# every settings save, and Users.update_user_settings_by_id merges only at the
+# top level, so anything stored next to `ui` is untouched by both.
+_SEEDED_KEY = "interfaceDefaultsSeeded"
 
 # Users are read in chunks so a bulk pass never loads a whole large instance.
 _USER_CHUNK = 100
@@ -163,7 +177,10 @@ class Event:
                 "input": {
                     "type": "select",
                     "options": [
-                        {"value": "auto", "label": "Auto (follow the interface language)"},
+                        {
+                            "value": "auto",
+                            "label": "Auto (follow the interface language)",
+                        },
                         {"value": "LTR", "label": "Left to Right"},
                         {"value": "RTL", "label": "Right to Left"},
                     ],
@@ -488,21 +505,66 @@ class Event:
                 return
             after = ids[-1]
 
-    async def _seed_user(self, user_id: str, ui: dict) -> bool:
+    async def _seed_user(
+        self, user_id: str, ui: dict, *, mark_conformant: bool = False
+    ) -> str:
+        """Apply `ui` to one user. Returns 'written', 'conformant', 'nothing'
+        (no setting is Custom) or 'missing' (no such user).
+
+        mark_conformant is how the login safety net retires itself: the mark is
+        only written once the settings are observed already in place, i.e. an
+        earlier seed demonstrably survived. Marking at write time instead would
+        pin the very case this is meant to repair - a seed the browser then
+        overwrote - as permanently done."""
         from open_webui.models.users import Users
 
         if not ui:
-            return False
+            return "nothing"
         user = await Users.get_user_by_id(user_id)
         if not user:
-            return False
+            return "missing"
         settings = user.settings.model_dump() if user.settings else {}
         current_ui = settings.get("ui") or {}
         merged = _deep_merge(current_ui, ui)
         if merged == current_ui:
-            return False  # already conformant: skip the write and its race window
+            if mark_conformant and not settings.get(_SEEDED_KEY):
+                await Users.update_user_settings_by_id(user_id, {_SEEDED_KEY: True})
+            return "conformant"  # skip the write and its race window
         await Users.update_user_settings_by_id(user_id, {"ui": merged})
-        return True
+        return "written"
+
+    async def _repair(self, user_id: str, trigger: str) -> None:
+        """Re-apply to a just-created, unmarked account.
+
+        Bounded twice - by the mark and by account age. Unbounded, this would
+        re-force a managed setting on anyone who turned it off, and would push
+        the admin's config across the whole instance on install; both contradict
+        "users keep their own choice".
+
+        Safe against feedback: our writes go through the model layer, which
+        publishes nothing. Only the HTTP route emits user.settings_updated, so a
+        repair cannot retrigger itself."""
+        from open_webui.models.users import Users
+
+        ui = self._ui_from_valves()
+        if not ui:
+            return
+        user = await Users.get_user_by_id(user_id)
+        if not user:
+            return
+        settings = user.settings.model_dump() if user.settings else {}
+        if settings.get(_SEEDED_KEY):
+            return
+        created_at = getattr(user, "created_at", 0) or 0  # epoch seconds
+        if created_at and created_at < time.time() - _REPAIR_WINDOW_SECONDS:
+            return
+        if await self._seed_user(user_id, ui, mark_conformant=True) == "written":
+            log.info(
+                "interface-defaults: restored defaults for %s after %s "
+                "(the seed at account creation had been overwritten)",
+                user_id,
+                trigger,
+            )
 
     async def _apply_to_all(self, ui: dict, rate: int = 20):
         if not ui:
@@ -514,7 +576,7 @@ class Event:
         try:
             async for user_id in self._iter_user_ids():
                 try:
-                    if await self._seed_user(user_id, ui):
+                    if await self._seed_user(user_id, ui) == "written":
                         applied += 1
                 except Exception:
                     log.exception("interface-defaults: apply failed for %s", user_id)
@@ -556,9 +618,17 @@ class Event:
                 new_ui["title"] = siblings
             else:
                 new_ui.pop("title", None)
-        if new_ui == ui:
-            return False  # no managed key present: nothing to clear, skip the write
-        await Users.update_user_settings_by_id(user_id, {"ui": new_ui})
+        updated = {}
+        if new_ui != ui:
+            updated["ui"] = new_ui
+        if settings.get(_SEEDED_KEY):
+            # Cleared, not deleted: update_user_settings_by_id can only merge, so
+            # a falsy value is the only way to retract the mark. A factory reset
+            # that left it set would block the login safety net forever.
+            updated[_SEEDED_KEY] = False
+        if not updated:
+            return False  # nothing managed present: skip the write
+        await Users.update_user_settings_by_id(user_id, updated)
         return True
 
     async def _reset_all(self, rate: int = 20):
@@ -615,14 +685,52 @@ class Event:
     ):
         payload = event or {}
 
-        # 1) Seed every brand-new user (signup, oauth, ldap, scim, admin-created).
+        # 1) Seed every brand-new user (signup, oauth, ldap, scim, admin-created),
+        # whatever role they were given - pending accounts included.
         if __event_name__ == "user.created":
             user_id = (payload.get("subject") or {}).get("id")
-            if user_id:
-                await self._seed_user(user_id, self._ui_from_valves())
+            if not user_id:
+                log.warning("interface-defaults: user.created carried no subject id")
+                return
+            ui = self._ui_from_valves()
+            if not ui:
+                log.warning(
+                    "interface-defaults: %s not seeded, no setting is set to Custom",
+                    user_id,
+                )
+                return
+            try:
+                outcome = await self._seed_user(user_id, ui)
+            except Exception:
+                log.exception("interface-defaults: seeding %s failed", user_id)
+                return
+            log.info(
+                "interface-defaults: seeded %s with %d setting(s) [%s]",
+                user_id,
+                len(ui),
+                outcome,
+            )
             return
 
-        # 2) Drop a trigger that never ran: ticked while disabled (valves save
+        # 2) Safety net for the first seconds of an account's life, while the
+        # browser is still booting and can still write back a settings snapshot
+        # it read before the seed landed. settings_updated is the important one:
+        # it fires on exactly that overwrite, so the repair follows it within
+        # milliseconds instead of waiting for anything.
+        if __event_name__ in ("auth.login", "user.settings_updated"):
+            user_id = (payload.get("subject") or {}).get("id")
+            if user_id:
+                try:
+                    await self._repair(user_id, __event_name__)
+                except Exception:
+                    log.exception(
+                        "interface-defaults: repair of %s after %s failed",
+                        user_id,
+                        __event_name__,
+                    )
+            return
+
+        # 3) Drop a trigger that never ran: ticked while disabled (valves save
         # without dispatch), or persisted by a crash between the valves save and
         # the untick. Either way it must not fire late on some later save.
         if __event_name__ in ("function.enabled", "system.startup.completed"):
@@ -633,7 +741,7 @@ class Event:
                 await self._clear_triggers(__id__)
             return
 
-        # 3) Trigger buttons: fire when THIS function's admin valves are saved.
+        # 4) Trigger buttons: fire when THIS function's admin valves are saved.
         if __event_name__ == "function.valves_updated":
             if (payload.get("subject") or {}).get("id") != __id__:
                 return
