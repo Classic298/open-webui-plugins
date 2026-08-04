@@ -187,7 +187,15 @@ def loader_register(app: Any, key: str, start: str, end: str, producer) -> None:
         }
         if request.headers.get("if-none-match") == etag:
             return Response(status_code=304, headers=headers)
-        return Response(content, media_type="application/javascript", headers=headers)
+        return Response(
+            content,
+            # Starlette only appends charset for text/* media types, so an
+            # undeclared application/javascript leaves the encoding to the
+            # reader to guess - and anything that guesses latin-1 turns
+            # "täglich" into "tÃ¤glich". Declare it.
+            media_type="application/javascript; charset=utf-8",
+            headers=headers,
+        )
 
     insert_at = len(app.routes)
     for position, existing in enumerate(app.routes):
