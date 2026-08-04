@@ -3,18 +3,21 @@ title: Interface Defaults
 author: Classic298
 author_url: https://github.com/Classic298
 funding_url: https://github.com/Classic298
-version: 1.2.1
+version: 1.3.0
 required_open_webui_version: 0.11.0
-description: Manage Settings > Interface defaults instance-wide from this function's Valves. Only settings you switch to Custom are managed; anything left on Default is never written, so users keep their own choice for it. New users are seeded automatically (subscribes to user.created, which fires for signup, OAuth, LDAP, SCIM and admin-created accounts, pending ones included) and every seed is logged. Because that seed races the browser, which can write back a settings snapshot it read a moment too early, a short built-in repair window right after signup re-checks the account on login and on every settings save, restoring a lost seed within milliseconds and then marking the account once the settings are seen to have stuck; nothing outside that window is ever read, so existing users are untouched. Two trigger toggles act as one-shot buttons: "Apply to all existing users" pushes your Custom settings to everyone (normally only needed once, right after install), and "Reset all users to factory" clears the interface settings this function manages from every user AND puts this config back to Default. Both only touch those interface settings; a user's system prompt, default model, audio and other preferences are preserved unchanged. Tick a trigger and Save; it unticks itself and runs in the background over the users in chunks. Booleans render as toggles, direction as a dropdown, text scale as a number. No custom UI, no monkey-patching, no startup hooks. Defaults below match Open WebUI's factory values.
+description: Set Settings > Interface defaults for the whole instance from this function's Valves. Only settings you switch to Custom are managed; everything left on Default stays the user's own choice. Defaults are injected into the page before it loads, so they apply from the first paint - to new and existing users alike - and are also written to new accounts as a fallback. Two one-shot buttons: apply to all existing users, and reset everyone to factory. Redis, if configured, propagates a save to every container at once.
 """
 
 import asyncio
+import hashlib
 import json
 import logging
 import sys
 import time
+import uuid
 from copy import deepcopy
-from typing import Literal, Optional
+from pathlib import Path
+from typing import Any, Literal, Optional
 
 from pydantic import BaseModel, Field
 
@@ -40,6 +43,258 @@ def _get_logger() -> logging.Logger:
 
 
 log = _get_logger()
+
+# owui-interface-defaults
+#
+# Bump on every code change: it is the payload of the reload broadcast and the
+# marker a process compares against to know whether it already runs a build.
+FUNCTION_BUILD_ID = "2026-08-04.1"
+
+# Used to find our own row in the functions table when the dispatcher has not
+# handed us __id__ yet (a reload arrives without one).
+CONTENT_SIGNATURE = "owui-interface-defaults"
+
+STATE_INSTALLED_BUILD = "_owui_interface_defaults_build"
+STATE_FUNCTION_ID = "_owui_interface_defaults_function_id"
+STATE_RELOAD_SUB = "_owui_interface_defaults_reload_sub"
+
+# Cross-container convergence channel. Without it only the container that
+# handled an admin save serves the new defaults; the other fifteen keep serving
+# the old ones until they happen to dispatch an event, so which values a user
+# gets depends on which container nginx picked.
+RELOAD_CHANNEL = "owui-interface-defaults:reload"
+
+# Per-process identity, the echo guard for the broadcast. The build id alone is
+# not enough: a valve-only change leaves it unchanged, so the publisher would
+# suppress its own peers' reloads.
+PROCESS_TOKEN = uuid.uuid4().hex
+
+# ===========================================================================
+# Shared /static/loader.js registry
+# --- KEEP THIS BLOCK BYTE-IDENTICAL IN EVERY PLUGIN THAT USES IT -----------
+# ---------------------------------------------------------------------------
+# Open WebUI's app shell loads <script src="/static/loader.js" defer> on every
+# page (src/app.html). It is the only hook that runs BEFORE the SvelteKit
+# bundle hydrates, and more than one plugin wants it - so no plugin may own it.
+#
+# Every plugin instead publishes a fragment into one registry on app.state, and
+# the route composes the response FROM THAT REGISTRY AT REQUEST TIME:
+#   * whichever plugin happens to create the route does not own the content;
+#   * a plugin loading later needs no cooperation from the others - the next
+#     request simply finds one more fragment;
+#   * a plugin re-exec'd by a reload broadcast overwrites its own key, so a
+#     stale closure cannot survive;
+#   * the registry is per-process, so each container serves what it has loaded
+#     (which is what the Redis reload broadcast is for).
+#
+# Fragments are concatenated INLINE, never emitted as <script src> tags: the
+# whole point of this hook is running before hydration, and a second request
+# would land whenever it lands.
+# ===========================================================================
+LOADER_PATH = "/static/loader.js"
+LOADER_REGISTRY_ATTR = "_owui_loader_fragments"
+LOADER_ROUTE_ATTR = "_owui_shared_loader"
+
+
+def loader_fragments(app: Any) -> dict:
+    registry = getattr(app.state, LOADER_REGISTRY_ATTR, None)
+    if not isinstance(registry, dict):
+        registry = {}
+        app.state.__setattr__(LOADER_REGISTRY_ATTR, registry)
+    return registry
+
+
+def loader_strip_block(content: str, start_marker: str, end_marker: str) -> str:
+    """Remove every marker-wrapped block, leaving other content untouched."""
+    while start_marker in content:
+        start = content.find(start_marker)
+        end = content.find(end_marker, start)
+        if end == -1:
+            # No end marker: the block was appended last, so drop to EOF.
+            content = content[:start]
+            break
+        end += len(end_marker)
+        if content[end : end + 1] == "\n":
+            end += 1
+        content = content[:start] + content[end:]
+    return content
+
+
+def loader_compose(app: Any) -> str:
+    """The real loader.js from disk with every registered fragment appended.
+
+    A fragment that raises is skipped rather than taking the file down with it:
+    one broken plugin must not blank the app shell's only script tag."""
+    try:
+        from open_webui.env import STATIC_DIR
+
+        path = Path(STATIC_DIR) / "loader.js"
+        body = (
+            ""
+            if (path.is_symlink() or not path.is_file())
+            else path.read_text(encoding="utf-8")
+        )
+    except Exception:
+        body = ""
+
+    registry = loader_fragments(app)
+    # Strip every fragment's markers first: an older file-writing build of any
+    # of these plugins may have left its block inside the real file on disk.
+    for key in sorted(registry):
+        entry = registry[key]
+        body = loader_strip_block(body, entry["start"], entry["end"])
+    body = body.rstrip()
+
+    for key in sorted(registry):
+        try:
+            block = (registry[key]["js"]() or "").strip()
+        except Exception:
+            continue
+        if block:
+            body = (body + "\n\n" if body else "") + block
+    return body + "\n" if body else ""
+
+
+def loader_register(app: Any, key: str, start: str, end: str, producer) -> None:
+    """Publish this plugin's fragment and ensure the shared route exists.
+    Idempotent, and safe to call from any plugin in any order."""
+    from starlette.responses import Response
+    from starlette.routing import Mount, Route
+
+    loader_fragments(app)[key] = {"start": start, "end": end, "js": producer}
+
+    for existing in app.routes:
+        if getattr(existing, "path", "") == LOADER_PATH and getattr(
+            existing, LOADER_ROUTE_ATTR, False
+        ):
+            return  # the shared shell is already installed
+
+    # A single-owner route from an older build would serve only its own
+    # fragment, so it has to go.
+    app.routes[:] = [r for r in app.routes if getattr(r, "path", "") != LOADER_PATH]
+
+    async def serve_loader(request):
+        content = loader_compose(app)
+        etag = '"owui-loader-' + hashlib.md5(content.encode("utf-8")).hexdigest() + '"'
+        # no-store, not merely no-cache: nginx fronts the fleet and an earlier
+        # build's max-age pinned a stale copy for 48h in the proxy AND in
+        # browsers. The ETag covers the COMPOSED body, so a fragment appearing,
+        # changing or disappearing invalidates it on its own.
+        headers = {
+            "Cache-Control": "no-store, no-cache, must-revalidate, private",
+            "Pragma": "no-cache",
+            "ETag": etag,
+        }
+        if request.headers.get("if-none-match") == etag:
+            return Response(status_code=304, headers=headers)
+        return Response(content, media_type="application/javascript", headers=headers)
+
+    insert_at = len(app.routes)
+    for position, existing in enumerate(app.routes):
+        if isinstance(existing, Mount) and getattr(existing, "name", "") == "static":
+            insert_at = position
+            break
+    shared = Route(LOADER_PATH, serve_loader, methods=["GET"])
+    setattr(shared, LOADER_ROUTE_ATTR, True)
+    app.routes.insert(insert_at, shared)
+
+
+# =========================== end shared loader block =======================
+
+
+# ===========================================================================
+# Pre-hydration defaults (the loader.js fragment)
+# ---------------------------------------------------------------------------
+# Seeding the database cannot fix a session that has already started: the
+# frontend reads GET /users/user/settings exactly once, in the app layout's
+# onMount, and nothing ever re-reads it. A seed that lands after that is
+# invisible for the whole session no matter how fast it was.
+#
+# So we do not race it. This runs from /static/loader.js, which the app shell
+# loads BEFORE the bundle hydrates, and wraps fetch so the settings response
+# already carries the defaults by the time the app parses it. The user's own
+# stored values are merged on top, so an explicit choice always wins.
+# ===========================================================================
+INTERFACE_JS_BLOCK_START = "// owui-interface-defaults:start"
+INTERFACE_JS_BLOCK_END = "// owui-interface-defaults:end"
+
+CUSTOM_JS = r"""
+(function () {
+  var DEFAULTS = __DEFAULTS__;
+  if (!DEFAULTS || typeof DEFAULTS !== 'object' || !Object.keys(DEFAULTS).length) return;
+
+  var original = window.fetch;
+  if (typeof original !== 'function' || original.__owuiInterfaceDefaults) return;
+
+  /* Defaults underneath, the user's own values on top - recursively, so a
+     nested object (imageCompressionSize, title) merges key by key instead of
+     one side replacing the other wholesale. */
+  function merge(base, over) {
+    var out = {}, key;
+    for (key in base) {
+      if (Object.prototype.hasOwnProperty.call(base, key)) out[key] = base[key];
+    }
+    for (key in over) {
+      if (!Object.prototype.hasOwnProperty.call(over, key)) continue;
+      var a = out[key], b = over[key];
+      out[key] = (a && b && typeof a === 'object' && typeof b === 'object'
+                  && !Array.isArray(a) && !Array.isArray(b)) ? merge(a, b) : b;
+    }
+    return out;
+  }
+
+  /* Only the settings GET. The save endpoint is /users/user/settings/update,
+     which the trailing (?|end-of-string) deliberately excludes. */
+  function isSettingsGet(input, init) {
+    var url = '', method = (init && init.method) || 'GET';
+    try {
+      if (typeof input === 'string') {
+        url = input;
+      } else if (input && typeof input.url === 'string') {
+        url = input.url;
+        method = input.method || method;
+      }
+    } catch (e) { return false; }
+    return String(method).toUpperCase() === 'GET'
+        && /\/users\/user\/settings(\?|$)/.test(url);
+  }
+
+  var patched = function (input, init) {
+    var pending = original.apply(this, arguments);
+    if (!isSettingsGet(input, init)) return pending;
+    return pending.then(function (res) {
+      if (!res || !res.ok) return res;
+      /* clone(): the app still needs to read the original body itself. */
+      return res.clone().json().then(function (data) {
+        var own = (data && typeof data === 'object') ? data : {};
+        var body = JSON.stringify(merge({ ui: DEFAULTS }, own));
+        /* Fresh headers - reusing the originals would carry a Content-Length
+           that no longer matches the rewritten body. */
+        return new Response(body, {
+          status: res.status,
+          statusText: res.statusText,
+          headers: new Headers({ 'content-type': 'application/json' })
+        });
+      }).catch(function () { return res; });
+    });
+  };
+  patched.__owuiInterfaceDefaults = true;
+  window.fetch = patched;
+})();
+"""
+
+
+def build_interface_js_block(ui: dict) -> str:
+    """The fragment for the shared loader, or "" when nothing is managed."""
+    if not ui:
+        return ""
+    # ensure_ascii keeps U+2028/U+2029 escaped - raw, they are line terminators
+    # in JS and would break the literal. Escaping "</" stops a string value from
+    # closing the enclosing script element.
+    payload = json.dumps(ui, ensure_ascii=True).replace("</", "<\\/")
+    script = CUSTOM_JS.replace("__DEFAULTS__", payload).strip()
+    return f"{INTERFACE_JS_BLOCK_START}\n{script}\n{INTERFACE_JS_BLOCK_END}"
+
 
 # Valve fields that are NOT interface settings (excluded when building ui).
 _TRIGGERS = ("apply_to_all_existing_users", "reset_all_users_to_factory")
@@ -463,6 +718,213 @@ class Event:
 
     def __init__(self):
         self.valves = self.Valves()
+        self._function_id: Optional[str] = None
+        self._redis = None
+        self._schedule_bootstrap()
+
+    # ── cross-container convergence (Redis pub/sub) ──────────────────────────
+
+    def _get_redis(self):
+        if self._redis is not None:
+            return self._redis
+        try:
+            from open_webui.env import REDIS_URL
+            from open_webui.utils.redis import get_redis_connection
+
+            if not REDIS_URL:
+                return None
+            self._redis = get_redis_connection(
+                REDIS_URL, async_mode=True, decode_responses=True
+            )
+        except Exception:
+            self._redis = None
+        return self._redis
+
+    def _app_redis(self, app: Any):
+        """Prefer the app's shared async client; fall back to our own."""
+        redis = getattr(getattr(app, "state", None), "redis", None)
+        return redis if redis is not None else self._get_redis()
+
+    def _schedule_bootstrap(self) -> None:
+        """Re-arm everything this process needs, right after the module is
+        (re)loaded - including by a peer's reload broadcast, where no event
+        follows to do it for us.
+
+        Without this a reloaded module would sit idle: the loader registry
+        would still hold the PREVIOUS instance's producer, so the fragment
+        would keep serving the valves that instance last saw."""
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return  # imported outside a running app (tests, tooling)
+
+        async def bootstrap():
+            try:
+                from open_webui.main import app
+            except Exception:
+                return
+            try:
+                fid = getattr(app.state, STATE_FUNCTION_ID, None) or (
+                    await self._resolve_function_id()
+                )
+                if fid:
+                    self._function_id = fid
+                    try:
+                        app.state.__setattr__(STATE_FUNCTION_ID, fid)
+                    except Exception:
+                        pass
+                # __init__ starts from empty valves; the dispatcher only fills
+                # them on a dispatch, and a reload is not one.
+                await self._refresh_valves()
+                self._publish_fragment(app)
+                await self._ensure_reload_subscriber(app)
+                previous = getattr(app.state, STATE_INSTALLED_BUILD, None)
+                app.state.__setattr__(STATE_INSTALLED_BUILD, FUNCTION_BUILD_ID)
+                if previous != FUNCTION_BUILD_ID:
+                    log.info("interface-defaults: build %s loaded", FUNCTION_BUILD_ID)
+                    await self._publish_reload(app, "build")
+            except Exception:
+                log.warning("interface-defaults: bootstrap failed", exc_info=True)
+
+        loop.create_task(bootstrap())
+
+    async def _resolve_function_id(self) -> Optional[str]:
+        """Find our own row by content signature, for the paths where the
+        dispatcher has not handed us __id__ yet."""
+        try:
+            from open_webui.models.functions import Functions
+
+            rows = await Functions.get_functions_by_type("event")
+            own = next(
+                (f for f in rows if CONTENT_SIGNATURE in (f.content or "")), None
+            )
+            return own.id if own else None
+        except Exception:
+            log.warning("interface-defaults: could not resolve this function's id")
+            return None
+
+    async def _refresh_valves(self) -> None:
+        if not self._function_id:
+            return
+        try:
+            from open_webui.models.functions import Functions
+
+            stored = await Functions.get_function_valves_by_id(self._function_id)
+            if stored is not None:
+                self.valves = self.Valves(**stored)
+        except Exception:
+            log.warning("interface-defaults: could not re-read valves from the database")
+
+    def _publish_fragment(self, app: Any) -> None:
+        """(Re)point the shared loader at THIS instance's valves."""
+        try:
+            loader_register(
+                app,
+                "interface-defaults",
+                INTERFACE_JS_BLOCK_START,
+                INTERFACE_JS_BLOCK_END,
+                lambda: build_interface_js_block(self._ui_from_valves()),
+            )
+        except Exception:
+            log.exception("interface-defaults: could not publish the loader fragment")
+
+    async def _ensure_reload_subscriber(self, app: Any) -> None:
+        """One long-lived subscriber per process. On a peer's broadcast it drops
+        this process's plugin caches and re-imports the source from the database,
+        converging both the code and the valves. No-op without Redis."""
+        if getattr(app.state, STATE_RELOAD_SUB, None) is not None:
+            return
+        redis = self._app_redis(app)
+        if redis is None:
+            return
+        try:
+            pubsub = redis.pubsub()
+            await pubsub.subscribe(RELOAD_CHANNEL)
+        except Exception:
+            log.warning("interface-defaults: reload subscribe failed")
+            return
+
+        async def listen():
+            try:
+                async for message in pubsub.listen():
+                    if message.get("type") != "message":
+                        continue
+                    raw = message.get("data")
+                    if isinstance(raw, (bytes, bytearray)):
+                        raw = raw.decode("utf-8", "ignore")
+                    try:
+                        payload = json.loads(raw) if raw else {}
+                    except Exception:
+                        payload = {}
+                    # Our own echo: the publisher must not reload itself
+                    # mid-handler.
+                    if payload.get("origin") == PROCESS_TOKEN:
+                        continue
+                    # A build we already run. Build announcements only - a valve
+                    # change leaves the build id untouched, so guarding those on
+                    # it would drop exactly the broadcasts we need.
+                    if payload.get("kind") == "build" and payload.get(
+                        "build"
+                    ) == getattr(app.state, STATE_INSTALLED_BUILD, None):
+                        continue
+                    try:
+                        await self._reload_from_db(app)
+                    except Exception:
+                        log.warning("interface-defaults: reload from db failed")
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                log.warning("interface-defaults: reload listener stopped")
+
+        # Mark before creating the task so a concurrent event cannot double-start it.
+        app.state.__setattr__(STATE_RELOAD_SUB, True)
+        try:
+            app.state.__setattr__(STATE_RELOAD_SUB, asyncio.create_task(listen()))
+        except Exception:
+            app.state.__setattr__(STATE_RELOAD_SUB, None)
+            log.warning("interface-defaults: reload listener could not start")
+
+    async def _reload_from_db(self, app: Any) -> None:
+        """Drop this process's plugin caches and re-exec the DB source, so a
+        peer's save upgrades THIS process. Re-running our own in-memory code
+        would leave every container but the saving one on its old build."""
+        from types import SimpleNamespace
+
+        from open_webui.utils.plugin import (
+            get_function_contents_cache,
+            get_function_module_from_cache,
+            get_functions_cache,
+        )
+
+        fid = (
+            getattr(app.state, STATE_FUNCTION_ID, None)
+            or self._function_id
+            or await self._resolve_function_id()
+        )
+        if not fid:
+            return
+        ctx = SimpleNamespace(app=app)
+        get_functions_cache(ctx).pop(fid, None)
+        get_function_contents_cache(ctx).pop(fid, None)
+        # Re-exec -> a fresh Event() whose _schedule_bootstrap re-reads the
+        # valves and re-points the loader fragment at itself.
+        await get_function_module_from_cache(ctx, fid)
+
+    async def _publish_reload(self, app: Any, kind: str) -> None:
+        """Tell every peer to converge. Published from bootstrap and from
+        event() only - never from the listener - so it cannot cascade."""
+        redis = self._app_redis(app)
+        if redis is None:
+            return
+        try:
+            await redis.publish(
+                RELOAD_CHANNEL,
+                json.dumps(
+                    {"origin": PROCESS_TOKEN, "build": FUNCTION_BUILD_ID, "kind": kind}
+                ),
+            )
+        except Exception:
+            log.warning("interface-defaults: reload publish failed")
 
     # ── helpers ──────────────────────────────────────────────────────────────
 
@@ -703,9 +1165,39 @@ class Event:
         event: Optional[dict] = None,
         __event_name__: str = "",
         __id__: str = "",
+        __app__: Any = None,
         **kwargs
     ):
         payload = event or {}
+
+        # Capture our own id on every dispatch: the valves_updated ownership
+        # check and the reload path both need it.
+        if __id__:
+            self._function_id = __id__
+            if __app__ is not None:
+                try:
+                    __app__.state.__setattr__(STATE_FUNCTION_ID, __id__)
+                except Exception:
+                    pass
+
+        # 0) Publish the pre-hydration fragment and arm cross-container reloads.
+        # Cheap and idempotent, so both run on EVERY event:
+        # system.startup.completed covers a booting container, any other event
+        # covers one that loaded this module lazily. The producer is invoked per
+        # request, so it always reflects the valves this process currently holds.
+        if __app__ is not None:
+            self._publish_fragment(__app__)
+            try:
+                await self._ensure_reload_subscriber(__app__)
+                if (
+                    getattr(__app__.state, STATE_INSTALLED_BUILD, None)
+                    != FUNCTION_BUILD_ID
+                ):
+                    __app__.state.__setattr__(STATE_INSTALLED_BUILD, FUNCTION_BUILD_ID)
+                    log.info("interface-defaults: build %s loaded", FUNCTION_BUILD_ID)
+                    await self._publish_reload(__app__, "build")
+            except Exception:
+                log.warning("interface-defaults: reload setup failed", exc_info=True)
 
         # 1) Seed every brand-new user (signup, oauth, ldap, scim, admin-created),
         # whatever role they were given - pending accounts included.
@@ -775,6 +1267,13 @@ class Event:
                 return
             if (payload.get("data") or {}).get("scope") == "user":
                 return  # per-user valves, not the admin config (no UserValves today)
+            # A valve change reaches only the container that handled the save,
+            # and leaves the build id untouched - so peers need an explicit
+            # broadcast, echo-guarded on the process token. Until this landed,
+            # a saved default took effect on 1 of 16 containers and the other
+            # 15 kept serving the old one from their loader fragment.
+            if __app__ is not None:
+                await self._publish_reload(__app__, "valves")
             do_reset = bool(self.valves.reset_all_users_to_factory)
             do_apply = bool(self.valves.apply_to_all_existing_users)
             rate = max(0, int(self.valves.bulk_users_per_second or 0))
