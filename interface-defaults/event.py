@@ -3,7 +3,7 @@ title: Interface Defaults
 author: Classic298
 author_url: https://github.com/Classic298
 funding_url: https://github.com/Classic298
-version: 1.2.0
+version: 1.2.1
 required_open_webui_version: 0.11.0
 description: Manage Settings > Interface defaults instance-wide from this function's Valves. Only settings you switch to Custom are managed; anything left on Default is never written, so users keep their own choice for it. New users are seeded automatically (subscribes to user.created, which fires for signup, OAuth, LDAP, SCIM and admin-created accounts, pending ones included) and every seed is logged. Because that seed races the browser, which can write back a settings snapshot it read a moment too early, a short built-in repair window right after signup re-checks the account on login and on every settings save, restoring a lost seed within milliseconds and then marking the account once the settings are seen to have stuck; nothing outside that window is ever read, so existing users are untouched. Two trigger toggles act as one-shot buttons: "Apply to all existing users" pushes your Custom settings to everyone (normally only needed once, right after install), and "Reset all users to factory" clears the interface settings this function manages from every user AND puts this config back to Default. Both only touch those interface settings; a user's system prompt, default model, audio and other preferences are preserved unchanged. Tick a trigger and Save; it unticks itself and runs in the background over the users in chunks. Booleans render as toggles, direction as a dropdown, text scale as a number. No custom UI, no monkey-patching, no startup hooks. Defaults below match Open WebUI's factory values.
 """
@@ -11,13 +11,35 @@ description: Manage Settings > Interface defaults instance-wide from this functi
 import asyncio
 import json
 import logging
+import sys
 import time
 from copy import deepcopy
 from typing import Literal, Optional
 
 from pydantic import BaseModel, Field
 
-log = logging.getLogger(__name__)
+
+# Owns its handler instead of inheriting the root one. Open WebUI only calls
+# logging.basicConfig() when GLOBAL_LOG_LEVEL is set in the environment
+# (env.py); with it unset the root logger has no handler and sits at WARNING,
+# so getLogger(__name__).info() is discarded and this function looks like it
+# never ran.
+def _get_logger() -> logging.Logger:
+    logger = logging.getLogger("interface_defaults")
+    if getattr(logger, "_id_configured", False):
+        return logger
+    handler = logging.StreamHandler(sys.stdout)
+    handler.setFormatter(logging.Formatter("%(asctime)s - %(levelname)s - %(message)s"))
+    logger.addHandler(handler)
+    logger.setLevel(logging.INFO)
+    logger.propagate = False
+    # getLogger returns the same object after a module re-exec, so this guard is
+    # what stops handlers stacking up and printing every line N times.
+    logger._id_configured = True  # type: ignore[attr-defined]
+    return logger
+
+
+log = _get_logger()
 
 # Valve fields that are NOT interface settings (excluded when building ui).
 _TRIGGERS = ("apply_to_all_existing_users", "reset_all_users_to_factory")
@@ -699,16 +721,22 @@ class Event:
                     user_id,
                 )
                 return
+            started = time.time()
             try:
                 outcome = await self._seed_user(user_id, ui)
             except Exception:
                 log.exception("interface-defaults: seeding %s failed", user_id)
                 return
+            # The elapsed time is the number that matters: the browser reads
+            # settings once, at app mount, and never again. Anything past a few
+            # hundred ms and the new user's session is already running on the
+            # unseeded copy - and no later repair can reach that page.
             log.info(
-                "interface-defaults: seeded %s with %d setting(s) [%s]",
+                "interface-defaults: seeded %s with %d setting(s) [%s] in %.0f ms",
                 user_id,
                 len(ui),
                 outcome,
+                (time.time() - started) * 1000,
             )
             return
 
