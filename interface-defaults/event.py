@@ -813,7 +813,9 @@ class Event:
             if stored is not None:
                 self.valves = self.Valves(**stored)
         except Exception:
-            log.warning("interface-defaults: could not re-read valves from the database")
+            log.warning(
+                "interface-defaults: could not re-read valves from the database"
+            )
 
     def _publish_fragment(self, app: Any) -> None:
         """(Re)point the shared loader at THIS instance's valves."""
@@ -1166,7 +1168,7 @@ class Event:
         __event_name__: str = "",
         __id__: str = "",
         __app__: Any = None,
-        **kwargs
+        **kwargs,
     ):
         payload = event or {}
 
