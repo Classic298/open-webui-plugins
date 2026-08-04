@@ -29,7 +29,8 @@ from pydantic import BaseModel, Field
 # code until each container happens to re-exec on its own. The `version:` in the
 # frontmatter above is documentation - THIS is what distributes the code.
 # ===========================================================================
-FUNCTION_BUILD_ID = "2026-08-04.2"
+FUNCTION_BUILD_ID = "2026-08-04.3"
+
 
 # Owns its handler: Open WebUI only calls basicConfig() when GLOBAL_LOG_LEVEL
 # is set, so otherwise root sits at WARNING with no handler and every info()
@@ -94,6 +95,11 @@ SHARED_ASSET_TYPES = {
 }
 ASSET_REGISTRY_ATTR = "_owui_static_fragments"  # {path: {key: entry}}
 ASSET_ROUTE_ATTR = "_owui_shared_asset"  # set to the path the route serves
+ASSET_IMPL_ATTR = "_owui_shared_asset_impl"  # implementation version of the route
+# Bump when the block below changes behaviour. Without it the first plugin to
+# boot owns the route forever and a newer copy silently defers to its older
+# implementation; with it, newer evicts older and the fleet converges on one.
+ASSET_IMPL_VERSION = 2
 
 
 def asset_fragments(app: Any, path: str) -> dict:
@@ -167,10 +173,14 @@ def asset_register(
     asset_fragments(app, path)[key] = {"start": start, "end": end, "js": producer}
 
     for existing in app.routes:
-        if getattr(existing, ASSET_ROUTE_ATTR, None) == path:
-            return  # the shared route is already installed
+        if getattr(existing, ASSET_ROUTE_ATTR, None) != path:
+            continue
+        if getattr(existing, ASSET_IMPL_ATTR, 0) >= ASSET_IMPL_VERSION:
+            return  # an equal or newer implementation already owns the route
+        break  # ours is newer - fall through and replace it
 
-    # A single-owner route from an older build serves only its own fragment.
+    # Replaces a single-owner route from an older build, or an older impl of
+    # this block. Fragments live on app.state, so nothing is lost.
     app.routes[:] = [r for r in app.routes if getattr(r, "path", "") != path]
     media_type = SHARED_ASSET_TYPES.get(path, "text/plain; charset=utf-8")
 
@@ -202,6 +212,7 @@ def asset_register(
             break
     shared = Route(path, serve_asset, methods=["GET"])
     setattr(shared, ASSET_ROUTE_ATTR, path)
+    setattr(shared, ASSET_IMPL_ATTR, ASSET_IMPL_VERSION)
     app.routes.insert(insert_at, shared)
 
 
@@ -907,7 +918,13 @@ class Event:
 
     async def _publish_reload(self, app: Any, kind: str) -> None:
         """Tell every peer to converge. Published from bootstrap and from
-        event() only - never from the listener - so it cannot cascade."""
+        event() only - never from the listener - so it cannot cascade.
+
+        Blast radius, stated plainly: every container re-imports this function
+        within a Redis round trip. That is the point - and it is not new reach,
+        only new speed, since get_function_module_from_cache already re-execs a
+        changed row on each container's next dispatched event. A save that fails
+        to import never gets here, so peers keep the last good build."""
         redis = self._app_redis(app)
         if redis is None:
             return
