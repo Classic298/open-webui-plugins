@@ -21,6 +21,15 @@ from typing import Any, Literal, Optional
 
 from pydantic import BaseModel, Field
 
+# ===========================================================================
+# BUMP THIS ON EVERY CODE CHANGE.
+# It is the payload of the Redis reload broadcast and the marker each process
+# compares against. Leave it unchanged and peers treat the broadcast as an echo
+# of what they already run: they ignore it, and the fleet keeps serving the old
+# code until each container happens to re-exec on its own. The `version:` in the
+# frontmatter above is documentation - THIS is what distributes the code.
+# ===========================================================================
+FUNCTION_BUILD_ID = "2026-08-04.2"
 
 # Owns its handler: Open WebUI only calls basicConfig() when GLOBAL_LOG_LEVEL
 # is set, so otherwise root sits at WARNING with no handler and every info()
@@ -41,12 +50,6 @@ def _get_logger() -> logging.Logger:
 
 
 log = _get_logger()
-
-# owui-interface-defaults
-#
-# Bump on every code change: payload of the reload broadcast, and the marker
-# a process checks to know whether it already runs a build.
-FUNCTION_BUILD_ID = "2026-08-04.2"
 
 # Finds our own row when the dispatcher has not handed us __id__ (reloads
 # arrive without one).
