@@ -46,7 +46,7 @@ log = _get_logger()
 #
 # Bump on every code change: payload of the reload broadcast, and the marker
 # a process checks to know whether it already runs a build.
-FUNCTION_BUILD_ID = "2026-08-04.1"
+FUNCTION_BUILD_ID = "2026-08-04.2"
 
 # Finds our own row when the dispatcher has not handed us __id__ (reloads
 # arrive without one).
