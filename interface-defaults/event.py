@@ -22,11 +22,9 @@ from typing import Any, Literal, Optional
 from pydantic import BaseModel, Field
 
 
-# Owns its handler instead of inheriting the root one. Open WebUI only calls
-# logging.basicConfig() when GLOBAL_LOG_LEVEL is set in the environment
-# (env.py); with it unset the root logger has no handler and sits at WARNING,
-# so getLogger(__name__).info() is discarded and this function looks like it
-# never ran.
+# Owns its handler: Open WebUI only calls basicConfig() when GLOBAL_LOG_LEVEL
+# is set, so otherwise root sits at WARNING with no handler and every info()
+# vanishes - making this function look like it never ran.
 def _get_logger() -> logging.Logger:
     logger = logging.getLogger("interface_defaults")
     if getattr(logger, "_id_configured", False):
@@ -36,8 +34,8 @@ def _get_logger() -> logging.Logger:
     logger.addHandler(handler)
     logger.setLevel(logging.INFO)
     logger.propagate = False
-    # getLogger returns the same object after a module re-exec, so this guard is
-    # what stops handlers stacking up and printing every line N times.
+    # getLogger returns the same object after a re-exec; without the guard
+    # handlers stack and every line prints N times.
     logger._id_configured = True  # type: ignore[attr-defined]
     return logger
 
@@ -46,65 +44,68 @@ log = _get_logger()
 
 # owui-interface-defaults
 #
-# Bump on every code change: it is the payload of the reload broadcast and the
-# marker a process compares against to know whether it already runs a build.
+# Bump on every code change: payload of the reload broadcast, and the marker
+# a process checks to know whether it already runs a build.
 FUNCTION_BUILD_ID = "2026-08-04.1"
 
-# Used to find our own row in the functions table when the dispatcher has not
-# handed us __id__ yet (a reload arrives without one).
+# Finds our own row when the dispatcher has not handed us __id__ (reloads
+# arrive without one).
 CONTENT_SIGNATURE = "owui-interface-defaults"
 
 STATE_INSTALLED_BUILD = "_owui_interface_defaults_build"
 STATE_FUNCTION_ID = "_owui_interface_defaults_function_id"
 STATE_RELOAD_SUB = "_owui_interface_defaults_reload_sub"
 
-# Cross-container convergence channel. Without it only the container that
-# handled an admin save serves the new defaults; the other fifteen keep serving
-# the old ones until they happen to dispatch an event, so which values a user
-# gets depends on which container nginx picked.
+# Cross-container convergence. Without it only the saving container serves the
+# new defaults; the rest lag until their next event, so what a user gets
+# depends on which container nginx picked.
 RELOAD_CHANNEL = "owui-interface-defaults:reload"
 
-# Per-process identity, the echo guard for the broadcast. The build id alone is
-# not enough: a valve-only change leaves it unchanged, so the publisher would
-# suppress its own peers' reloads.
+# Echo guard for the broadcast. The build id alone will not do: a valve-only
+# change leaves it unchanged, so the publisher would suppress its peers.
 PROCESS_TOKEN = uuid.uuid4().hex
 
 # ===========================================================================
-# Shared /static/loader.js registry
-# --- KEEP THIS BLOCK BYTE-IDENTICAL IN EVERY PLUGIN THAT USES IT -----------
+# Shared static-asset registry
+# --- KEEP BYTE-IDENTICAL IN EVERY PLUGIN THAT USES IT ----------------------
 # ---------------------------------------------------------------------------
-# Open WebUI's app shell loads <script src="/static/loader.js" defer> on every
-# page (src/app.html). It is the only hook that runs BEFORE the SvelteKit
-# bundle hydrates, and more than one plugin wants it - so no plugin may own it.
+# app.html loads /static/loader.js and /static/custom.css on every page, and
+# loader.js is the only hook running before the SvelteKit bundle hydrates. Two
+# URLs, many plugins - so none may own either. Each publishes a fragment into
+# one app.state registry and the route composes them PER REQUEST, so load order
+# is irrelevant, a late plugin needs no cooperation, and a re-exec'd one
+# replaces its own key. Per-process: each container serves what it has loaded.
 #
-# Every plugin instead publishes a fragment into one registry on app.state, and
-# the route composes the response FROM THAT REGISTRY AT REQUEST TIME:
-#   * whichever plugin happens to create the route does not own the content;
-#   * a plugin loading later needs no cooperation from the others - the next
-#     request simply finds one more fragment;
-#   * a plugin re-exec'd by a reload broadcast overwrites its own key, so a
-#     stale closure cannot survive;
-#   * the registry is per-process, so each container serves what it has loaded
-#     (which is what the Redis reload broadcast is for).
+# Fragments are inlined, never <script src> / @import - a second request would
+# land after hydration, defeating the point.
 #
-# Fragments are concatenated INLINE, never emitted as <script src> tags: the
-# whole point of this hook is running before hydration, and a second request
-# would land whenever it lands.
+# Contract: ASSET_REGISTRY_ATTR, ASSET_ROUTE_ATTR, the {"start","end","js"}
+# entry shape, the paths. Everything else is implementation owned by whichever
+# plugin created the route - a stale copy silently serves everyone.
 # ===========================================================================
 LOADER_PATH = "/static/loader.js"
-LOADER_REGISTRY_ATTR = "_owui_loader_fragments"
-LOADER_ROUTE_ATTR = "_owui_shared_loader"
+CUSTOM_CSS_PATH = "/static/custom.css"
+SHARED_ASSET_TYPES = {
+    LOADER_PATH: "application/javascript; charset=utf-8",
+    CUSTOM_CSS_PATH: "text/css; charset=utf-8",
+}
+ASSET_REGISTRY_ATTR = "_owui_static_fragments"  # {path: {key: entry}}
+ASSET_ROUTE_ATTR = "_owui_shared_asset"  # set to the path the route serves
 
 
-def loader_fragments(app: Any) -> dict:
-    registry = getattr(app.state, LOADER_REGISTRY_ATTR, None)
+def asset_fragments(app: Any, path: str) -> dict:
+    registry = getattr(app.state, ASSET_REGISTRY_ATTR, None)
     if not isinstance(registry, dict):
         registry = {}
-        app.state.__setattr__(LOADER_REGISTRY_ATTR, registry)
-    return registry
+        app.state.__setattr__(ASSET_REGISTRY_ATTR, registry)
+    bucket = registry.get(path)
+    if not isinstance(bucket, dict):
+        bucket = {}
+        registry[path] = bucket
+    return bucket
 
 
-def loader_strip_block(content: str, start_marker: str, end_marker: str) -> str:
+def asset_strip_block(content: str, start_marker: str, end_marker: str) -> str:
     """Remove every marker-wrapped block, leaving other content untouched."""
     while start_marker in content:
         start = content.find(start_marker)
@@ -120,34 +121,31 @@ def loader_strip_block(content: str, start_marker: str, end_marker: str) -> str:
     return content
 
 
-def loader_compose(app: Any) -> str:
-    """The real loader.js from disk with every registered fragment appended.
-
-    A fragment that raises is skipped rather than taking the file down with it:
-    one broken plugin must not blank the app shell's only script tag."""
+def asset_compose(app: Any, path: str) -> str:
+    """Disk file plus every registered fragment. A fragment that raises is
+    skipped - one broken plugin must not blank a page-wide asset."""
     try:
         from open_webui.env import STATIC_DIR
 
-        path = Path(STATIC_DIR) / "loader.js"
+        target = Path(STATIC_DIR) / path.rsplit("/", 1)[-1]
         body = (
             ""
-            if (path.is_symlink() or not path.is_file())
-            else path.read_text(encoding="utf-8")
+            if (target.is_symlink() or not target.is_file())
+            else target.read_text(encoding="utf-8")
         )
     except Exception:
         body = ""
 
-    registry = loader_fragments(app)
-    # Strip every fragment's markers first: an older file-writing build of any
-    # of these plugins may have left its block inside the real file on disk.
-    for key in sorted(registry):
-        entry = registry[key]
-        body = loader_strip_block(body, entry["start"], entry["end"])
+    fragments = asset_fragments(app, path)
+    # Strip first: an older file-writing build may have left a block on disk.
+    for key in sorted(fragments):
+        entry = fragments[key]
+        body = asset_strip_block(body, entry["start"], entry["end"])
     body = body.rstrip()
 
-    for key in sorted(registry):
+    for key in sorted(fragments):
         try:
-            block = (registry[key]["js"]() or "").strip()
+            block = (fragments[key]["js"]() or "").strip()
         except Exception:
             continue
         if block:
@@ -155,31 +153,34 @@ def loader_compose(app: Any) -> str:
     return body + "\n" if body else ""
 
 
-def loader_register(app: Any, key: str, start: str, end: str, producer) -> None:
-    """Publish this plugin's fragment and ensure the shared route exists.
-    Idempotent, and safe to call from any plugin in any order."""
+def asset_register(
+    app: Any, path: str, key: str, start: str, end: str, producer
+) -> None:
+    """Publish a fragment and ensure the route exists. Idempotent, and safe
+    from any plugin in any order."""
     from starlette.responses import Response
     from starlette.routing import Mount, Route
 
-    loader_fragments(app)[key] = {"start": start, "end": end, "js": producer}
+    asset_fragments(app, path)[key] = {"start": start, "end": end, "js": producer}
 
     for existing in app.routes:
-        if getattr(existing, "path", "") == LOADER_PATH and getattr(
-            existing, LOADER_ROUTE_ATTR, False
-        ):
-            return  # the shared shell is already installed
+        if getattr(existing, ASSET_ROUTE_ATTR, None) == path:
+            return  # the shared route is already installed
 
-    # A single-owner route from an older build would serve only its own
-    # fragment, so it has to go.
-    app.routes[:] = [r for r in app.routes if getattr(r, "path", "") != LOADER_PATH]
+    # A single-owner route from an older build serves only its own fragment.
+    app.routes[:] = [r for r in app.routes if getattr(r, "path", "") != path]
+    media_type = SHARED_ASSET_TYPES.get(path, "text/plain; charset=utf-8")
 
-    async def serve_loader(request):
-        content = loader_compose(app)
-        etag = '"owui-loader-' + hashlib.md5(content.encode("utf-8")).hexdigest() + '"'
-        # no-store, not merely no-cache: nginx fronts the fleet and an earlier
-        # build's max-age pinned a stale copy for 48h in the proxy AND in
-        # browsers. The ETag covers the COMPOSED body, so a fragment appearing,
-        # changing or disappearing invalidates it on its own.
+    async def serve_asset(request):
+        content = asset_compose(app, path)
+        etag = (
+            '"owui-'
+            + hashlib.md5((path + "\x00" + content).encode("utf-8")).hexdigest()
+            + '"'
+        )
+        # no-store, not no-cache: an earlier max-age pinned a stale copy for
+        # 48h in nginx and browsers. ETag covers the composed body, so any
+        # fragment change invalidates it.
         headers = {
             "Cache-Control": "no-store, no-cache, must-revalidate, private",
             "Pragma": "no-cache",
@@ -187,42 +188,30 @@ def loader_register(app: Any, key: str, start: str, end: str, producer) -> None:
         }
         if request.headers.get("if-none-match") == etag:
             return Response(status_code=304, headers=headers)
-        return Response(
-            content,
-            # Starlette only appends charset for text/* media types, so an
-            # undeclared application/javascript leaves the encoding to the
-            # reader to guess - and anything that guesses latin-1 turns
-            # "täglich" into "tÃ¤glich". Declare it.
-            media_type="application/javascript; charset=utf-8",
-            headers=headers,
-        )
+        # Starlette only auto-appends charset for text/*, so JS would ship
+        # undeclared and readers guessing latin-1 get mojibake.
+        return Response(content, media_type=media_type, headers=headers)
 
     insert_at = len(app.routes)
     for position, existing in enumerate(app.routes):
         if isinstance(existing, Mount) and getattr(existing, "name", "") == "static":
             insert_at = position
             break
-    shared = Route(LOADER_PATH, serve_loader, methods=["GET"])
-    setattr(shared, LOADER_ROUTE_ATTR, True)
+    shared = Route(path, serve_asset, methods=["GET"])
+    setattr(shared, ASSET_ROUTE_ATTR, path)
     app.routes.insert(insert_at, shared)
 
 
-# =========================== end shared loader block =======================
+# =========================== end shared asset block ========================
 
 
-# ===========================================================================
-# Pre-hydration defaults (the loader.js fragment)
 # ---------------------------------------------------------------------------
-# Seeding the database cannot fix a session that has already started: the
-# frontend reads GET /users/user/settings exactly once, in the app layout's
-# onMount, and nothing ever re-reads it. A seed that lands after that is
-# invisible for the whole session no matter how fast it was.
-#
-# So we do not race it. This runs from /static/loader.js, which the app shell
-# loads BEFORE the bundle hydrates, and wraps fetch so the settings response
-# already carries the defaults by the time the app parses it. The user's own
-# stored values are merged on top, so an explicit choice always wins.
-# ===========================================================================
+# Pre-hydration defaults (the loader.js fragment)
+# The frontend reads GET /users/user/settings once, in onMount, and never
+# again - a seed landing after that is invisible for the whole session. This
+# runs before hydration and wraps fetch, so the response already carries the
+# defaults. The user's own values merge on top; an explicit choice wins.
+# ---------------------------------------------------------------------------
 INTERFACE_JS_BLOCK_START = "// owui-interface-defaults:start"
 INTERFACE_JS_BLOCK_END = "// owui-interface-defaults:end"
 
@@ -234,9 +223,8 @@ CUSTOM_JS = r"""
   var original = window.fetch;
   if (typeof original !== 'function' || original.__owuiInterfaceDefaults) return;
 
-  /* Defaults underneath, the user's own values on top - recursively, so a
-     nested object (imageCompressionSize, title) merges key by key instead of
-     one side replacing the other wholesale. */
+  /* Recursive so nested objects (imageCompressionSize, title) merge key by
+     key rather than one side replacing the other. */
   function merge(base, over) {
     var out = {}, key;
     for (key in base) {
@@ -251,8 +239,7 @@ CUSTOM_JS = r"""
     return out;
   }
 
-  /* Only the settings GET. The save endpoint is /users/user/settings/update,
-     which the trailing (?|end-of-string) deliberately excludes. */
+  /* GET only. The trailing (?|$) excludes .../settings/update. */
   function isSettingsGet(input, init) {
     var url = '', method = (init && init.method) || 'GET';
     try {
@@ -276,8 +263,7 @@ CUSTOM_JS = r"""
       return res.clone().json().then(function (data) {
         var own = (data && typeof data === 'object') ? data : {};
         var body = JSON.stringify(merge({ ui: DEFAULTS }, own));
-        /* Fresh headers - reusing the originals would carry a Content-Length
-           that no longer matches the rewritten body. */
+        /* Fresh headers: the original Content-Length no longer matches. */
         return new Response(body, {
           status: res.status,
           statusText: res.statusText,
@@ -296,9 +282,8 @@ def build_interface_js_block(ui: dict) -> str:
     """The fragment for the shared loader, or "" when nothing is managed."""
     if not ui:
         return ""
-    # ensure_ascii keeps U+2028/U+2029 escaped - raw, they are line terminators
-    # in JS and would break the literal. Escaping "</" stops a string value from
-    # closing the enclosing script element.
+    # ensure_ascii escapes U+2028/U+2029 (raw, they are JS line terminators);
+    # escaping "</" stops a value closing the script element.
     payload = json.dumps(ui, ensure_ascii=True).replace("</", "<\\/")
     script = CUSTOM_JS.replace("__DEFAULTS__", payload).strip()
     return f"{INTERFACE_JS_BLOCK_START}\n{script}\n{INTERFACE_JS_BLOCK_END}"
@@ -754,13 +739,9 @@ class Event:
         return redis if redis is not None else self._get_redis()
 
     def _schedule_bootstrap(self) -> None:
-        """Re-arm everything this process needs, right after the module is
-        (re)loaded - including by a peer's reload broadcast, where no event
-        follows to do it for us.
-
-        Without this a reloaded module would sit idle: the loader registry
-        would still hold the PREVIOUS instance's producer, so the fragment
-        would keep serving the valves that instance last saw."""
+        """Re-arm this process after a (re)load, including a peer's reload
+        broadcast where no event follows. Without it the registry would still
+        hold the previous instance's producer and serve its stale valves."""
         try:
             loop = asyncio.get_running_loop()
         except RuntimeError:
@@ -828,8 +809,9 @@ class Event:
     def _publish_fragment(self, app: Any) -> None:
         """(Re)point the shared loader at THIS instance's valves."""
         try:
-            loader_register(
+            asset_register(
                 app,
+                LOADER_PATH,
                 "interface-defaults",
                 INTERFACE_JS_BLOCK_START,
                 INTERFACE_JS_BLOCK_END,
@@ -1190,11 +1172,9 @@ class Event:
                 except Exception:
                     pass
 
-        # 0) Publish the pre-hydration fragment and arm cross-container reloads.
-        # Cheap and idempotent, so both run on EVERY event:
-        # system.startup.completed covers a booting container, any other event
-        # covers one that loaded this module lazily. The producer is invoked per
-        # request, so it always reflects the valves this process currently holds.
+        # 0) Publish the fragment and arm reloads. Idempotent, so both run on
+        # every event: startup covers a booting container, anything else covers
+        # one that loaded lazily.
         if __app__ is not None:
             self._publish_fragment(__app__)
             try:
@@ -1229,10 +1209,8 @@ class Event:
             except Exception:
                 log.exception("interface-defaults: seeding %s failed", user_id)
                 return
-            # The elapsed time is the number that matters: the browser reads
-            # settings once, at app mount, and never again. Anything past a few
-            # hundred ms and the new user's session is already running on the
-            # unseeded copy - and no later repair can reach that page.
+            # Elapsed time is the number that matters: past a few hundred ms
+            # the browser has already read its settings for the session.
             log.info(
                 "interface-defaults: seeded %s with %d setting(s) [%s] in %.0f ms",
                 user_id,
@@ -1277,11 +1255,8 @@ class Event:
                 return
             if (payload.get("data") or {}).get("scope") == "user":
                 return  # per-user valves, not the admin config (no UserValves today)
-            # A valve change reaches only the container that handled the save,
-            # and leaves the build id untouched - so peers need an explicit
-            # broadcast, echo-guarded on the process token. Until this landed,
-            # a saved default took effect on 1 of 16 containers and the other
-            # 15 kept serving the old one from their loader fragment.
+            # A valve change reaches only the saving container and leaves the
+            # build id untouched, so peers need an explicit broadcast.
             if __app__ is not None:
                 await self._publish_reload(__app__, "valves")
             do_reset = bool(self.valves.reset_all_users_to_factory)
