@@ -29,12 +29,11 @@ from pydantic import BaseModel, Field
 # code until each container happens to re-exec on its own. The `version:` in the
 # frontmatter above is documentation - THIS is what distributes the code.
 # ===========================================================================
-FUNCTION_BUILD_ID = "2026-08-04.3"
+FUNCTION_BUILD_ID = "2026-08-05.1"
 
 
-# Owns its handler: Open WebUI only calls basicConfig() when GLOBAL_LOG_LEVEL
-# is set, so otherwise root sits at WARNING with no handler and every info()
-# vanishes - making this function look like it never ran.
+# Named, not getLogger(__name__): a DB-loaded plugin is "function_<uuid>".
+# propagate=False stops double printing; the own level survives GLOBAL_LOG_LEVEL.
 def _get_logger() -> logging.Logger:
     logger = logging.getLogger("interface_defaults")
     if getattr(logger, "_id_configured", False):
@@ -44,8 +43,7 @@ def _get_logger() -> logging.Logger:
     logger.addHandler(handler)
     logger.setLevel(logging.INFO)
     logger.propagate = False
-    # getLogger returns the same object after a re-exec; without the guard
-    # handlers stack and every line prints N times.
+    # Same object after a re-exec, so the guard stops handlers stacking.
     logger._id_configured = True  # type: ignore[attr-defined]
     return logger
 
@@ -83,9 +81,27 @@ PROCESS_TOKEN = uuid.uuid4().hex
 # Fragments are inlined, never <script src> / @import - a second request would
 # land after hydration, defeating the point.
 #
-# Contract: ASSET_REGISTRY_ATTR, ASSET_ROUTE_ATTR, the {"start","end","js"}
-# entry shape, the paths. Everything else is implementation owned by whichever
-# plugin created the route - a stale copy silently serves everyone.
+# Contract:
+#   * ASSET_REGISTRY_ATTR, ASSET_ROUTE_ATTR, the entry shape and the paths are
+#     the interop surface. Everything else is implementation owned by whichever
+#     plugin created the route - a stale copy silently serves everyone, hence
+#     ASSET_IMPL_VERSION and byte-identity.
+#   * `key` must be a module-level constant. Derive it from a build id or a
+#     function id and a re-exec registers a SECOND entry - duplicated output,
+#     not just a leaked closure.
+#   * `order` breaks ties: lower composes first, so on custom.css it loses the
+#     cascade and on loader.js it wraps innermost. Default 0. Use it instead of
+#     encoding priority in the key, which would only work if every plugin
+#     renamed at once.
+#   * Producers run SYNCHRONOUSLY on the event loop, on every request, before
+#     the ETag is compared. They must not block: no I/O, no locks, no sleeps.
+#     Building a string is fine.
+#   * To withdraw, return "" - there is no unregister. A disabled plugin still
+#     gets function.disable_started (it fires before is_active flips), but a
+#     DELETED one never sees its own deletion, so disable before deleting or
+#     the fragment serves until that process restarts.
+#   * Reach is the SPA only. A plugin serving its own HTML page loads neither
+#     asset and must inject its own.
 # ===========================================================================
 LOADER_PATH = "/static/loader.js"
 CUSTOM_CSS_PATH = "/static/custom.css"
@@ -96,10 +112,13 @@ SHARED_ASSET_TYPES = {
 ASSET_REGISTRY_ATTR = "_owui_static_fragments"  # {path: {key: entry}}
 ASSET_ROUTE_ATTR = "_owui_shared_asset"  # set to the path the route serves
 ASSET_IMPL_ATTR = "_owui_shared_asset_impl"  # implementation version of the route
-# Bump when the block below changes behaviour. Without it the first plugin to
-# boot owns the route forever and a newer copy silently defers to its older
-# implementation; with it, newer evicts older and the fleet converges on one.
-ASSET_IMPL_VERSION = 2
+# Bump when this block changes behaviour: newer evicts older, so the fleet
+# converges on one implementation instead of whichever plugin booted first.
+ASSET_IMPL_VERSION = 3
+
+# Producer failures are reported once per (path, key, exception type) - compose
+# runs on every page load, so an unconditional warning would be a firehose.
+_ASSET_WARNED: set = set()
 
 
 def asset_fragments(app: Any, path: str) -> dict:
@@ -112,6 +131,18 @@ def asset_fragments(app: Any, path: str) -> dict:
         bucket = {}
         registry[path] = bucket
     return bucket
+
+
+def asset_sort_key(item):
+    """(order, key). Coerced defensively: a non-int order from a third-party
+    plugin would raise inside sorted(), outside the per-fragment guard, and
+    take down the whole asset."""
+    key, entry = item
+    try:
+        order = int(entry.get("order", 0))
+    except (TypeError, ValueError):
+        order = 0
+    return (order, key)
 
 
 def asset_strip_block(content: str, start_marker: str, end_marker: str) -> str:
@@ -131,8 +162,9 @@ def asset_strip_block(content: str, start_marker: str, end_marker: str) -> str:
 
 
 def asset_compose(app: Any, path: str) -> str:
-    """Disk file plus every registered fragment. A fragment that raises is
-    skipped - one broken plugin must not blank a page-wide asset."""
+    """Disk file plus every registered fragment, in (order, key) order."""
+    import logging
+
     try:
         from open_webui.env import STATIC_DIR
 
@@ -145,17 +177,27 @@ def asset_compose(app: Any, path: str) -> str:
     except Exception:
         body = ""
 
-    fragments = asset_fragments(app, path)
+    ordered = sorted(asset_fragments(app, path).items(), key=asset_sort_key)
     # Strip first: an older file-writing build may have left a block on disk.
-    for key in sorted(fragments):
-        entry = fragments[key]
+    for _key, entry in ordered:
         body = asset_strip_block(body, entry["start"], entry["end"])
     body = body.rstrip()
 
-    for key in sorted(fragments):
+    for key, entry in ordered:
         try:
-            block = (fragments[key]["js"]() or "").strip()
-        except Exception:
+            block = (entry["js"]() or "").strip()
+        except Exception as exc:
+            mark = (path, key, type(exc).__name__)
+            if mark not in _ASSET_WARNED:
+                if len(_ASSET_WARNED) > 256:
+                    _ASSET_WARNED.clear()
+                _ASSET_WARNED.add(mark)
+                logging.getLogger("owui-shared-assets").warning(
+                    "fragment %r failed for %s - it will be omitted",
+                    key,
+                    path,
+                    exc_info=True,
+                )
             continue
         if block:
             body = (body + "\n\n" if body else "") + block
@@ -163,14 +205,19 @@ def asset_compose(app: Any, path: str) -> str:
 
 
 def asset_register(
-    app: Any, path: str, key: str, start: str, end: str, producer
+    app: Any, path: str, key: str, start: str, end: str, producer, order: int = 0
 ) -> None:
     """Publish a fragment and ensure the route exists. Idempotent, and safe
     from any plugin in any order."""
     from starlette.responses import Response
     from starlette.routing import Mount, Route
 
-    asset_fragments(app, path)[key] = {"start": start, "end": end, "js": producer}
+    asset_fragments(app, path)[key] = {
+        "start": start,
+        "end": end,
+        "js": producer,
+        "order": order,
+    }
 
     for existing in app.routes:
         if getattr(existing, ASSET_ROUTE_ATTR, None) != path:
@@ -191,12 +238,14 @@ def asset_register(
             + hashlib.md5((path + "\x00" + content).encode("utf-8")).hexdigest()
             + '"'
         )
-        # no-store, not no-cache: an earlier max-age pinned a stale copy for
-        # 48h in nginx and browsers. ETag covers the composed body, so any
-        # fragment change invalidates it.
+        # no-cache, NOT no-store: a response the browser may not store has no
+        # validator, so If-None-Match is never sent and the 304 below is dead
+        # code. no-cache still forbids reuse without revalidation, so a stale
+        # body is impossible either way. Note a proxy may re-add no-store for
+        # these paths, which puts the 304 back to sleep - that is deployment
+        # policy, not this block's business.
         headers = {
-            "Cache-Control": "no-store, no-cache, must-revalidate, private",
-            "Pragma": "no-cache",
+            "Cache-Control": "no-cache, must-revalidate, private",
             "ETag": etag,
         }
         if request.headers.get("if-none-match") == etag:
