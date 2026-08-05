@@ -29,7 +29,7 @@ from pydantic import BaseModel, Field
 # code until each container happens to re-exec on its own. The `version:` in the
 # frontmatter above is documentation - THIS is what distributes the code.
 # ===========================================================================
-FUNCTION_BUILD_ID = "2026-08-05.1"
+FUNCTION_BUILD_ID = "2026-08-05.2"
 
 
 # Named, not getLogger(__name__): a DB-loaded plugin is "function_<uuid>".
@@ -114,7 +114,7 @@ ASSET_ROUTE_ATTR = "_owui_shared_asset"  # set to the path the route serves
 ASSET_IMPL_ATTR = "_owui_shared_asset_impl"  # implementation version of the route
 # Bump when this block changes behaviour: newer evicts older, so the fleet
 # converges on one implementation instead of whichever plugin booted first.
-ASSET_IMPL_VERSION = 3
+ASSET_IMPL_VERSION = 4
 
 # Producer failures are reported once per (path, key, exception type) - compose
 # runs on every page load, so an unconditional warning would be a firehose.
@@ -235,7 +235,12 @@ def asset_register(
         content = asset_compose(app, path)
         etag = (
             '"owui-'
-            + hashlib.md5((path + "\x00" + content).encode("utf-8")).hexdigest()
+            # usedforsecurity=False: this is a cache validator, not a security
+            # primitive, and a bare md5() raises ValueError on a FIPS host -
+            # which would 500 the asset for every visitor.
+            + hashlib.md5(
+                (path + "\x00" + content).encode("utf-8"), usedforsecurity=False
+            ).hexdigest()
             + '"'
         )
         # no-cache, NOT no-store: a response the browser may not store has no
