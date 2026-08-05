@@ -93,9 +93,11 @@ PROCESS_TOKEN = uuid.uuid4().hex
 #     cascade and on loader.js it wraps innermost. Default 0. Use it instead of
 #     encoding priority in the key, which would only work if every plugin
 #     renamed at once.
-#   * Producers run SYNCHRONOUSLY on the event loop, on every request, before
-#     the ETag is compared. They must not block: no I/O, no locks, no sleeps.
-#     Building a string is fine.
+#   * Producers run SYNCHRONOUSLY on the event loop, on every request, and
+#     BEFORE the ETag is compared - so a 304 costs exactly what a 200 costs.
+#     "Cheap" is per-call work, not payload size: memoise anything that
+#     parses, formats or regexes and return a prebuilt string. No I/O, no
+#     locks, no sleeps. Budget tens of microseconds, not milliseconds.
 #   * To withdraw, return "" - there is no unregister. A disabled plugin still
 #     gets function.disable_started (it fires before is_active flips), but a
 #     DELETED one never sees its own deletion, so disable before deleting or
