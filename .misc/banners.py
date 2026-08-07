@@ -33,6 +33,7 @@ body::after {{ content:""; position:absolute; left:0; top:0; bottom:0; width:6px
 .titlerow {{ display:flex; align-items:center; gap:22px; }}
 .glyph {{ font-size:{ts-10}px; line-height:1; filter:drop-shadow(0 6px 20px {a1}66); }}
 h1 {{ font-size:{ts}px; line-height:1.0; font-weight:800; letter-spacing:-1.6px;
+  padding:8px 10px 22px 0; margin-bottom:-22px;
   background:linear-gradient(180deg,#fff,{a2}); -webkit-background-clip:text; background-clip:text; color:transparent; }}
 .tag {{ margin-top:18px; font-size:25px; line-height:1.4; color:#a6a6bd; max-width:840px; font-weight:400; }}
 .tag b {{ color:#e7e5ff; font-weight:600; }}
@@ -131,19 +132,41 @@ def m_email(a1,a2):  # centered envelope, top-right "send" plane accent with tra
       <g fill="{a2}"><circle cx="352" cy="86" r="3.5"/><circle cx="366" cy="64" r="2.5"/></g>
     </svg>'''
 
-def m_bridge(a1,a2):  # nodes + ui:// + app window + resource lines
+def m_bridge(a1,a2):  # server rack -> ui:// packet flow -> app window with live chart
     return f'''<svg width="384" height="300" viewBox="0 0 384 300" fill="none" font-family="monospace">
-      <line x1="120" y1="150" x2="256" y2="150" stroke="{a2}" stroke-width="4" stroke-dasharray="2 12" stroke-linecap="round"/>
-      <rect x="24" y="96" width="104" height="108" rx="16" fill="#111a16" stroke="{a1}" stroke-width="3"/>
-      <circle cx="76" cy="130" r="14" fill="{a1}"/>
-      <g stroke="{a1}" stroke-width="3" stroke-linecap="round" opacity=".8"><line x1="50" y1="162" x2="102" y2="162"/><line x1="50" y1="178" x2="88" y2="178"/></g>
-      <rect x="248" y="96" width="112" height="108" rx="16" fill="#0f1a16" stroke="{a2}" stroke-width="3"/>
-      <rect x="262" y="110" width="84" height="18" rx="5" fill="#18241f"/>
-      <circle cx="271" cy="119" r="3" fill="{a2}"/><circle cx="281" cy="119" r="3" fill="{a2}"/>
-      <g stroke="#8fe8cf" stroke-width="3" stroke-linecap="round" opacity=".75"><line x1="262" y1="146" x2="346" y2="146"/><line x1="262" y1="164" x2="328" y2="164"/><line x1="262" y1="182" x2="340" y2="182"/></g>
-      <g transform="translate(148,132)"><rect x="0" y="0" width="88" height="36" rx="10" fill="#0c1512" stroke="rgba(255,255,255,.16)"/><text x="44" y="24" fill="#bdf3df" font-size="17" text-anchor="middle">ui://</text></g>
-      <text x="76" y="228" fill="#8fb8ab" font-size="14" text-anchor="middle" font-family="sans-serif">MCP server</text>
-      <text x="304" y="228" fill="#8fb8ab" font-size="14" text-anchor="middle" font-family="sans-serif">Rich UI</text>
+      <line x1="118" y1="104" x2="220" y2="104" stroke="{a2}" stroke-width="4" stroke-dasharray="2 12" stroke-linecap="round"/>
+      <circle cx="160" cy="104" r="6" fill="{a2}"/>
+      <rect x="18" y="70" width="100" height="140" rx="16" fill="#111a16" stroke="{a1}" stroke-width="3"/>
+      <g>
+        <rect x="32" y="86" width="72" height="30" rx="7" fill="#18241f" stroke="{a1}" stroke-width="1.5"/>
+        <circle cx="44" cy="101" r="4" fill="{a1}"/>
+        <line x1="56" y1="101" x2="92" y2="101" stroke="{a1}" stroke-width="3" stroke-linecap="round" opacity=".7"/>
+        <rect x="32" y="124" width="72" height="30" rx="7" fill="#18241f" stroke="{a1}" stroke-width="1.5"/>
+        <circle cx="44" cy="139" r="4" fill="{a2}"/>
+        <line x1="56" y1="139" x2="84" y2="139" stroke="{a1}" stroke-width="3" stroke-linecap="round" opacity=".7"/>
+        <rect x="32" y="162" width="72" height="30" rx="7" fill="#18241f" stroke="{a1}" stroke-width="1.5"/>
+        <circle cx="44" cy="177" r="4" fill="#8fe8cf"/>
+        <line x1="56" y1="177" x2="96" y2="177" stroke="{a1}" stroke-width="3" stroke-linecap="round" opacity=".7"/>
+      </g>
+      <rect x="220" y="54" width="146" height="172" rx="16" fill="#0f1a16" stroke="{a2}" stroke-width="3"/>
+      <rect x="220" y="54" width="146" height="30" rx="16" fill="#18241f"/>
+      <rect x="220" y="72" width="146" height="12" fill="#18241f"/>
+      <circle cx="236" cy="69" r="4" fill="{a2}"/><circle cx="250" cy="69" r="4" fill="{a1}"/><circle cx="264" cy="69" r="4" fill="#8fe8cf"/>
+      <g stroke="#8fe8cf" stroke-width="3" stroke-linecap="round" opacity=".75">
+        <line x1="236" y1="102" x2="330" y2="102"/><line x1="236" y1="118" x2="306" y2="118"/>
+      </g>
+      <g fill="{a2}">
+        <rect x="236" y="168" width="14" height="38" rx="4" opacity=".55"/>
+        <rect x="256" y="150" width="14" height="56" rx="4" opacity=".8"/>
+        <rect x="276" y="160" width="14" height="46" rx="4" opacity=".65"/>
+        <rect x="296" y="136" width="14" height="70" rx="4"/>
+      </g>
+      <circle cx="338" cy="178" r="20" stroke="{a1}" stroke-width="7" fill="none" opacity=".9"
+        stroke-dasharray="94 32" stroke-linecap="round" transform="rotate(-45 338 178)"/>
+      <g transform="translate(134,120)"><rect x="0" y="0" width="88" height="36" rx="10" fill="#0c1512" stroke="rgba(255,255,255,.2)"/><text x="44" y="24" fill="#bdf3df" font-size="17" text-anchor="middle">ui://</text></g>
+      <g transform="translate(160,168)"><rect x="0" y="0" width="62" height="26" rx="8" fill="#0c1512" stroke="{a1}" stroke-width="1.5"/><text x="31" y="18" fill="#bdf3df" font-size="13" text-anchor="middle">CSP</text></g>
+      <text x="68" y="238" fill="#8fb8ab" font-size="14" text-anchor="middle" font-family="sans-serif">MCP server</text>
+      <text x="293" y="252" fill="#8fb8ab" font-size="14" text-anchor="middle" font-family="sans-serif">Rich UI embed</text>
     </svg>'''
 
 def m_vision(a1,a2):  # image + scan + arrow + text card + eye
@@ -245,7 +268,7 @@ banners = {
     motif=m_email("#3b82f6","#38bdf8")),
   "mcp-app-bridge": dict(a1="#10b981", a2="#34d399", emoji="🧩", title="MCP App Bridge", title_size=78,
     badges=["Tool","MCP Apps","SEP-1865","ui:// + CSP"],
-    tag="Render <b>MCP Apps</b> as Rich UI embeds. Calls tools with <b>ui://</b> resources and injects server-declared CSP, no middleware changes.",
+    tag="Use <b>MCP Apps</b> right in your chat: tools bring their own interactive interface, rendered as an embedded panel. No middleware, no core changes.",
     motif=m_bridge("#10b981","#34d399")),
   "vision-bridge": dict(a1="#f59e0b", a2="#fb7185", emoji="👁️", title="Vision Bridge", title_size=80,
     badges=["Filter + Tool","No core changes","On-demand","Re-queryable"],
