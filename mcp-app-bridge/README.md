@@ -1,6 +1,6 @@
 # 🔌 MCP App Bridge
 
-<img width="6400" height="1600" alt="banner-mcp-app-bridge" src="https://github.com/user-attachments/assets/7d965c43-f8e3-4d09-a75f-d1d0c8f3f62f" />
+<img width="6400" height="1600" alt="banner-mcp-app-bridge" src="https://github.com/user-attachments/assets/e90ef10e-9fb6-44de-91bf-2d4db12f0023" />
 
 Renders [MCP Apps](https://github.com/modelcontextprotocol/ext-apps) (SEP-1865) as Rich UI embeds in Open WebUI — using the existing embed system, no middleware changes needed.
 
@@ -20,7 +20,7 @@ When an MCP server declares a `ui://` resource on a tool, this bridge fetches th
 
 ## How It Works
 
-1. **Model calls `list_mcp_tools`** → discovers tools on the MCP server, including which ones have UI resources
+1. **Model calls `search_mcp_tools` or `list_mcp_tools`** → discovers tools on the MCP server, including which ones have UI resources. Listing is paginated and returns only names and short descriptions; search returns full parameter schemas for the top matches. Full schemas only enter context for tools that match the model's search.
 2. **Model calls `call_mcp_tool`** → executes the tool, checks for `_meta.ui.resourceUri`
 3. **If a UI resource exists** → fetches the HTML, injects CSP + tool result data + auto-height script, returns it as a Rich UI embed via `HTMLResponse`
 4. **Open WebUI renders it** in a sandboxed iframe — same as the [Inline Visualizer](../inline-visualizer/)
@@ -76,7 +76,8 @@ The bridge honors the MCP Apps spec security model:
 1. Click the **gear icon** next to the MCP App Bridge tool
 2. Set **mcp_server_url** to your MCP server's streamable HTTP endpoint
 3. Set **auth_token** if your server requires authentication
-4. Save
+4. Set **tool_blocklist** to a comma-separated list of tool names to hide from the model and block from execution (optional)
+5. Save
 
 ### 3. Attach to a Model
 
@@ -86,7 +87,7 @@ The bridge honors the MCP Apps spec security model:
 
 ### 4. Use It
 
-Ask your model to interact with the MCP server. It will call `list_mcp_tools` to discover available tools, then `call_mcp_tool` to execute them. Tools with UI resources render as interactive embeds inline in the chat.
+Ask your model to interact with the MCP server. It will call `search_mcp_tools` (or `list_mcp_tools` to browse) to discover available tools, then `call_mcp_tool` to execute them. Tools with UI resources render as interactive embeds inline in the chat.
 
 ## Testing with the Demo Server
 
@@ -110,14 +111,15 @@ This bridge demonstrates that Open WebUI's existing infrastructure — `HTMLResp
 
 This tool follows the MCP protocol's dynamic tool discovery pattern — and aligns with Anthropic's [Tool Search Tool](https://docs.anthropic.com/en/docs/agents-and-tools/tool-use/tool-search-tool) concept, where tools are discovered and loaded on demand rather than pre-registered in the model's context.
 
-The two-step flow maps directly to MCP primitives:
+The flow maps directly to MCP primitives:
 
 | Bridge Function | MCP Primitive | Purpose |
 |---|---|---|
-| `list_mcp_tools` | `tools/list` | On-demand discovery — model learns what's available only when needed |
+| `search_mcp_tools` | `tools/list` | Keyword search: returns full parameter schemas for the top matches only |
+| `list_mcp_tools` | `tools/list` | Browsing: names and short descriptions, no schemas |
 | `call_mcp_tool` | `tools/call` | On-demand execution — model invokes tools by name with arguments |
 
-This avoids pre-loading every MCP tool definition into the model's context window, which is especially important for MCP servers that expose many tools. The model discovers relevant tools first, then calls only what it needs — exactly the pattern the MCP spec and Anthropic's dynamic tool loading approach advocate for.
+This avoids pre-loading every MCP tool definition into the model's context window, which is especially important for MCP servers that expose many tools. The model discovers relevant tools first, then loads full schemas only for the top search matches — exactly the pattern the MCP spec and Anthropic's dynamic tool loading approach advocate for.
 
 ## MCP Apps vs Open WebUI Rich UI
 

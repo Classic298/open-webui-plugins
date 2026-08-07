@@ -220,7 +220,7 @@ font-size. They track the theme automatically.
 | .node | Cursor-pointer + hover opacity on a <g> | Mark a <g> as clickable. Pair with onclick="sendPrompt(...)" so a user can drill into the topic. |
 | .arr | 1.5px stroke matching theme borders | Arrow lines and connectors. Combine with marker-end="url(#arrow)". |
 | .leader | 0.5px dashed guide line | Pulling a label to a part of an illustration when the label can't sit on top of it. |
-| .c-{ramp} | Sets fill/stroke + text colors on a whole <g> from one of the 9 color ramps | Color a node by category — apply .c-teal (etc.) to a <g> and every shape and text inside picks up the matching ramp. |
+| .c-{ramp} | Sets fill/stroke + text colors on a whole <g> from one of the 9 color ramps | Color a node by category — apply .c-teal (etc.) to a <g> and every shape and text inside picks up the matching ramp. Un-classed, un-filled <path>/<polygon> children (pie wedges, areas) take the ramp's series color; on a classed or filled mark, fill="currentColor" opts back in. |
 
 ### Sizing text inside boxes
 
