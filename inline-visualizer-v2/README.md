@@ -4,7 +4,7 @@
 
 **Turn any Open WebUI chat into a live canvas.** Ask for a dashboard, diagram, chart, interactive quiz, architecture map, periodic table, flowchart, data explorer, OUR SOLAR SYSTEM — anything you'd draw in a browser — and watch the model paint it straight into the conversation as it types. Clickable nodes that send follow-up prompts. Copy-buttons that do the right thing. Sliders, toggles, and tabs that remember their state across reloads. Light/dark theme out of the box. A full 9-ramp design system so every visual looks like it belongs.
 
-Interactive. Stateful. Themed. Localized into 46 languages. Renders as the stream arrives — no waiting, no static pop-in.
+Interactive. Stateful. Themed. Localized into 48 languages. Renders as the stream arrives — no waiting, no static pop-in.
 
 > [!TIP]
 > **🚀 [Jump to Setup](#setup)** — up and running in about a minute.
@@ -31,7 +31,7 @@ Legend: 🚫 feature not in that version · ⚡ present, v2 expands it · ✅ pr
 | **CDN library catalog in skill** | ⚡ Chart.js, D3.js examples | ✅ Chart.js, D3.js, Vega-Lite, **ECharts**, **Plotly**, **vis-network** (standalone bundle), **Tone.js / Wavesurfer** — each with a vetted CDN URL and "when to reach for it" guidance. Allowlisted in strict CSP out of the box. |
 | **Chart-type coverage in skill** | ⚡ Bar / line / doughnut / scatter | ✅ Adds stacked bars/areas, radar, KPI cards with sparklines, progress bars, ranking strips, KPI donuts, custom-shape charts (thermometers, batteries, fuel gauges), plus comparison cards, slider-driven explainers, tabs (with hidden-panel init guidance), step-through walkthroughs. |
 | **Stream-completion feedback** | 🚫 N/A — no stream. | ✅ Localized "Visualization ready" toast in the top-right + an optional soft chime. Fires only when a real stream was seen — reopening a finished chat stays quiet. The chime is off-switchable via the `chime` valve (off → chime code isn't shipped at all). |
-| **i18n surface** | ⚡ 1 string × 46 languages = 46 translations (download tooltip) | ✅ 5 strings × 46 languages = **230 translations** — download tooltip, loader label, "unavailable" notice, "Copied" toast, "Visualization ready" toast. Auto-detected from `<html data-iv-lang>`, `localStorage.locale`, and `navigator.language`. |
+| **i18n surface** | ⚡ 1 string × 47 languages = 47 translations (download tooltip) | ✅ 8 strings × 48 languages = **384 translations** — download tooltip, loader label, "unavailable" notice (title + body), "Copied" toast, "Visualization ready" toast, "Export failed" toast, "Visualization script error" toast. Auto-detected from `<html data-iv-lang>`, `localStorage.locale`, and `navigator.language`. |
 | **Mid-stream reconciler** | 🚫 N/A — the iframe is built once from a complete payload. | ✅ Custom safe-cut HTML parser flushes the longest valid prefix on each chunk. Incremental DOM reconciler only appends new nodes and **leaves script-populated containers alone** so `d3.select(...).append('svg')`, `new vis.Network(...)`, ECharts canvases, etc. survive the final paint pass. **Existing nodes never re-mount, animations never re-trigger, zero flicker.** |
 | **Per-tick efficiency** | 🚫 N/A | ✅ `msg.textContent` cached between ticks; unchanged → full pipeline (regex extract, DOM walk, reconciler) short-circuits to a string compare. Only one tick per real DOM mutation does real work. |
 | **Dynamic script injection** | 🚫 N/A — scripts come baked into the static srcdoc and are parsed by the browser normally. | ✅ External `<script src>` + inline scripts injected at finalize() are **serialized via a Promise chain**. Each link wrapped + `.catch`'d so a single bad script can't stall the rest. `Chart`, `d3`, `vega-embed` etc. are guaranteed defined before consumer code runs. |
@@ -53,12 +53,14 @@ Legend: 🚫 feature not in that version · ⚡ present, v2 expands it · ✅ pr
 The tool returns an empty wrapper. The model then emits HTML/SVG between `@@@VIZ-START` / `@@@VIZ-END` text markers in its response. An observer tails the parent chat's live DOM, extracts the growing block, and reconciles new nodes into the iframe in real time. You see cards, SVGs, and charts appear as the model writes them — not all at once when the message completes.
 
 ### 🌍 Built-in localization
-Auto-detects the user's language from `<html data-iv-lang>` (injected server-side), then from parent `localStorage.locale`, then `navigator.language`. 46 languages for:
+Auto-detects the user's language from `<html data-iv-lang>` (injected server-side), then from parent `localStorage.locale`, then `navigator.language`. 48 languages for:
 - Download button tooltip
 - "Rendering visualization…" loader label
-- "Streaming visualization unavailable" notice (shown if `allow-same-origin` is off)
+- "Streaming visualization unavailable" notice (title and body, shown if `allow-same-origin` is off)
 - "Copied" confirmation toast
 - "Visualization ready" done toast
+- "Export failed" toast
+- "Visualization script error" toast
 
 ### 🎨 Design system
 - **9 color ramps** — purple, teal, coral, pink, gray, blue, green, amber, red — each with fill / stroke / text variants that auto-swap for light/dark mode
@@ -248,7 +250,7 @@ Keys are prefixed with the assistant message id, so a chart in Chat A and a char
 ```
 purple · teal · coral · pink · gray · blue · green · amber · red
 ```
-Apply via CSS class on any `<g>` — child `<rect>`, `<circle>`, `<ellipse>` get the ramp's fill + stroke automatically, child `.th` / `.ts` get the ramp's text colors. Light/dark adaptation is automatic.
+Apply via CSS class on any `<g>` — child `<rect>`, `<circle>`, `<ellipse>` get the ramp's fill + stroke automatically, un-classed, un-filled child `<path>` / `<polygon>` (pie wedges, areas) get the ramp's saturated stroke color (an explicit `fill` attribute always wins), and child `.th` / `.ts` get the ramp's text colors. `currentColor` anywhere inside the group resolves to the ramp color, so classed marks can opt back in with `fill="currentColor"`. Light/dark adaptation is automatic.
 
 ```html
 <g class="node c-teal">
@@ -290,9 +292,9 @@ calls for it.
 
 ## 🌍 Localization
 
-The tool bakes `<html data-iv-lang="{detected}">` on the server (reads parent `localStorage.locale` via `__event_call__`). Client-side fallbacks chain through `parent.localStorage` and `navigator.language`. 46 languages covered: en, de, cs, hu, hr, pl, fr, nl, es, pt, it, ca, gl, eu, da, sv, no, fi, is, sk, sl, sr, bs, bg, mk, uk, ru, be, lt, lv, et, ro, el, sq, tr, ar, he, zh, ja, ko, vi, th, id, ms, hi, bn, sw.
+The tool bakes `<html data-iv-lang="{detected}">` on the server (reads parent `localStorage.locale` via `__event_call__`). Client-side fallbacks chain through `parent.localStorage` and `navigator.language`. 48 languages covered: en, de, cs, hu, hr, pl, fr, nl, es, pt, it, ca, gl, eu, da, sv, no, fi, is, sk, sl, sr, bs, bg, mk, uk, ru, be, lt, lv, et, ro, el, sq, tr, az, ar, he, zh, ja, ko, vi, th, id, ms, hi, bn, sw.
 
-Five strings translated per language. That's **230 translations shipping** in the tool.
+Eight strings translated per language. That's **384 translations shipping** in the tool.
 
 ---
 
@@ -302,7 +304,7 @@ Every visualization renders in a sandboxed iframe with a configurable Content Se
 
 | Level | Outbound requests | External images | URL param stripping | Use case |
 |-------|:-:|:-:|:-:|---|
-| **Offline** *(new in 2.2.0)* | ❌ | ❌ | ✅ | **Zero outgoing connections** — even the three script CDNs are blocked. Libraries can be self-hosted on your instance ([tutorial ↓](#-offline-mode--self-hosting-the-cdn-libraries)). |
+| **Offline** *(new in 2.2.0)* | ❌ | ❌ | ✅ | **Nothing leaves your instance** — even the three script CDNs are blocked. Libraries can be self-hosted on your instance ([tutorial ↓](#-offline-mode--self-hosting-the-cdn-libraries)). |
 | **Strict** (default) | ❌ | ❌ | ✅ | Max safety with CDN charts. All core features work normally. |
 | **Balanced** | ❌ | ✅ | — | Visualizations displaying external images (flags, logos). |
 | **None** | ✅ | ✅ | — | Visualizations fetching live API data from within the iframe. |
@@ -327,7 +329,7 @@ Loading a library from a CDN is a plain `GET` of a fixed public URL — zero dat
 When DevTools is open, the browser attempts to fetch `.map` files for loaded libraries from the same CDN. Strict blocks those via `connect-src 'none'` — you'll see lines like `Connecting to 'https://cdn.jsdelivr.net/npm/vega.min.js.map' violates CSP…` in the console. Those are DevTools-only noise (end users with DevTools closed never see them). We intentionally don't relax `connect-src` to fix this because that would reopen the exfil surface above for all users.
 
 > [!WARNING]
-> With `allow-same-origin` enabled (required for streaming), JavaScript in a visualization has reach into the parent Open WebUI page. That is a platform-level permission — the tool cannot narrow it further. If you need full isolation, disable same-origin: v2 degrades gracefully with a localized "streaming unavailable" notice, and you can fall back to the original inline-visualizer (static mode only) for that workflow.
+> With `allow-same-origin` enabled (required for streaming), JavaScript in a visualization has reach into the parent Open WebUI page. That is a platform-level permission — the tool cannot narrow it further. The tool's only network traffic of its own is one same-origin GET to your own instance's chats API (retried until the chat is saved): when an inline script in a rendered block fails to parse, it re-reads the raw message text via the parent frame — works at every security level and sends nothing anywhere else. If you need full isolation, disable same-origin: v2 degrades gracefully with a localized "streaming unavailable" notice, and you can fall back to the original inline-visualizer (static mode only) for that workflow.
 
 > [!NOTE]
 > Even in **None** mode, external API calls may still fail due to CORS — that's the remote server's policy, not ours.
@@ -336,7 +338,7 @@ When DevTools is open, the browser attempts to fetch `.map` files for loaded lib
 
 ## 🔌 Offline mode — self-hosting the CDN libraries
 
-*(new in v2.2.0)* The **Offline** security level guarantees the visualization iframe makes **zero outgoing connections**: no CDNs, no external images, fonts, or media — nothing leaves your Open WebUI host. It exists for air-gapped networks and privacy-hardened deployments.
+*(new in v2.2.0)* The **Offline** security level guarantees **nothing leaves your Open WebUI host**: no CDNs, no external images, fonts, or media. The only request the tool itself ever makes is the same-origin chats-API read described under [Security](#-security). It exists for air-gapped networks and privacy-hardened deployments.
 
 Two ways to use it:
 
@@ -437,6 +439,12 @@ The 30s window is deliberately much longer than any realistic inter-chunk stall.
 </details>
 
 <details>
+<summary><b>A "Visualization script error" toast appears</b></summary>
+
+An inline script in the visualization does not parse. The usual cause is not the model: Open WebUI's citation rendering can silently swallow single-line numeric array literals like `[21, 11, 4]` from the message, corrupting the source the plugin reads from the chat DOM. The plugin detects the broken script before running it and re-reads the raw message text from your instance's chats API, which fixes the corrupted case automatically. The toast only appears when that recovery also dead-ends: the model genuinely wrote invalid JavaScript, the chat is unsaved (temporary chat), or the message kept streaming past the ~90s retry window — in the last case a refresh fixes it, because the saved chat recovers on the first attempt. The exact parse error is in the browser console.
+</details>
+
+<details>
 <summary><b>Chart.js / D3 renders but nothing appears</b></summary>
 
 Chart.js needs `<div style="position: relative; height: Xpx;">` around its canvas and `maintainAspectRatio: false` in options. See **Library init** in SKILL.md.
@@ -509,6 +517,7 @@ The observer inside the iframe uses `parent.document` (via `allow-same-origin`) 
 |---|---|---|
 | `@@@VIZ-END` in source | instant | Model closed the block cleanly (the 99%+ case) |
 | 30s of source stability | 30s | User stopped generation, model forgot END, or network died |
+| Raw-source recovery | up to ~90s | An inline script failed to parse (chat renderer corrupted the DOM source); finalize waits on the raw message text from the chats API, instant on saved chats |
 
 The idle fallback is deliberately much longer than any realistic inter-chunk stall — Gemini 3.1 Pro's 200-token chunks with 3-6s gaps, proxy buffering under poor network (10-20s silent pauses), and occasional stalls on other models all fit comfortably inside. If a stream genuinely dies for 30s+, the visualization is already gone — finalizing on the partial content beats a loader frozen forever, and refreshing the chat re-finalizes instantly from the saved markdown (which has both markers).
 
