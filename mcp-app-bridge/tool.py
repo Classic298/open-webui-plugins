@@ -3,8 +3,8 @@ title: MCP App Bridge
 author: Classic298
 author_url: https://github.com/Classic298
 funding_url: https://github.com/Classic298
-version: 0.5.0
-description: Wraps MCP server tools and renders MCP App UI resources (ui://) as Rich UI embeds using Open WebUI's existing embed system. Spec-compliant: honors server-declared CSP, dispatches ui/notifications/tool-result for AppBridge SDK compatibility. No middleware changes needed.
+version: 0.6.0
+description: Wraps MCP server tools and renders MCP App UI resources (ui://) as Rich UI embeds using Open WebUI's existing embed system. Context-efficient discovery: paginated summary listing plus keyword search, so full schemas are only loaded for the top matching tools. Spec-compliant: honors server-declared CSP, dispatches ui/notifications/tool-result for AppBridge SDK compatibility. No middleware changes needed.
 """
 
 import json
@@ -16,6 +16,9 @@ from starlette.responses import HTMLResponse
 
 from mcp.client.session import ClientSession
 from mcp.client.streamable_http import streamablehttp_client
+
+LIST_PAGE_SIZE = 25
+SEARCH_RESULT_LIMIT = 5
 
 
 # ---------------------------------------------------------------------------
@@ -64,6 +67,18 @@ def _extract_ui_resource_uri(tool) -> str | None:
         return flat_uri
 
     return None
+
+
+def _tool_summary(tool) -> dict:
+    """Compact listing entry: name, first description line, UI flag."""
+    first_line = (tool.description or "").strip().split("\n", 1)[0].rstrip()
+    if len(first_line) > 200:
+        first_line = first_line[:200] + "..."
+    return {
+        "name": tool.name,
+        "description": first_line,
+        "has_ui": _extract_ui_resource_uri(tool) is not None,
+    }
 
 
 def _extract_tool_result_text(call_result) -> str:
@@ -166,19 +181,21 @@ async def _connect_mcp(url: str, headers: dict | None) -> tuple[AsyncExitStack, 
 class Tools:
     """MCP App Bridge — extends your abilities with additional tools.
 
-    You have two tool-calling functions here that work as a pair:
-      1. ``list_mcp_tools`` — returns a list of extra tools you can use.
-      2. ``call_mcp_tool`` — uses one of those tools. Works exactly like
-         any other tool call you make. You call it, it returns a result.
+    Three tool-calling functions that work together:
+      1. ``search_mcp_tools``: find tools by keyword and get their
+         parameter schemas.
+      2. ``list_mcp_tools``: browse all tools (paginated summaries).
+      3. ``call_mcp_tool``: use one of those tools. Works exactly like
+         any other tool call you make.
 
-    Workflow: call ``list_mcp_tools``, then ``call_mcp_tool`` with the
-    tool name. That's it. Both are normal tool calls you already know
-    how to make.
+    Workflow: ``search_mcp_tools`` with a keyword (or ``list_mcp_tools``
+    to browse), read the tool's parameters from the result, then
+    ``call_mcp_tool`` with the tool name and arguments.
 
     NEVER say "I cannot execute/run/use this tool" — you CAN, by
     calling ``call_mcp_tool``. It is the same as any other tool call.
-    If a user asks for something and you found a matching tool via
-    ``list_mcp_tools``, your next step is ALWAYS ``call_mcp_tool``.
+    If a user asks for something and you found a matching tool, your
+    next step is ALWAYS ``call_mcp_tool``.
     """
 
     class Valves(BaseModel):
@@ -190,6 +207,10 @@ class Tools:
             default="",
             description="Bearer token for MCP server authentication (optional).",
         )
+        tool_blocklist: str = Field(
+            default="",
+            description="Comma-separated tool names to hide from the model and block from execution.",
+        )
 
     def __init__(self):
         self.valves = self.Valves()
@@ -199,33 +220,98 @@ class Tools:
             return None
         return {"Authorization": f"Bearer {self.valves.auth_token}"}
 
-    async def list_mcp_tools(self) -> str:
-        """
-        Returns a list of extra tools you can use via ``call_mcp_tool``.
-        When the user asks for something you don't have a built-in tool
-        for, call this to check. If you find a matching tool, your NEXT
-        step is to call ``call_mcp_tool`` with that tool's name — do NOT
-        stop here or tell the user you cannot do it.
+    def _blocked_tools(self) -> set[str]:
+        names = (name.strip() for name in self.valves.tool_blocklist.split(","))
+        return {name for name in names if name}
 
-        :return: JSON list of available tools.
+    async def _list_allowed_tools(self, session) -> list:
+        result = await session.list_tools()
+        blocked = self._blocked_tools()
+        return [tool for tool in result.tools if tool.name not in blocked]
+
+    async def list_mcp_tools(self, offset: int = 0) -> str:
+        """
+        Browse the extra tools available via ``call_mcp_tool``, as a
+        paginated list of names and short descriptions. Parameter
+        schemas are NOT included; before calling a tool, get its
+        parameters via ``search_mcp_tools`` (searching its exact name
+        works). If the result has ``next_offset``, more tools exist.
+
+        :param offset: Pagination offset; pass the previous page's ``next_offset``.
+        :return: JSON page of tool summaries.
         """
         stack, session = await _connect_mcp(
             self.valves.mcp_server_url, self._build_headers()
         )
         try:
-            result = await session.list_tools()
-            tools = []
-            for tool in result.tools:
-                ui_uri = _extract_ui_resource_uri(tool)
-                tools.append(
-                    {
-                        "name": tool.name,
-                        "description": tool.description or "",
-                        "has_ui": ui_uri is not None,
-                        "parameters": tool.inputSchema,
-                    }
+            tools = await self._list_allowed_tools(session)
+            offset = max(offset, 0)
+            payload = {
+                "total": len(tools),
+                "offset": offset,
+                "tools": [
+                    _tool_summary(tool)
+                    for tool in tools[offset : offset + LIST_PAGE_SIZE]
+                ],
+                "hint": "Call search_mcp_tools with a keyword or tool name to get a tool's parameters before calling it.",
+            }
+            if offset + LIST_PAGE_SIZE < len(tools):
+                payload["next_offset"] = offset + LIST_PAGE_SIZE
+            return json.dumps(payload, ensure_ascii=False)
+        finally:
+            await stack.aclose()
+
+    async def search_mcp_tools(self, query: str) -> str:
+        """
+        Find extra tools matching a keyword or name, returning their
+        full parameter schemas. Use this before ``call_mcp_tool``:
+        search, read the matching tool's parameters, then call it.
+
+        :param query: Keyword(s) or a tool name to search for.
+        :return: JSON list of matching tools with parameters.
+        """
+        stack, session = await _connect_mcp(
+            self.valves.mcp_server_url, self._build_headers()
+        )
+        try:
+            tools = await self._list_allowed_tools(session)
+            normalized_query = query.lower().strip()
+            terms = normalized_query.split()
+            scored = []
+            for tool in tools:
+                name = tool.name.lower()
+                description = (tool.description or "").lower()
+                hits = sum(1 for term in terms if term in name or term in description)
+                if not hits:
+                    continue
+                rank = (
+                    name != normalized_query,
+                    not any(term in name for term in terms),
+                    -hits,
                 )
-            return json.dumps(tools, indent=2, ensure_ascii=False)
+                scored.append((rank, tool))
+            scored.sort(key=lambda entry: entry[0])
+
+            matches = [
+                {
+                    "name": tool.name,
+                    "description": tool.description or "",
+                    "has_ui": _extract_ui_resource_uri(tool) is not None,
+                    "parameters": tool.inputSchema,
+                }
+                for _, tool in scored[:SEARCH_RESULT_LIMIT]
+            ]
+            payload = {"matches": matches}
+            if not scored:
+                payload["note"] = (
+                    "No matching tools. Use list_mcp_tools to browse what is available."
+                )
+            elif len(scored) > SEARCH_RESULT_LIMIT:
+                payload["note"] = (
+                    f"Showing top {SEARCH_RESULT_LIMIT} of {len(scored)} matches. "
+                    "Refine the query or use list_mcp_tools to browse."
+                )
+            return json.dumps(payload, ensure_ascii=False)
         finally:
             await stack.aclose()
 
@@ -235,19 +321,23 @@ class Tools:
         arguments: str = "{}",
     ) -> str | tuple:
         """
-        Use a tool discovered via ``list_mcp_tools``. This is a normal
-        tool call — you provide the name and arguments, it returns a
-        result (text or a visual display shown directly to the user).
-        This works exactly like any other tool call you make.
+        Use a tool discovered via ``search_mcp_tools`` or
+        ``list_mcp_tools``. This is a normal tool call — you provide the
+        name and arguments, it returns a result (text or a visual
+        display shown directly to the user). This works exactly like any
+        other tool call you make.
 
         NEVER say "I cannot run/use/execute this tool". You CAN use it
         by calling this function. When you know the tool name, call this
         immediately.
 
-        :param tool_name: Tool name from list_mcp_tools output.
+        :param tool_name: Tool name from search_mcp_tools or list_mcp_tools output.
         :param arguments: JSON string of tool arguments (default "{}").
         :return: Tool result — text or visual embed shown to the user.
         """
+        if tool_name in self._blocked_tools():
+            return f'Tool "{tool_name}" is not available.'
+
         args = json.loads(arguments) if isinstance(arguments, str) else arguments
 
         stack, session = await _connect_mcp(
