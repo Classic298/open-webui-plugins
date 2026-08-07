@@ -3,7 +3,7 @@ title: Inline Visualizer
 author: Classic298
 author_url: https://github.com/Classic298
 funding_url: https://github.com/Classic298
-version: 2.2.0
+version: 2.2.1
 required_open_webui_version: 0.10.2
 description: Renders interactive HTML/SVG visualizations inline in chat. Requires "iframe Sandbox Allow Same Origin" to be enabled in Open WebUI Settings -> Interface. For design instructions, the model should call view_skill("visualize").
 """
@@ -15,7 +15,7 @@ from typing import Literal
 # version can be verified at runtime (search DevTools for
 # `data-iv-build` on <html>).  Bump on every protocol-level change
 # so stale cached iframes can be spotted immediately.
-_IV_BUILD = "2.2.0"
+_IV_BUILD = "2.2.1"
 
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field
@@ -210,23 +210,36 @@ SVG_CLASSES = """
 .leader { stroke: var(--color-text-tertiary); stroke-width: 0.5; stroke-dasharray: 3 2; fill: none; }
 
 /* --- Color ramp selectors (fill/stroke adapt via CSS vars) --- */
+/* color: on the group resolves currentColor marks to the series color.
+   path/polygon get the saturated stroke stop (pale fill stops sit behind
+   label text and are indistinguishable side by side in a pie); classed
+   or explicitly-filled marks keep their own styling. */
 .c-purple>rect,.c-purple>circle,.c-purple>ellipse{fill:var(--ramp-purple-fill);stroke:var(--ramp-purple-stroke);stroke-width:.5}
+g.c-purple{color:var(--ramp-purple-stroke)} .c-purple>path:not([class]):not([fill]),.c-purple>polygon:not([class]):not([fill]){fill:var(--ramp-purple-stroke)}
 .c-purple>.th{fill:var(--ramp-purple-th)!important} .c-purple>.ts{fill:var(--ramp-purple-ts)!important}
 .c-teal>rect,.c-teal>circle,.c-teal>ellipse{fill:var(--ramp-teal-fill);stroke:var(--ramp-teal-stroke);stroke-width:.5}
+g.c-teal{color:var(--ramp-teal-stroke)} .c-teal>path:not([class]):not([fill]),.c-teal>polygon:not([class]):not([fill]){fill:var(--ramp-teal-stroke)}
 .c-teal>.th{fill:var(--ramp-teal-th)!important} .c-teal>.ts{fill:var(--ramp-teal-ts)!important}
 .c-coral>rect,.c-coral>circle,.c-coral>ellipse{fill:var(--ramp-coral-fill);stroke:var(--ramp-coral-stroke);stroke-width:.5}
+g.c-coral{color:var(--ramp-coral-stroke)} .c-coral>path:not([class]):not([fill]),.c-coral>polygon:not([class]):not([fill]){fill:var(--ramp-coral-stroke)}
 .c-coral>.th{fill:var(--ramp-coral-th)!important} .c-coral>.ts{fill:var(--ramp-coral-ts)!important}
 .c-pink>rect,.c-pink>circle,.c-pink>ellipse{fill:var(--ramp-pink-fill);stroke:var(--ramp-pink-stroke);stroke-width:.5}
+g.c-pink{color:var(--ramp-pink-stroke)} .c-pink>path:not([class]):not([fill]),.c-pink>polygon:not([class]):not([fill]){fill:var(--ramp-pink-stroke)}
 .c-pink>.th{fill:var(--ramp-pink-th)!important} .c-pink>.ts{fill:var(--ramp-pink-ts)!important}
 .c-gray>rect,.c-gray>circle,.c-gray>ellipse{fill:var(--ramp-gray-fill);stroke:var(--ramp-gray-stroke);stroke-width:.5}
+g.c-gray{color:var(--ramp-gray-stroke)} .c-gray>path:not([class]):not([fill]),.c-gray>polygon:not([class]):not([fill]){fill:var(--ramp-gray-stroke)}
 .c-gray>.th{fill:var(--ramp-gray-th)!important} .c-gray>.ts{fill:var(--ramp-gray-ts)!important}
 .c-blue>rect,.c-blue>circle,.c-blue>ellipse{fill:var(--ramp-blue-fill);stroke:var(--ramp-blue-stroke);stroke-width:.5}
+g.c-blue{color:var(--ramp-blue-stroke)} .c-blue>path:not([class]):not([fill]),.c-blue>polygon:not([class]):not([fill]){fill:var(--ramp-blue-stroke)}
 .c-blue>.th{fill:var(--ramp-blue-th)!important} .c-blue>.ts{fill:var(--ramp-blue-ts)!important}
 .c-green>rect,.c-green>circle,.c-green>ellipse{fill:var(--ramp-green-fill);stroke:var(--ramp-green-stroke);stroke-width:.5}
+g.c-green{color:var(--ramp-green-stroke)} .c-green>path:not([class]):not([fill]),.c-green>polygon:not([class]):not([fill]){fill:var(--ramp-green-stroke)}
 .c-green>.th{fill:var(--ramp-green-th)!important} .c-green>.ts{fill:var(--ramp-green-ts)!important}
 .c-amber>rect,.c-amber>circle,.c-amber>ellipse{fill:var(--ramp-amber-fill);stroke:var(--ramp-amber-stroke);stroke-width:.5}
+g.c-amber{color:var(--ramp-amber-stroke)} .c-amber>path:not([class]):not([fill]),.c-amber>polygon:not([class]):not([fill]){fill:var(--ramp-amber-stroke)}
 .c-amber>.th{fill:var(--ramp-amber-th)!important} .c-amber>.ts{fill:var(--ramp-amber-ts)!important}
 .c-red>rect,.c-red>circle,.c-red>ellipse{fill:var(--ramp-red-fill);stroke:var(--ramp-red-stroke);stroke-width:.5}
+g.c-red{color:var(--ramp-red-stroke)} .c-red>path:not([class]):not([fill]),.c-red>polygon:not([class]):not([fill]){fill:var(--ramp-red-stroke)}
 .c-red>.th{fill:var(--ramp-red-th)!important} .c-red>.ts{fill:var(--ramp-red-ts)!important}
 """
 
@@ -1310,6 +1323,58 @@ var _ivExportErrStr = {
   hi: 'निर्यात विफल',
   bn: 'এক্সপোর্ট ব্যর্থ হয়েছে',
   sw: 'Imeshindwa kuhamisha'
+};
+
+// Inline script failed to parse and raw-source recovery dead-ended.
+var _ivScriptErrStr = {
+  en: 'Visualization script error',
+  de: 'Fehler im Visualisierungsskript',
+  cs: 'Chyba skriptu vizualizace',
+  hu: 'Vizualizációs szkripthiba',
+  hr: 'Greška skripte vizualizacije',
+  pl: 'Błąd skryptu wizualizacji',
+  fr: 'Erreur de script de visualisation',
+  nl: 'Fout in visualisatiescript',
+  es: 'Error del script de visualización',
+  pt: 'Erro no script de visualização',
+  it: 'Errore nello script di visualizzazione',
+  ca: 'Error de l’script de visualització',
+  gl: 'Erro no script de visualización',
+  eu: 'Bistaratze-scriptaren errorea',
+  da: 'Fejl i visualiseringsscript',
+  sv: 'Fel i visualiseringsskript',
+  no: 'Feil i visualiseringsskript',
+  fi: 'Visualisointiskriptin virhe',
+  is: 'Villa í skriftu sjónrænnar framsetningar',
+  sk: 'Chyba skriptu vizualizácie',
+  sl: 'Napaka skripte vizualizacije',
+  sr: 'Грешка скрипте визуализације',
+  bs: 'Greška skripte vizualizacije',
+  bg: 'Грешка в скрипта на визуализацията',
+  mk: 'Грешка во скриптата на визуализацијата',
+  uk: 'Помилка скрипту візуалізації',
+  ru: 'Ошибка скрипта визуализации',
+  be: 'Памылка скрыпта візуалізацыі',
+  lt: 'Vizualizacijos scenarijaus klaida',
+  lv: 'Vizualizācijas skripta kļūda',
+  et: 'Visualiseeringu skripti viga',
+  ro: 'Eroare de script al vizualizării',
+  el: 'Σφάλμα σεναρίου οπτικοποίησης',
+  sq: 'Gabim në skriptin e vizualizimit',
+  tr: 'Görselleştirme betiği hatası',
+  az: 'Vizuallaşdırma skripti xətası',
+  ar: 'خطأ في نص التصور البرمجي',
+  he: 'שגיאת סקריפט ההדמיה',
+  zh: '可视化脚本错误',
+  ja: 'ビジュアライゼーションスクリプトのエラー',
+  ko: '시각화 스크립트 오류',
+  vi: 'Lỗi tập lệnh trực quan hóa',
+  th: 'ข้อผิดพลาดของสคริปต์การแสดงภาพ',
+  id: 'Kesalahan skrip visualisasi',
+  ms: 'Ralat skrip visualisasi',
+  hi: 'विज़ुअलाइज़ेशन स्क्रिप्ट त्रुटि',
+  bn: 'ভিজ্যুয়ালাইজেশন স্ক্রিপ্ট ত্রুটি',
+  sw: 'Hitilafu ya hati ya taswira'
 };
 
 var _ivErrBodyStr = {
@@ -3115,9 +3180,141 @@ STREAMING_OBSERVER_SCRIPT = """
     }
   }
 
+  // ---- Raw-source recovery (issue #75) --------------------------------
+  // The chat DOM is a lossy source: Open WebUI's citation machinery
+  // swallows bare numeric arrays like [21, 11, 4] (tokenised into a
+  // source chip, or regex-stripped when the model's Citations
+  // capability is off), leaving code the model never wrote (data:,).
+  // When an inline script fails to parse, finalize from the raw message
+  // text via the chats API instead. Retries cover live streams: content
+  // is only persisted once the response completes.
+  var _ivRecovery = 'idle';  // idle | pending | done | failed
+
+  function _ivFetchRawContent(chatId, messageId, onDone) {
+    var token = null;
+    try { token = parent.localStorage.getItem('token'); } catch(e) {}
+    try {
+      // parent.fetch runs under the parent page's CSP, so this works
+      // even when the iframe's own connect-src is locked down.
+      parent.fetch('/api/v1/chats/' + encodeURIComponent(chatId), {
+        headers: token ? { 'Authorization': 'Bearer ' + token } : {}
+      }).then(function(res) {
+        return res.ok ? res.json() : null;
+      }).then(function(data) {
+        var msg = data && data.chat && data.chat.history &&
+                  data.chat.history.messages && data.chat.history.messages[messageId];
+        onDone(msg && typeof msg.content === 'string' ? msg.content : null);
+      }, function() { onDone(null); });
+    } catch(e) { onDone(null); }
+  }
+
+  // This embed's block from raw message text. Fenced code is stripped
+  // first so a fenced example cannot shift the block ordinal. Only a
+  // closed block counts: an open-ended match means the save raced the
+  // stream.
+  function _ivBlockFromRaw(content) {
+    var text = content.replace(/```[\\s\\S]*?```/g, '');
+    var idx = determineIndex();
+    if (idx === null) idx = 0;
+    var match = _ivMatchBlock(_ivStripDetailRanges(text, true), idx);
+    if (match === null) match = _ivMatchBlock(_ivStripDetailRanges(text, false), idx);
+    if (!match || match[0].indexOf(END_MARK) === -1) return null;
+    return match[1];
+  }
+
+  // SyntaxError of the first inline classic script in `html` that fails
+  // to parse, else null. new Function is a parse check only (nothing
+  // runs); no CSP this tool emits blocks eval. Only a SyntaxError
+  // counts: anything else means we could not validate, not that the
+  // code is bad.
+  function _ivScriptParseError(html) {
+    var temp = document.createElement('div');
+    try { temp.innerHTML = html.replace(_ivStripDocTags, ''); } catch(e) { return null; }
+    var scripts = temp.querySelectorAll('script');
+    for (var i = 0; i < scripts.length; i++) {
+      var script = scripts[i];
+      if (script.getAttribute('src')) continue;
+      var scriptType = script.getAttribute('type') || '';
+      if (scriptType && scriptType.indexOf('javascript') === -1) continue;
+      try { new Function(script.textContent || ''); }
+      catch(err) { if (err && err.name === 'SyntaxError') return err; }
+    }
+    return null;
+  }
+
+  function _ivStartRecovery(domText, scriptError) {
+    var chatId = null, messageId = null, attempt = 0;
+    try {
+      var pathMatch = parent.location.pathname.match(/\\/c\\/([^\\/?#]+)/);
+      chatId = pathMatch ? pathMatch[1] : null;
+      var frame = window.frameElement;
+      var embedContainer = frame && frame.closest && frame.closest('[id*="-embeds-"]');
+      var idMatch = embedContainer && embedContainer.id.match(/^(.+)-embeds-\\d+$/);
+      if (idMatch) {
+        messageId = idMatch[1];
+      } else {
+        // The tool-response path mounts the iframe outside an embeds container.
+        var msgEl = frame && frame.closest && frame.closest('[id^="message-"]');
+        if (msgEl) messageId = msgEl.id.slice('message-'.length);
+      }
+    } catch(e) {}
+    // The pending preview was diffed from the corrupt text, and
+    // reconcile never rewrites attributes on existing elements: render
+    // the final text from scratch (safe, no script has run yet).
+    function finalizeFresh(text) {
+      try { renderArea.innerHTML = ''; } catch(e) {}
+      finalize(text);
+    }
+    function fail(rawText, err) {
+      if (finalized) return;
+      _ivRecovery = 'failed';  // finalize toasts the error on live streams
+      try { console.error('iv[script] failed to parse', err || scriptError); } catch(e) {}
+      finalizeFresh(rawText || domText);
+    }
+    function attemptOnce() {
+      if (finalized) return;
+      _ivFetchRawContent(chatId, messageId, function(content) {
+        if (finalized) return;
+        var raw = content && _ivBlockFromRaw(content);
+        if (_ivLooksRenderable(raw)) {
+          var rawScriptError = _ivScriptParseError(raw);
+          if (!rawScriptError) { _ivRecovery = 'done'; finalizeFresh(raw); return; }
+          fail(raw, rawScriptError);  // the model's own JS is bad; still render its authentic text
+          return;
+        }
+        setTimeout(attemptOnce, Math.min(1500 * ++attempt, 8000));
+      });
+    }
+    // Unsaved contexts (temporary chats, shared pages) can never
+    // recover; deferred so finalize is never re-entered synchronously.
+    if (!chatId || !messageId) { setTimeout(function() { fail(); }, 0); return; }
+    // Armed deadline, not a between-attempts check: a fetch that never
+    // settles must not strand the loader. Trailing prose can delay the
+    // save, hence the generous window.
+    setTimeout(function() { fail(); }, 90000);
+    attemptOnce();
+  }
+
   function finalize(fullText) {
     if (finalized) return;
     if (!_ivLooksRenderable(fullText)) return;  // never latch on a non-HTML decoy
+    if (_ivRecovery === 'pending') return;
+    // Recovery needs a closed block: a truncated stream (user stop, dead
+    // connection) has no END marker in the saved text either, so retrying
+    // could never succeed and would only delay this finalize.
+    if (_ivRecovery === 'idle' && isBlockClosed()) {
+      var scriptError = _ivScriptParseError(fullText);
+      if (scriptError) {
+        // Corrupt reconstruction (or bad model JS): keep the script-less
+        // preview up and try the raw text before executing anything.
+        _ivRecovery = 'pending';
+        renderSafeInto(fullText, false);
+        markAndAnimate(renderArea);
+        scheduleHeight();
+        _ivStartRecovery(fullText, scriptError);
+        return;
+      }
+    }
     finalized = true;
     // withScripts=true so the reconciler materializes script tags.
     renderSafeInto(fullText, true);
@@ -3143,14 +3340,14 @@ STREAMING_OBSERVER_SCRIPT = """
     scheduleHeight();
     setTimeout(scheduleHeight, 120);
     setTimeout(scheduleHeight, 400);
-    // Done announcement — only on live streams, not on rehydration.
+    // Done/failed announcement — only on live streams, not on rehydration.
     if (wasStreaming) {
+      var failed = _ivRecovery === 'failed';
       try {
-        var label = (typeof _ivDoneStr !== 'undefined' &&
-                     (_ivDoneStr[_ivLang] || _ivDoneStr.en)) || 'Visualization ready';
-        if (typeof toast === 'function') toast(label, 'success');
+        var table = failed ? _ivScriptErrStr : _ivDoneStr;
+        if (typeof toast === 'function') toast(table[_ivLang] || table.en, failed ? 'error' : 'success');
       } catch(e) {}
-      try { if (typeof playDoneSound === 'function') playDoneSound(); } catch(e) {}
+      try { if (!failed && typeof playDoneSound === 'function') playDoneSound(); } catch(e) {}
     }
   }
 
@@ -3642,7 +3839,7 @@ def _build_html(
 #              requests. Use only for visualizations that fetch live API
 #              data (CORS restrictions still apply).
 #
-#   OFFLINE  — Zero outgoing connections of any kind. Same as STRICT but
+#   OFFLINE  — Nothing leaves the Open WebUI host. Same as STRICT but
 #              the public CDN hosts are dropped from script-src and
 #              'self' is allowed instead, so chart libraries must be
 #              served by the Open WebUI instance itself (drop the pinned
