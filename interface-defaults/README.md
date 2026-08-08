@@ -4,9 +4,6 @@
 
 Set the **Settings → Interface** defaults for your entire instance from one function's Valves. Only the settings you switch to **Custom** are managed, so you can enforce one option without touching anything else your users have configured. New users are seeded automatically, and two one-shot buttons let you apply your settings to everyone or factory-reset the whole instance.
 
-> [!IMPORTANT]
-> **Requires Open WebUI `0.10.2` or newer.** This is an `Event` function and depends on the native events system (`user.created` / `function.valves_updated`). It will not load on older versions.
-
 > [!TIP]
 > **🚀 [Jump to Setup](#setup)** — paste, enable, configure. Under a minute, no restart.
 
