@@ -4,9 +4,6 @@
 
 Automatic, **throttled** database and storage cleanup for your entire instance, driven by one Event function. Old chats, inactive users, orphaned records, orphaned uploads and orphaned vector collections are cleaned up in the background, slowly on purpose, so a live instance never notices. A built-in admin page (default `/prune`) lets you preview and run cleanups manually.
 
-> [!IMPORTANT]
-> **Requires Open WebUI `0.10.2` or newer.** This is an `Event` function and depends on the native events system (`system.startup.completed`, `chat.created`, `user.deleted`, …). It will not load on older versions.
-
 > [!TIP]
 > **🚀 [Jump to Setup](#setup)** — paste, enable, configure Valves. Deletion stays off until you flip the master switch, and the **Preview** button in the manual UI shows you exactly what any configuration would delete before you commit to anything.
 
