@@ -3,7 +3,7 @@ title: Inline Visualizer
 author: Classic298
 author_url: https://github.com/Classic298
 funding_url: https://github.com/Classic298
-version: 2.2.1
+version: 2.2.2
 required_open_webui_version: 0.10.2
 description: Renders interactive HTML/SVG visualizations inline in chat. Requires "iframe Sandbox Allow Same Origin" to be enabled in Open WebUI Settings -> Interface. For design instructions, the model should call view_skill("visualize").
 """
@@ -15,7 +15,7 @@ from typing import Literal
 # version can be verified at runtime (search DevTools for
 # `data-iv-build` on <html>).  Bump on every protocol-level change
 # so stale cached iframes can be spotted immediately.
-_IV_BUILD = "2.2.1"
+_IV_BUILD = "2.2.2"
 
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field
@@ -2189,8 +2189,9 @@ STREAMING_OBSERVER_SCRIPT = """
     return;
   }
 
-  // Claim: each tool call renders an embed at "{messageId}-embeds-{N}".
-  // The N-th embed owns the N-th @@@VIZ-START/END pair in the message.
+  // Message-level '-embeds-N' mounts carry the authoritative index;
+  // grouped and tool-call mounts map to the N-th pair by DOM position
+  // among the message's embed mounts (see determineIndex).
 
   var myMessage = null;
   var myIndex = null;        // this wrapper's position among embed siblings
@@ -2198,6 +2199,7 @@ STREAMING_OBSERVER_SCRIPT = """
   var lastSafeRendered = '';
   var finalizeTimer = null;
   var finalized = false;
+  var finalizedText = null;
 
   function findMyMessage() {
     if (myMessage && parent.document.contains(myMessage)) return myMessage;
@@ -2221,17 +2223,22 @@ STREAMING_OBSERVER_SCRIPT = """
     try {
       var frame = window.frameElement;
       if (!frame) return null;
+      // Message-level mounts ('-embeds-N') carry the authoritative index.
       var embedContainer = frame.closest && frame.closest('[id*="-embeds-"]');
       if (embedContainer) {
         var match = embedContainer.id.match(/-embeds-(\\d+)$/);
         if (match) { myIndex = parseInt(match[1], 10); return myIndex; }
       }
-      // Fallback: count preceding sibling iframes within the same message.
+      // Grouped ('-embed-N') and tool-call ('-tool-call-embed-N') mounts
+      // restart their index per container, and counting raw iframes picks
+      // up unrelated ones (YouTube previews). Resolve by DOM position
+      // among the message's embed mounts instead.
       var msg = findMyMessage();
       if (msg) {
-        var iframes = msg.querySelectorAll('iframe');
-        for (var i = 0, count = 0; i < iframes.length; i++) {
-          if (iframes[i] === frame) { myIndex = count; return myIndex; }
+        var mounts = msg.querySelectorAll('[id*="-embeds-"], [id*="-embed-"]');
+        for (var i = 0, count = 0; i < mounts.length; i++) {
+          if (!/-embeds?-\\d+$/.test(mounts[i].id)) continue;
+          if (mounts[i].contains(frame)) { myIndex = count; return myIndex; }
           count++;
         }
       }
@@ -2280,14 +2287,26 @@ STREAMING_OBSERVER_SCRIPT = """
                     return NodeFilter.FILTER_REJECT;
                   }
                 }
+                // '-detail-' covers both detail-id families: the grouped
+                // '-detail-group' markdown path and the output-items path
+                // ('{chatId}-{messageId}-detail-N-tool-call').
                 var ancestorId = ancestor.id || '';
-                if (ancestorId && ancestorId.indexOf('-detail-group') !== -1) {
+                if (ancestorId && ancestorId.indexOf('-detail-') !== -1) {
                   if (ancestorId.indexOf('tool') !== -1 || ancestorId.indexOf('code') !== -1) {
                     return NodeFilter.FILTER_REJECT;
                   }
                   if (skipReasoning) {
                     return NodeFilter.FILTER_REJECT;
                   }
+                }
+                // The content-markdown path renders ungrouped detail blocks
+                // without '-detail-' ids: tool calls as '-N-tc' ToolCallDisplay
+                // roots (never scanned); detail bodies get an id-less
+                // wrapper, but their textual children derive ids carrying
+                // a '-N-d-' segment (reasoning drafts; skipped strict).
+                if (ancestorId) {
+                  if (/-\\d+-tc$/.test(ancestorId)) return NodeFilter.FILTER_REJECT;
+                  if (skipReasoning && /-\\d+-d(-|$)/.test(ancestorId)) return NodeFilter.FILTER_REJECT;
                 }
               }
               ancestor = ancestor.parentNode;
@@ -2366,23 +2385,6 @@ STREAMING_OBSERVER_SCRIPT = """
     try { el.style.setProperty('display', 'none', 'important'); } catch(e) {}
   }
 
-  function wrapAndHideText(textNode) {
-    var parentEl = textNode.parentNode;
-    if (!parentEl) return;
-    if (parentEl.nodeType === 1 &&
-        parentEl.getAttribute &&
-        parentEl.getAttribute('data-iv-chat-wrap') === '1') return;
-    try {
-      var ownerDoc = parentEl.ownerDocument || document;
-      var wrapper = ownerDoc.createElement('span');
-      wrapper.setAttribute('data-iv-chat-wrap', '1');
-      wrapper.setAttribute('data-iv-chat-hidden', '1');
-      wrapper.style.setProperty('display', 'none', 'important');
-      parentEl.insertBefore(wrapper, textNode);
-      wrapper.appendChild(textNode);
-    } catch(e) {}
-  }
-
   // Nearest ancestor that's a block-ish container — we prefer hiding
   // block elements over inline ones so we don't leave empty block
   // boxes visible. Stops at `stopAt` (the message root) — never hides
@@ -2406,6 +2408,18 @@ STREAMING_OBSERVER_SCRIPT = """
   function partialStartSuffixLength(text) {
     for (var k = Math.min(text.length, START_MARK.length); k >= 3; k--) {
       if (START_MARK.substr(0, k) === text.substr(text.length - k)) return k;
+    }
+    return 0;
+  }
+
+  // Length of the longest suffix of `text` that is a prefix of END_MARK
+  // still streaming in, or 0. START fragments never trail a block body,
+  // so only END prefixes matter. Unlike the hide-side helper this has
+  // no minimum length: the paint strip is transient and self-corrects
+  // next frame, so even a lone trailing '@' is safe to withhold.
+  function partialEndSuffixLength(text) {
+    for (var k = Math.min(text.length, END_MARK.length); k >= 1; k--) {
+      if (END_MARK.substr(0, k) === text.substr(text.length - k)) return k;
     }
     return 0;
   }
@@ -2445,16 +2459,17 @@ STREAMING_OBSERVER_SCRIPT = """
     return { inside: inside, kept: kept };
   }
 
-  // allowWrap=false during streaming (wrapping a text node breaks
-  // Svelte's tracked refs and stalls post-VIZ chunks), true on finalize.
-  function hideMarkerRange(allowWrap) {
+  // Hidden text is always blanked in place, never wrapped in a hidden
+  // span: wrapping a text node breaks Svelte's tracked refs and stalls
+  // post-VIZ chunks.
+  function hideMarkerRange() {
     var msg = findMyMessage();
     if (!msg) return;
     var myFrame = window.frameElement;
 
     // Never hide our own iframe's container.
     var myEmbedContainer = null;
-    try { myEmbedContainer = myFrame && myFrame.closest('[id*="-embeds-"]'); }
+    try { myEmbedContainer = myFrame && myFrame.closest('[id*="-embeds-"], [id*="-embed-"]'); }
     catch(e) {}
     var embedsRoot = null;
     try { embedsRoot = myFrame && myFrame.closest('[id$="-embeds-container"]'); }
@@ -2488,10 +2503,16 @@ STREAMING_OBSERVER_SCRIPT = """
                     return NodeFilter.FILTER_REJECT;
                   }
                 }
+                // '-detail-' + tool/code covers both detail-id families
+                // (grouped markdown path and output-items path).
                 var ancestorId = ancestor.id || '';
-                if (ancestorId && ancestorId.indexOf('-detail-group') !== -1 &&
+                if (ancestorId && ancestorId.indexOf('-detail-') !== -1 &&
                     (ancestorId.indexOf('tool') !== -1 ||
                      ancestorId.indexOf('code') !== -1)) {
+                  return NodeFilter.FILTER_REJECT;
+                }
+                // Content-path tool-call roots ('-N-tc') carry no 'tool' substring.
+                if (ancestorId && /-\\d+-tc$/.test(ancestorId)) {
                   return NodeFilter.FILTER_REJECT;
                 }
               }
@@ -2552,6 +2573,22 @@ STREAMING_OBSERVER_SCRIPT = """
       walked.push(textNode);
     }
 
+    // Last node with visible content. Open WebUI's fade streaming
+    // renders every word as `{word}{' '}`, appending a whitespace-only
+    // spacer node after each word, so the "still arriving" marker
+    // fragment is never the literal last node; skip trailing
+    // whitespace-only nodes or the growing '@@@VIZ' fragment stays
+    // visible on every marker arrival (#80).
+    var lastContentIdx = -1;
+    for (var lc = walked.length - 1; lc >= 0; lc--) {
+      if (getEffectiveText(walked[lc]).trim() !== '') { lastContentIdx = lc; break; }
+    }
+    // Fade-in token spans exist only while the message still streams;
+    // a finalize latched early (wrong or not) must not disable the
+    // speculative tail hide while new markers keep arriving.
+    var stillStreaming = false;
+    try { stillStreaming = !!msg.querySelector('.fade-in-token'); } catch(e) {}
+
     for (var w = 0; w < walked.length; w++) {
       var node = walked[w];
       // getEffectiveText surfaces the original (pre-blank/pre-trim)
@@ -2568,15 +2605,19 @@ STREAMING_OBSERVER_SCRIPT = """
         continue;
       }
 
-      // Speculative partial marker tail: only the LAST streamed text
-      // node can be a marker still arriving char-by-char, and once
-      // this embed finalized nothing is left to stream. Without these
-      // gates, settled prose that legitimately ends in '@@@' would be
-      // re-hidden on every tick, unrecoverably.
-      if (!finalized && !inside && w === walked.length - 1) {
-        var partialLen = partialStartSuffixLength(text);
+      // Speculative partial marker tail: only the last streamed
+      // content node can be a marker still arriving char-by-char.
+      // Once neither the stream nor this embed is live, the gate
+      // closes: settled prose that legitimately ends in '@@@' must
+      // not be re-hidden on every tick, unrecoverably.
+      if ((!finalized || stillStreaming) && !inside && w === lastContentIdx) {
+        // Right-trim first: fade spans can merge the injected spacer
+        // into the same text node ('@@@VIZ-STAR '), which would defeat
+        // the suffix check.
+        var tailText = text.replace(/\\s+$/, '');
+        var partialLen = partialStartSuffixLength(tailText);
         if (partialLen > 0) {
-          var keptHead = text.slice(0, text.length - partialLen);
+          var keptHead = tailText.slice(0, tailText.length - partialLen);
           if (keptHead.trim() === '') markNode(node);
           else trimNodeTo(node, keptHead);
           continue;
@@ -2703,7 +2744,6 @@ STREAMING_OBSERVER_SCRIPT = """
     for (var p = 0; p < previouslyHidden.length; p++) {
       var hiddenEl = previouslyHidden[p];
       if (isNotedHidden(hiddenEl)) continue;
-      if (hiddenEl.getAttribute('data-iv-chat-wrap') === '1') continue;
       try {
         hiddenEl.style.removeProperty('display');
         hiddenEl.removeAttribute('data-iv-chat-hidden');
@@ -2711,13 +2751,7 @@ STREAMING_OBSERVER_SCRIPT = """
     }
 
     for (var h = 0; h < toHideEls.length; h++) hideEl(toHideEls[h]);
-    if (allowWrap) {
-      // Finalize: wrap for tighter visual collapse (safe — Svelte
-      // has stopped streaming chunks).
-      for (var j = 0; j < toBlankText.length; j++) wrapAndHideText(toBlankText[j]);
-    } else {
-      for (var k = 0; k < toBlankText.length; k++) blankPreserving(toBlankText[k]);
-    }
+    for (var k = 0; k < toBlankText.length; k++) blankPreserving(toBlankText[k]);
     for (var t = 0; t < partialTrims.length; t++) {
       trimPreserving(partialTrims[t].node, partialTrims[t].kept);
     }
@@ -3242,8 +3276,8 @@ STREAMING_OBSERVER_SCRIPT = """
     return null;
   }
 
-  function _ivStartRecovery(domText, scriptError) {
-    var chatId = null, messageId = null, attempt = 0;
+  function _ivChatContext() {
+    var chatId = null, messageId = null;
     try {
       var pathMatch = parent.location.pathname.match(/\\/c\\/([^\\/?#]+)/);
       chatId = pathMatch ? pathMatch[1] : null;
@@ -3258,6 +3292,12 @@ STREAMING_OBSERVER_SCRIPT = """
         if (msgEl) messageId = msgEl.id.slice('message-'.length);
       }
     } catch(e) {}
+    return { chatId: chatId, messageId: messageId };
+  }
+
+  function _ivStartRecovery(domText, scriptError) {
+    var ctx = _ivChatContext();
+    var chatId = ctx.chatId, messageId = ctx.messageId, attempt = 0;
     // The pending preview was diffed from the corrupt text, and
     // reconcile never rewrites attributes on existing elements: render
     // the final text from scratch (safe, no script has run yet).
@@ -3316,6 +3356,7 @@ STREAMING_OBSERVER_SCRIPT = """
       }
     }
     finalized = true;
+    finalizedText = fullText;
     // withScripts=true so the reconciler materializes script tags.
     renderSafeInto(fullText, true);
     // Multi-shot self-heal — Svelte may flush chunks several seconds
@@ -3326,10 +3367,10 @@ STREAMING_OBSERVER_SCRIPT = """
     // stripper deletes marker text from visible nodes, and if it ran
     // first on a freshly restored flush the hide pass would no longer
     // find the markers and the raw source would stay visible.
-    try { hideMarkerRange(false); } catch(e) {}
+    try { hideMarkerRange(); } catch(e) {}
     try { stripFinalizeArtifacts(); } catch(e) {}
     var stripInterval = setInterval(function() {
-      try { hideMarkerRange(false); } catch(e) {}
+      try { hideMarkerRange(); } catch(e) {}
       try { stripFinalizeArtifacts(); } catch(e) {}
       _ivHealDirty = false;
     }, 1000);
@@ -3358,6 +3399,93 @@ STREAMING_OBSERVER_SCRIPT = """
     return !!match && match[0].indexOf(END_MARK) !== -1;
   }
 
+  // A finalize latched mid-stream can be wrong (a decoy block in
+  // chain-of-thought, extraction blinded by a transient DOM shape),
+  // and on the output-items rendering path reasoning carries no
+  // filterable anchor, so the settled DOM extraction can stay wrong
+  // too. The latch is therefore verified ONCE against the saved raw
+  // message text (where _ivBlockFromRaw strips the detail ranges) as
+  // soon as the save lands, and re-verified whenever the settled DOM
+  // extraction later changes shape. Whitespace-insensitive compares
+  // keep fade-spacer diffs from re-adopting cosmetically equal text.
+  var _ivRawVerified = false;
+  var _ivRefinalize = null;  // null | 'checking' | last settle shape checked
+  function _ivShape(text) { return text.replace(/\\s+/g, ''); }
+  function refinalizeIfSettledDiffers() {
+    if (!finalized || _ivRecovery !== 'idle') return;
+    if (_ivRefinalize === 'checking') return;
+    var settled = readSource();
+    var shape = settled === null ? '' : _ivShape(settled);
+    if (_ivRawVerified &&
+        (settled === null || shape === _ivShape(finalizedText) || shape === _ivRefinalize)) {
+      return;
+    }
+    var ctx = _ivChatContext();
+    if (!ctx.chatId || !ctx.messageId) { _ivRawVerified = true; _ivRefinalize = shape; return; }
+    _ivRefinalize = 'checking';
+    var attempt = 0;
+    var dead = false;
+    // Armed deadline, not a between-attempts check: a fetch that never
+    // settles must not strand the 'checking' state. Expiry means the
+    // save was not fetchable yet, not that the latch was verified, so
+    // both flags stay unset and the next heal retries from scratch.
+    var deadlineTimer = setTimeout(function() {
+      dead = true;
+      if (_ivRefinalize === 'checking') _ivRefinalize = null;
+    }, 90000);
+    function finish(verified) {
+      clearTimeout(deadlineTimer);
+      _ivRefinalize = shape;
+      if (verified) _ivRawVerified = true;
+    }
+    function adopt(raw) {
+      // In-place adoption is only realm-safe while no script has run:
+      // re-evaluating a top-level const/let throws, and the code-keyed
+      // script dedupe would skip a byte-identical script after the
+      // canvas it drew was wiped. If the latched render executed
+      // scripts, reboot the iframe once instead: the fresh observer
+      // finalizes against the settled DOM in a clean realm.
+      // Split literal: the srcdoc guard forbids '<scr'+'ipt' in this string.
+      if (finalizedText.toLowerCase().indexOf('<scr' + 'ipt') !== -1) {
+        var frame = null;
+        try { frame = window.frameElement; } catch(e) {}
+        if (frame && frame.getAttribute('data-iv-refinalized') !== '1') {
+          try {
+            frame.setAttribute('data-iv-refinalized', '1');
+            location.reload();
+            return;
+          } catch(e) {}
+        }
+        return;  // one reboot max; keep the current render
+      }
+      finalizedText = raw;
+      // Reconcile never rewrites attributes on existing elements:
+      // render the corrected text from scratch.
+      try { renderArea.innerHTML = ''; } catch(e) {}
+      renderSafeInto(raw, true);
+      markAndAnimate(renderArea);
+      scheduleHeight();
+    }
+    function check() {
+      if (dead) return;
+      _ivFetchRawContent(ctx.chatId, ctx.messageId, function(content) {
+        if (dead) return;
+        if (!finalized || _ivRecovery !== 'idle') { finish(false); return; }
+        var raw = content ? _ivBlockFromRaw(content) : null;
+        if (raw === null) {
+          // The save lags the settle while trailing prose streams.
+          setTimeout(check, Math.min(1500 * ++attempt, 8000));
+          return;
+        }
+        if (_ivShape(raw) === _ivShape(finalizedText)) { finish(true); return; }
+        if (!_ivLooksRenderable(raw) || _ivScriptParseError(raw)) { finish(true); return; }
+        finish(true);
+        adopt(raw);
+      });
+    }
+    check();
+  }
+
   // Tick skips its whole pipeline when the searchable text is
   // unchanged. A childList mutation sets forceHide=true so Svelte
   // rebuilds that preserve the text string still get re-hidden.
@@ -3381,8 +3509,9 @@ STREAMING_OBSERVER_SCRIPT = """
       // text walk on idle polls), and hide BEFORE stripping so the
       // stripper never erases markers the hide pass still needs.
       if (_ivHealDirty) {
-        try { hideMarkerRange(false); } catch(e) {}
+        try { hideMarkerRange(); } catch(e) {}
         try { stripFinalizeArtifacts(); } catch(e) {}
+        try { refinalizeIfSettledDiffers(); } catch(e) {}
         _ivHealDirty = false;
       }
       return;
@@ -3402,9 +3531,7 @@ STREAMING_OBSERVER_SCRIPT = """
       wasStreaming = true;
     }
 
-    // allowWrap=false: streaming-safe (no text-node wrapping — would
-    // break Svelte's diff and stall post-VIZ chunks).
-    if (textChanged || forceHide) hideMarkerRange(false);
+    if (textChanged || forceHide || stashDiverged()) hideMarkerRange();
 
     // Source-dependent work only runs on actual changes.
     if (!textChanged) return;
@@ -3420,6 +3547,16 @@ STREAMING_OBSERVER_SCRIPT = """
     var cut = findSafeCut(raw);
     var safe = raw.substring(0, cut);
 
+    // Never paint a trailing partial END marker ('@@@VIZ-' while END
+    // streams in): reconcile deliberately never trims surplus tail
+    // nodes (script-added charts live there), so painted marker text
+    // would survive finalize until reload (#80).
+    var tail = safe.replace(/\\s+$/, '');
+    var partialEnd = partialEndSuffixLength(tail);
+    if (partialEnd > 0) {
+      safe = tail.slice(0, tail.length - partialEnd).replace(/\\s+$/, '');
+    }
+
     if (safe !== lastSafeRendered && safe.length > 0) {
       lastSafeRendered = safe;
       renderSafeInto(safe, false);
@@ -3428,6 +3565,29 @@ STREAMING_OBSERVER_SCRIPT = """
     }
 
     scheduleFinalize(raw);
+  }
+
+  // getEffectiveText makes a Svelte restore of a blanked node invisible
+  // to the textChanged gate (effective text is the stashed original both
+  // before and after the restore), so detect restores directly: any
+  // registered node whose value no longer matches what we last wrote.
+  function stashDiverged() {
+    if (!_ivBlankedNodes || !_ivOriginalText) return false;
+    var msg = null;
+    try { msg = findMyMessage(); } catch(e) {}
+    if (!msg) return false;
+    for (var i = 0; i < _ivBlankedNodes.length; i++) {
+      var node = _ivBlankedNodes[i];
+      var inMyMsg = false;
+      try { inMyMsg = node && msg.contains(node); } catch(e) {}
+      if (!inMyMsg) continue;
+      var entry = null;
+      try { entry = _ivOriginalText.get(node); } catch(e) {}
+      if (entry == null) continue;
+      var written = (typeof entry === 'object') ? (entry.written || '') : '';
+      if ((node.nodeValue || '') !== written) return true;
+    }
+    return false;
   }
 
   // Forces hideMarkerRange to re-run even when textContent is unchanged
