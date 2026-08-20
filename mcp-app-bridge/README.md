@@ -4,6 +4,9 @@
 
 Renders [MCP Apps](https://github.com/modelcontextprotocol/ext-apps) (SEP-1865) as Rich UI embeds in Open WebUI — using the existing embed system, no middleware changes needed.
 
+> [!IMPORTANT]
+> **This is for MCP _Apps_ — MCP tools that ship their own UI (a `ui://` resource).** If your MCP server just exposes plain tools with no interface, you do not need this bridge: connect the server through Open WebUI's built-in MCP support instead. You _can_ point this tool at a plain MCP server, but that is not what it was built for.
+
 > [!TIP]
 > **🚀 [Jump to Setup Guide](#setup)** — get up and running in under 1 minute.
 
