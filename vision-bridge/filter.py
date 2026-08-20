@@ -3,7 +3,7 @@ title: Vision Bridge
 author: Classic298
 author_url: https://github.com/Classic298
 funding_url: https://github.com/Classic298
-version: 1.0.1
+version: 1.0.2
 description: Let a text-only model handle images without core changes: strips each image in the request to a file-id marker (pair with the analyze_image tool), or in describe mode swaps it for a text description.
 """
 
@@ -92,10 +92,6 @@ class Filter:
         label: str = Field(default="Image description", description="Heading for the description (describe mode).")
         purge_from_history: bool = Field(default=True, description="Describe mode: replace the saved image with its description.")
         delete_file_record: bool = Field(default=True, description="Describe mode: delete the image file after analysis.")
-        skip_if_vision_capable: bool = Field(
-            default=False,
-            description="If the target model is already vision-capable, do nothing (for global use).",
-        )
         max_images: int = Field(default=4, description="Max images per message (describe mode).")
 
     def __init__(self):
@@ -106,15 +102,9 @@ class Filter:
         body: dict,
         __request__: Any = None,
         __user__: Optional[dict] = None,
-        __model__: Optional[dict] = None,
         __chat_id__: Optional[str] = None,
         __event_emitter__: Optional[Callable[[dict], Any]] = None,
     ) -> dict:
-        if self.valves.skip_if_vision_capable and __model__:
-            caps = (__model__.get("info", {}).get("meta", {}) or {}).get("capabilities") or {}
-            if caps.get("vision"):
-                return body
-
         messages = body.get("messages") or []
 
         # Describe mode covers the newest image message; the strip below catches every other image.

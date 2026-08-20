@@ -3,7 +3,7 @@ title: Vision Bridge
 author: Classic298
 author_url: https://github.com/Classic298
 funding_url: https://github.com/Classic298
-version: 1.0.1
+version: 1.0.2
 description: Let a text-only model inspect images on demand via analyze_image(file_id, query), sending them to a configured vision model; pair with the Vision Bridge filter so the image never reaches the text-only model.
 """
 
