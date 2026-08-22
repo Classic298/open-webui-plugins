@@ -19,7 +19,7 @@ from open_webui.models.files import Files
 from open_webui.models.chats import Chats
 from open_webui.storage.provider import Storage
 from open_webui.socket.main import get_event_emitter
-from open_webui.utils.misc import get_message_list
+from open_webui.utils.misc import get_message_list, add_or_update_system_message
 from open_webui.utils.chat_id import is_saved_chat_id
 from open_webui.utils.chat import generate_chat_completion
 from open_webui.utils.files import get_image_base64_from_file_id
@@ -106,6 +106,70 @@ class Filter:
         __event_emitter__: Optional[Callable[[dict], Any]] = None,
     ) -> dict:
         messages = body.get("messages") or []
+        vision_bridge_note = """
+[VISION BRIDGE TOOL POLICY]
+You are a text-only primary model with access to a separate vision model through Vision Bridge.
+Use the correct vision workflow depending on where the image is located.
+1. IMAGES ATTACHED TO THE CONVERSATION
+If an image is attached to the conversation or represented by a marker such as:
+[Image attached — file_id: ...]
+or:
+[Image attached. Call analyze_image(...) ...]
+use `analyze_image`.
+If a file_id is available, pass that exact file_id to `analyze_image`.
+Do not attempt to inspect such images yourself.
+2. IMAGES STORED IN THE OPEN TERMINAL
+If an image exists as a file inside the currently connected Open Terminal, use:
+`analyze_terminal_image(path="...", query="...")`
+to inspect it.
+Examples include PNG, JPG, JPEG and WebP files created by Python, Pillow, ImageMagick, ffmpeg, rendering scripts, or other terminal commands.
+IMPORTANT:
+Do NOT call `read_file` before `analyze_terminal_image`.
+Do NOT use `read_file` for visual inspection of terminal image files.
+`analyze_terminal_image` reads the image from the terminal internally and sends it directly to the separate vision model.
+Use `read_file` normally for text files, source code, JSON, logs, configuration files, and other non-image content.
+3. VISUAL VERIFICATION
+When a task requires understanding, describing, evaluating, comparing, or verifying the actual appearance of an image, you MUST use the appropriate vision tool before completing the task.
+Do not infer what an image looks like solely from:
+- the code that generated it,
+- the prompt used to create it,
+- file metadata,
+- filenames,
+- image dimensions,
+- or successful command execution.
+A message such as:
+"Image file read successfully"
+is NOT visual analysis.
+4. GENERATED IMAGES
+When you generate or modify an image in the terminal and visual verification is relevant:
+1. Create or modify the image.
+2. Call `analyze_terminal_image` on the resulting image file.
+3. Evaluate the vision model's response.
+4. If necessary, modify the image again.
+5. Re-analyze the new result.
+6. Continue until the requested visual result is achieved or further iteration is unnecessary.
+Do not stop after merely generating the file if the task requires checking its appearance.
+5. ANIMATIONS AND GIFS
+If reliable visual inspection of an animation or GIF is required and direct inspection is unsuitable, use the terminal to extract one or more representative frames as PNG files and inspect those frames using `analyze_terminal_image`.
+Use the vision model's actual observations as visual evidence.
+""".strip()
+
+        system_content = next(
+            (
+                str(msg.get("content", ""))
+                for msg in messages
+                if msg.get("role") == "system"
+            ),
+            "",
+        )
+
+        if "[VISION BRIDGE TOOL POLICY]" not in system_content:
+            messages = add_or_update_system_message(
+                vision_bridge_note,
+                messages,
+                append=True,
+            )
+            body["messages"] = messages        
 
         # Describe mode covers the newest image message; the strip below catches every other image.
         if not self.valves.strip_only and self.valves.vision_model_id and (__user__ or {}).get("id"):
@@ -120,7 +184,47 @@ class Filter:
 
         for msg in messages:
             if _has_image(msg.get("content")):
-                msg["content"] = _strip_images(msg["content"], self.valves.strip_only)
+                if self.valves.strip_only and user and msg.get("role") == "user":
+                    content = msg.get("content") or []
+
+                    text = " ".join(
+                        part.get("text", "")
+                        for part in content
+                        if isinstance(part, dict) and part.get("type") == "text"
+                    )
+
+                    if "images from the tool results above" in text:
+                        for part in content:
+                            if (
+                                not isinstance(part, dict)
+                                or part.get("type") != "image_url"
+                            ):
+                                continue
+
+                            url = (part.get("image_url") or {}).get("url", "")
+
+                            if url.startswith("data:image/"):
+                                try:
+                                    stored_url = await get_image_url_from_base64(
+                                        __request__,
+                                        url,
+                                        {},
+                                        user,
+                                    )
+
+                                    if stored_url:
+                                        part["image_url"]["url"] = stored_url
+
+                                except Exception:
+                                    log.exception(
+                                        "Vision Bridge: failed to persist tool-result image"
+                                    )
+
+                msg["content"] = _strip_images(
+                    msg["content"],
+                    self.valves.strip_only,
+                )
+
         return body
 
     async def _describe(self, target, user, request, chat_id, event_emitter):
