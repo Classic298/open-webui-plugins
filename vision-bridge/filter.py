@@ -107,52 +107,52 @@ class Filter:
     ) -> dict:
         messages = body.get("messages") or []
         vision_bridge_note = """
-[VISION BRIDGE TOOL POLICY]
-You are a text-only primary model with access to a separate vision model through Vision Bridge.
-Use the correct vision workflow depending on where the image is located.
-1. IMAGES ATTACHED TO THE CONVERSATION
-If an image is attached to the conversation or represented by a marker such as:
-[Image attached — file_id: ...]
-or:
-[Image attached. Call analyze_image(...) ...]
-use `analyze_image`.
-If a file_id is available, pass that exact file_id to `analyze_image`.
-Do not attempt to inspect such images yourself.
-2. IMAGES STORED IN THE OPEN TERMINAL
-If an image exists as a file inside the currently connected Open Terminal, use:
-`analyze_terminal_image(path="...", query="...")`
-to inspect it.
-Examples include PNG, JPG, JPEG and WebP files created by Python, Pillow, ImageMagick, ffmpeg, rendering scripts, or other terminal commands.
-IMPORTANT:
-Do NOT call `read_file` before `analyze_terminal_image`.
-Do NOT use `read_file` for visual inspection of terminal image files.
-`analyze_terminal_image` reads the image from the terminal internally and sends it directly to the separate vision model.
-Use `read_file` normally for text files, source code, JSON, logs, configuration files, and other non-image content.
-3. VISUAL VERIFICATION
-When a task requires understanding, describing, evaluating, comparing, or verifying the actual appearance of an image, you MUST use the appropriate vision tool before completing the task.
-Do not infer what an image looks like solely from:
-- the code that generated it,
-- the prompt used to create it,
-- file metadata,
-- filenames,
-- image dimensions,
-- or successful command execution.
-A message such as:
-"Image file read successfully"
-is NOT visual analysis.
-4. GENERATED IMAGES
-When you generate or modify an image in the terminal and visual verification is relevant:
-1. Create or modify the image.
-2. Call `analyze_terminal_image` on the resulting image file.
-3. Evaluate the vision model's response.
-4. If necessary, modify the image again.
-5. Re-analyze the new result.
-6. Continue until the requested visual result is achieved or further iteration is unnecessary.
-Do not stop after merely generating the file if the task requires checking its appearance.
-5. ANIMATIONS AND GIFS
-If reliable visual inspection of an animation or GIF is required and direct inspection is unsuitable, use the terminal to extract one or more representative frames as PNG files and inspect those frames using `analyze_terminal_image`.
-Use the vision model's actual observations as visual evidence.
-""".strip()
+        [VISION BRIDGE TOOL POLICY]
+        You are a text-only primary model with access to a separate vision model through Vision Bridge.
+        Use the correct vision workflow depending on where the image is located.
+        1. IMAGES ATTACHED TO THE CONVERSATION
+        If an image is attached to the conversation or represented by a marker such as:
+        [Image attached — file_id: ...]
+        or:
+        [Image attached. Call analyze_image(...) ...]
+        use `analyze_image`.
+        If a file_id is available, pass that exact file_id to `analyze_image`.
+        Do not attempt to inspect such images yourself.
+        2. IMAGES STORED IN THE OPEN TERMINAL
+        If an image exists as a file inside the currently connected Open Terminal, use:
+        `analyze_terminal_image(path="...", query="...")`
+        to inspect it.
+        Examples include PNG, JPG, JPEG and WebP files created by Python, Pillow, ImageMagick, ffmpeg, rendering scripts, or other terminal commands.
+        IMPORTANT:
+        Do NOT call `read_file` before `analyze_terminal_image`.
+        Do NOT use `read_file` for visual inspection of terminal image files.
+        `analyze_terminal_image` reads the image from the terminal internally and sends it directly to the separate vision model.
+        Use `read_file` normally for text files, source code, JSON, logs, configuration files, and other non-image content.
+        3. VISUAL VERIFICATION
+        When a task requires understanding, describing, evaluating, comparing, or verifying the actual appearance of an image, you MUST use the appropriate vision tool before completing the task.
+        Do not infer what an image looks like solely from:
+        - the code that generated it,
+        - the prompt used to create it,
+        - file metadata,
+        - filenames,
+        - image dimensions,
+        - or successful command execution.
+        A message such as:
+        "Image file read successfully"
+        is NOT visual analysis.
+        4. GENERATED IMAGES
+        When you generate or modify an image in the terminal and visual verification is relevant:
+        1. Create or modify the image.
+        2. Call `analyze_terminal_image` on the resulting image file.
+        3. Evaluate the vision model's response.
+        4. If necessary, modify the image again.
+        5. Re-analyze the new result.
+        6. Continue until the requested visual result is achieved or further iteration is unnecessary.
+        Do not stop after merely generating the file if the task requires checking its appearance.
+        5. ANIMATIONS AND GIFS
+        If reliable visual inspection of an animation or GIF is required and direct inspection is unsuitable, use the terminal to extract one or more representative frames as PNG files and inspect those frames using `analyze_terminal_image`.
+        Use the vision model's actual observations as visual evidence.
+        """.strip()
 
         system_content = next(
             (
@@ -181,6 +181,9 @@ Use the vision model's actual observations as visual evidence.
                 user = await Users.get_user_by_id(__user__["id"])
                 if user:
                     await self._describe(target, user, __request__, __chat_id__, __event_emitter__)
+        user = None
+        if self.valves.strip_only and __request__ and (__user__ or {}).get("id"):
+            user = await Users.get_user_by_id(__user__["id"])
 
         for msg in messages:
             if _has_image(msg.get("content")):
