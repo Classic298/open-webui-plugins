@@ -10,8 +10,7 @@ Open WebUI 0.11.1 added **Admin Panel → Settings → General → Default Inter
 > [!IMPORTANT]
 > **Upgrading from 1.3.0?** Every valve was renamed in 1.4.0, so your saved valve configuration is dropped on upgrade and the function manages nothing until you set it again. Reconfigure the Valves, then tick **Apply Defaults to All Users**.
 
-<!-- IMAGE 4.png - Admin Panel > Settings > General with Default Interface Settings expanded -->
-![Default Interface Settings in the admin panel](4.png)
+<img width="3200" height="2300" alt="4" src="https://github.com/user-attachments/assets/fbd82d66-e637-4e0e-8483-36015d97b20d" />
 
 ## ✨ What it adds
 
@@ -39,8 +38,7 @@ Open WebUI keeps instance defaults in one config row (`ui.default_interface_sett
 
 ## Setup
 
-<!-- IMAGE 1.png - Admin Panel > Functions with Interface Defaults installed and enabled -->
-![The function in the Functions list](1.png)
+<img width="3200" height="2300" alt="1" src="https://github.com/user-attachments/assets/81f59169-bef9-42df-b24c-7254130db3ea" />
 
 1. Copy the contents of `event.py`, or click **Get** on the Community page.
 2. In Open WebUI, go to **Admin Panel → Functions → +** (Import/Create).
@@ -51,11 +49,9 @@ Open WebUI keeps instance defaults in one config row (`ui.default_interface_sett
 
 ## Valves
 
-<!-- IMAGE 2.png - Valves panel, top: the two one-shot buttons and the Notifications group -->
-![Valves: the one-shot buttons](2.png)
+<img width="3200" height="2300" alt="2" src="https://github.com/user-attachments/assets/7e2fd766-b538-4e2a-a3c2-8f26745cb0eb" />
 
-<!-- IMAGE 3.png - Valves panel, scrolled: Speech & Voice and Quick Actions groups -->
-![Valves: speech, voice and quick actions](3.png)
+<img width="3200" height="2300" alt="3" src="https://github.com/user-attachments/assets/f3974233-10bc-4e79-be60-1f87729d5ac2" />
 
 | Setting | What it does |
 |-------|--------------|
