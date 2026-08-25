@@ -3,38 +3,24 @@ title: Interface Defaults
 author: Classic298
 author_url: https://github.com/Classic298
 funding_url: https://github.com/Classic298
-version: 1.3.0
-required_open_webui_version: 0.11.0
-description: Set Settings > Interface defaults for the whole instance from this function's Valves. Only settings you switch to Custom are managed; everything left on Default stays the user's own choice. Defaults are injected into the page before it loads, so they apply from the first paint - to new and existing users alike - and are also written to new accounts as a fallback. Two one-shot buttons: apply to all existing users, and reset everyone to factory. Redis, if configured, propagates a save to every container at once.
+version: 1.4.0
+required_open_webui_version: 0.11.1
+description: Companion to Admin Panel → Settings → General → Default Interface Settings. Adds the two things that page has no button for - force every existing user onto the configured defaults, and factory-reset the whole instance - plus defaults for the user settings that page does not reach (notifications, keyboard shortcuts, memory, personal system prompt, speech/voice).
 """
 
 import asyncio
-import hashlib
 import json
 import logging
+import os
 import sys
-import time
-import uuid
 from copy import deepcopy
-from pathlib import Path
 from typing import Any, Literal, Optional
 
 from pydantic import BaseModel, Field
 
-# ===========================================================================
-# BUMP THIS ON EVERY CODE CHANGE.
-# It is the payload of the Redis reload broadcast and the marker each process
-# compares against. Leave it unchanged and peers treat the broadcast as an echo
-# of what they already run: they ignore it, and the fleet keeps serving the old
-# code until each container happens to re-exec on its own. The `version:` in the
-# frontmatter above is documentation - THIS is what distributes the code.
-# ===========================================================================
-FUNCTION_BUILD_ID = "2026-08-05.2"
 
-
-# Named, not getLogger(__name__): a DB-loaded plugin is "function_<uuid>".
-# propagate=False stops double printing; the own level survives GLOBAL_LOG_LEVEL.
 def _get_logger() -> logging.Logger:
+    # Named, not getLogger(__name__): a DB-loaded plugin is "function_<uuid>".
     logger = logging.getLogger("interface_defaults")
     if getattr(logger, "_id_configured", False):
         return logger
@@ -43,344 +29,119 @@ def _get_logger() -> logging.Logger:
     logger.addHandler(handler)
     logger.setLevel(logging.INFO)
     logger.propagate = False
-    # Same object after a re-exec, so the guard stops handlers stacking.
     logger._id_configured = True  # type: ignore[attr-defined]
     return logger
 
 
 log = _get_logger()
 
-# Finds our own row when the dispatcher has not handed us __id__ (reloads
-# arrive without one).
-CONTENT_SIGNATURE = "owui-interface-defaults"
+# The config row Open WebUI 0.11.1+ overlays onto every user's settings.ui.
+DEFAULTS_CONFIG_KEY = "ui.default_interface_settings"
+# Our own row: the paths this function last wrote into that overlay, so a valve
+# switched back to Default can be withdrawn again. Kept separate because
+# anything inside DEFAULTS_CONFIG_KEY is merged into real user settings.
+OWNED_CONFIG_KEY = "ui.interface_defaults_managed_paths"
 
-STATE_INSTALLED_BUILD = "_owui_interface_defaults_build"
-STATE_FUNCTION_ID = "_owui_interface_defaults_function_id"
-STATE_RELOAD_SUB = "_owui_interface_defaults_reload_sub"
+# Valve descriptions are rendered as markdown, so this becomes a real link.
+# Absolute when WEBUI_URL is set, so it still points somewhere useful when Open
+# WebUI is served under a reverse-proxy sub-path.
+ADMIN_PAGE = (os.environ.get("WEBUI_URL") or "").rstrip("/") + "/admin/settings/general"
+ADMIN_LINK = (
+    f"[Admin Panel → Settings → General → Default Interface Settings]({ADMIN_PAGE})"
+)
 
-# Cross-container convergence. Without it only the saving container serves the
-# new defaults; the rest lag until their next event, so what a user gets
-# depends on which container nginx picked.
-RELOAD_CHANNEL = "owui-interface-defaults:reload"
+TRIGGERS = ("apply_defaults_to_all_users", "reset_all_users_to_factory")
+NON_UI = TRIGGERS + ("bulk_users_per_second",)
 
-# Echo guard for the broadcast. The build id alone will not do: a valve-only
-# change leaves it unchanged, so the publisher would suppress its peers.
-PROCESS_TOKEN = uuid.uuid4().hex
+# Every settings.ui path the native Default Interface Settings editor renders.
+# A factory reset clears exactly these (plus EXTRA_PATHS below). settings.ui also
+# holds a user's direct connections, tool servers, pinned models and default
+# model, which are not interface options and are never touched.
+NATIVE_INTERFACE_PATHS = (
+    ("autoFollowUps",),
+    ("autoTags",),
+    ("backgroundImageUrl",),
+    ("chatBubble",),
+    ("chatDirection",),
+    ("chatFadeStreamingText",),
+    ("chatHoverPreview",),
+    ("collapseCodeBlocks",),
+    ("copyFormatted",),
+    ("ctrlEnterToSend",),
+    ("defaultUploadContext",),
+    ("detectArtifacts",),
+    ("displayMultiModelResponsesInTabs",),
+    ("enableMessageQueue",),
+    ("expandDetails",),
+    ("floatingActionButtons",),
+    ("hapticFeedback",),
+    ("highContrastMode",),
+    ("iframeSandboxAllowDownloads",),
+    ("iframeSandboxAllowForms",),
+    ("iframeSandboxAllowSameOrigin",),
+    ("iframeSandboxAllowScripts",),
+    ("imageCompression",),
+    ("imageCompressionInChannels",),
+    ("imageCompressionSize",),
+    ("insertFollowUpPrompt",),
+    ("insertPromptAsRichText",),
+    ("insertSuggestionPrompt",),
+    ("keepFollowUpPrompts",),
+    ("landingPageMode",),
+    ("largeTextAsFile",),
+    ("promptAutocomplete",),
+    ("regenerateMenu",),
+    ("renderMarkdownInAssistantMessages",),
+    ("renderMarkdownInPreviews",),
+    ("renderMarkdownInUserMessages",),
+    ("responseAutoCopy",),
+    ("richTextInput",),
+    ("scrollOnBranchChange",),
+    ("scrollOnResponseGeneration",),
+    ("showChangelog",),
+    ("showChatTitleInTab",),
+    ("showEmojiInCall",),
+    ("showFilesOnTerminalSelect",),
+    ("showFloatingActionButtons",),
+    ("showFormattingToolbar",),
+    ("showUpdateToast",),
+    ("showUsername",),
+    ("splitLargeChunks",),
+    ("stylizedPdfExport",),
+    ("temporaryChatByDefault",),
+    ("terminalFileDisplay",),
+    ("terminalPreviewAllowSameOrigin",),
+    ("textScale",),
+    # Only the auto sub-key: the rest of `title` is not an interface option.
+    ("title", "auto"),
+    ("userLocation",),
+    ("voiceInterruption",),
+    ("webSearch",),
+    ("widescreenMode",),
+)
 
-# ===========================================================================
-# Shared static-asset registry
-# --- KEEP BYTE-IDENTICAL IN EVERY PLUGIN THAT USES IT ----------------------
-# ---------------------------------------------------------------------------
-# app.html loads /static/loader.js and /static/custom.css on every page, and
-# loader.js is the only hook running before the SvelteKit bundle hydrates. Two
-# URLs, many plugins - so none may own either. Each publishes a fragment into
-# one app.state registry and the route composes them PER REQUEST, so load order
-# is irrelevant, a late plugin needs no cooperation, and a re-exec'd one
-# replaces its own key. Per-process: each container serves what it has loaded.
-#
-# Fragments are inlined, never <script src> / @import - a second request would
-# land after hydration, defeating the point.
-#
-# Contract:
-#   * ASSET_REGISTRY_ATTR, ASSET_ROUTE_ATTR, the entry shape and the paths are
-#     the interop surface. Everything else is implementation owned by whichever
-#     plugin created the route - a stale copy silently serves everyone, hence
-#     ASSET_IMPL_VERSION and byte-identity.
-#   * `key` must be a module-level constant. Derive it from a build id or a
-#     function id and a re-exec registers a SECOND entry - duplicated output,
-#     not just a leaked closure.
-#   * `order` breaks ties: lower composes first, so on custom.css it loses the
-#     cascade and on loader.js it wraps innermost. Default 0. Use it instead of
-#     encoding priority in the key, which would only work if every plugin
-#     renamed at once.
-#   * Producers run SYNCHRONOUSLY on the event loop, on every request, and
-#     BEFORE the ETag is compared - so a 304 costs exactly what a 200 costs.
-#     "Cheap" is per-call work, not payload size: memoise anything that
-#     parses, formats or regexes and return a prebuilt string. No I/O, no
-#     locks, no sleeps. Budget tens of microseconds, not milliseconds.
-#   * To withdraw, return "" - there is no unregister. A disabled plugin still
-#     gets function.disable_started (it fires before is_active flips), but a
-#     DELETED one never sees its own deletion, so disable before deleting or
-#     the fragment serves until that process restarts.
-#   * Reach is the SPA only. A plugin serving its own HTML page loads neither
-#     asset and must inject its own.
-# ===========================================================================
-LOADER_PATH = "/static/loader.js"
-CUSTOM_CSS_PATH = "/static/custom.css"
-SHARED_ASSET_TYPES = {
-    LOADER_PATH: "application/javascript; charset=utf-8",
-    CUSTOM_CSS_PATH: "text/css; charset=utf-8",
+# The extra valves, and where each one lands in settings.ui. These are the user
+# settings the native editor does not cover.
+EXTRA_PATHS = {
+    "desktop_notifications": ("notificationEnabled",),
+    "notification_sound": ("notificationSound",),
+    "notification_sound_when_focused": ("notificationSoundAlways",),
+    "keyboard_shortcuts": ("keyboardShortcuts",),
+    "memory": ("memory",),
+    "system_prompt": ("system",),
+    "hands_free_voice_calls": ("conversationMode",),
+    "auto_send_after_transcription": ("speechAutoSend",),
+    "auto_read_responses_aloud": ("responseAutoPlayback",),
+    "speech_to_text_engine": ("audio", "stt", "engine"),
+    "speech_to_text_language": ("audio", "stt", "language"),
+    "text_to_speech_voice": ("audio", "tts", "voice"),
+    "speech_playback_speed": ("audio", "tts", "playbackRate"),
+    "allow_non_local_voices": ("audio", "tts", "nonLocalVoices"),
 }
-ASSET_REGISTRY_ATTR = "_owui_static_fragments"  # {path: {key: entry}}
-ASSET_ROUTE_ATTR = "_owui_shared_asset"  # set to the path the route serves
-ASSET_IMPL_ATTR = "_owui_shared_asset_impl"  # implementation version of the route
-# Bump when this block changes behaviour: newer evicts older, so the fleet
-# converges on one implementation instead of whichever plugin booted first.
-ASSET_IMPL_VERSION = 4
 
-# Producer failures are reported once per (path, key, exception type) - compose
-# runs on every page load, so an unconditional warning would be a firehose.
-_ASSET_WARNED: set = set()
+USER_CHUNK = 100
 
-
-def asset_fragments(app: Any, path: str) -> dict:
-    registry = getattr(app.state, ASSET_REGISTRY_ATTR, None)
-    if not isinstance(registry, dict):
-        registry = {}
-        app.state.__setattr__(ASSET_REGISTRY_ATTR, registry)
-    bucket = registry.get(path)
-    if not isinstance(bucket, dict):
-        bucket = {}
-        registry[path] = bucket
-    return bucket
-
-
-def asset_sort_key(item):
-    """(order, key). Coerced defensively: a non-int order from a third-party
-    plugin would raise inside sorted(), outside the per-fragment guard, and
-    take down the whole asset."""
-    key, entry = item
-    try:
-        order = int(entry.get("order", 0))
-    except (TypeError, ValueError):
-        order = 0
-    return (order, key)
-
-
-def asset_strip_block(content: str, start_marker: str, end_marker: str) -> str:
-    """Remove every marker-wrapped block, leaving other content untouched."""
-    while start_marker in content:
-        start = content.find(start_marker)
-        end = content.find(end_marker, start)
-        if end == -1:
-            # No end marker: the block was appended last, so drop to EOF.
-            content = content[:start]
-            break
-        end += len(end_marker)
-        if content[end : end + 1] == "\n":
-            end += 1
-        content = content[:start] + content[end:]
-    return content
-
-
-def asset_compose(app: Any, path: str) -> str:
-    """Disk file plus every registered fragment, in (order, key) order."""
-    import logging
-
-    try:
-        from open_webui.env import STATIC_DIR
-
-        target = Path(STATIC_DIR) / path.rsplit("/", 1)[-1]
-        body = (
-            ""
-            if (target.is_symlink() or not target.is_file())
-            else target.read_text(encoding="utf-8")
-        )
-    except Exception:
-        body = ""
-
-    ordered = sorted(asset_fragments(app, path).items(), key=asset_sort_key)
-    # Strip first: an older file-writing build may have left a block on disk.
-    for _key, entry in ordered:
-        body = asset_strip_block(body, entry["start"], entry["end"])
-    body = body.rstrip()
-
-    for key, entry in ordered:
-        try:
-            block = (entry["js"]() or "").strip()
-        except Exception as exc:
-            mark = (path, key, type(exc).__name__)
-            if mark not in _ASSET_WARNED:
-                if len(_ASSET_WARNED) > 256:
-                    _ASSET_WARNED.clear()
-                _ASSET_WARNED.add(mark)
-                logging.getLogger("owui-shared-assets").warning(
-                    "fragment %r failed for %s - it will be omitted",
-                    key,
-                    path,
-                    exc_info=True,
-                )
-            continue
-        if block:
-            body = (body + "\n\n" if body else "") + block
-    return body + "\n" if body else ""
-
-
-def asset_register(
-    app: Any, path: str, key: str, start: str, end: str, producer, order: int = 0
-) -> None:
-    """Publish a fragment and ensure the route exists. Idempotent, and safe
-    from any plugin in any order."""
-    from starlette.responses import Response
-    from starlette.routing import Mount, Route
-
-    asset_fragments(app, path)[key] = {
-        "start": start,
-        "end": end,
-        "js": producer,
-        "order": order,
-    }
-
-    for existing in app.routes:
-        if getattr(existing, ASSET_ROUTE_ATTR, None) != path:
-            continue
-        if getattr(existing, ASSET_IMPL_ATTR, 0) >= ASSET_IMPL_VERSION:
-            return  # an equal or newer implementation already owns the route
-        break  # ours is newer - fall through and replace it
-
-    # Replaces a single-owner route from an older build, or an older impl of
-    # this block. Fragments live on app.state, so nothing is lost.
-    app.routes[:] = [r for r in app.routes if getattr(r, "path", "") != path]
-    media_type = SHARED_ASSET_TYPES.get(path, "text/plain; charset=utf-8")
-
-    async def serve_asset(request):
-        content = asset_compose(app, path)
-        etag = (
-            '"owui-'
-            # usedforsecurity=False: this is a cache validator, not a security
-            # primitive, and a bare md5() raises ValueError on a FIPS host -
-            # which would 500 the asset for every visitor.
-            + hashlib.md5(
-                (path + "\x00" + content).encode("utf-8"), usedforsecurity=False
-            ).hexdigest()
-            + '"'
-        )
-        # no-cache, NOT no-store: a response the browser may not store has no
-        # validator, so If-None-Match is never sent and the 304 below is dead
-        # code. no-cache still forbids reuse without revalidation, so a stale
-        # body is impossible either way. Note a proxy may re-add no-store for
-        # these paths, which puts the 304 back to sleep - that is deployment
-        # policy, not this block's business.
-        headers = {
-            "Cache-Control": "no-cache, must-revalidate, private",
-            "ETag": etag,
-        }
-        if request.headers.get("if-none-match") == etag:
-            return Response(status_code=304, headers=headers)
-        # Starlette only auto-appends charset for text/*, so JS would ship
-        # undeclared and readers guessing latin-1 get mojibake.
-        return Response(content, media_type=media_type, headers=headers)
-
-    insert_at = len(app.routes)
-    for position, existing in enumerate(app.routes):
-        if isinstance(existing, Mount) and getattr(existing, "name", "") == "static":
-            insert_at = position
-            break
-    shared = Route(path, serve_asset, methods=["GET"])
-    setattr(shared, ASSET_ROUTE_ATTR, path)
-    setattr(shared, ASSET_IMPL_ATTR, ASSET_IMPL_VERSION)
-    app.routes.insert(insert_at, shared)
-
-
-# =========================== end shared asset block ========================
-
-
-# ---------------------------------------------------------------------------
-# Pre-hydration defaults (the loader.js fragment)
-# The frontend reads GET /users/user/settings once, in onMount, and never
-# again - a seed landing after that is invisible for the whole session. This
-# runs before hydration and wraps fetch, so the response already carries the
-# defaults. The user's own values merge on top; an explicit choice wins.
-# ---------------------------------------------------------------------------
-INTERFACE_JS_BLOCK_START = "// owui-interface-defaults:start"
-INTERFACE_JS_BLOCK_END = "// owui-interface-defaults:end"
-
-CUSTOM_JS = r"""
-(function () {
-  var DEFAULTS = __DEFAULTS__;
-  if (!DEFAULTS || typeof DEFAULTS !== 'object' || !Object.keys(DEFAULTS).length) return;
-
-  var original = window.fetch;
-  if (typeof original !== 'function' || original.__owuiInterfaceDefaults) return;
-
-  /* Recursive so nested objects (imageCompressionSize, title) merge key by
-     key rather than one side replacing the other. */
-  function merge(base, over) {
-    var out = {}, key;
-    for (key in base) {
-      if (Object.prototype.hasOwnProperty.call(base, key)) out[key] = base[key];
-    }
-    for (key in over) {
-      if (!Object.prototype.hasOwnProperty.call(over, key)) continue;
-      var a = out[key], b = over[key];
-      out[key] = (a && b && typeof a === 'object' && typeof b === 'object'
-                  && !Array.isArray(a) && !Array.isArray(b)) ? merge(a, b) : b;
-    }
-    return out;
-  }
-
-  /* GET only. The trailing (?|$) excludes .../settings/update. */
-  function isSettingsGet(input, init) {
-    var url = '', method = (init && init.method) || 'GET';
-    try {
-      if (typeof input === 'string') {
-        url = input;
-      } else if (input && typeof input.url === 'string') {
-        url = input.url;
-        method = input.method || method;
-      }
-    } catch (e) { return false; }
-    return String(method).toUpperCase() === 'GET'
-        && /\/users\/user\/settings(\?|$)/.test(url);
-  }
-
-  var patched = function (input, init) {
-    var pending = original.apply(this, arguments);
-    if (!isSettingsGet(input, init)) return pending;
-    return pending.then(function (res) {
-      if (!res || !res.ok) return res;
-      /* clone(): the app still needs to read the original body itself. */
-      return res.clone().json().then(function (data) {
-        var own = (data && typeof data === 'object') ? data : {};
-        var body = JSON.stringify(merge({ ui: DEFAULTS }, own));
-        /* Fresh headers: the original Content-Length no longer matches. */
-        return new Response(body, {
-          status: res.status,
-          statusText: res.statusText,
-          headers: new Headers({ 'content-type': 'application/json' })
-        });
-      }).catch(function () { return res; });
-    });
-  };
-  patched.__owuiInterfaceDefaults = true;
-  window.fetch = patched;
-})();
-"""
-
-
-def build_interface_js_block(ui: dict) -> str:
-    """The fragment for the shared loader, or "" when nothing is managed."""
-    if not ui:
-        return ""
-    # ensure_ascii escapes U+2028/U+2029 (raw, they are JS line terminators);
-    # escaping "</" stops a value closing the script element.
-    payload = json.dumps(ui, ensure_ascii=True).replace("</", "<\\/")
-    script = CUSTOM_JS.replace("__DEFAULTS__", payload).strip()
-    return f"{INTERFACE_JS_BLOCK_START}\n{script}\n{INTERFACE_JS_BLOCK_END}"
-
-
-# Valve fields that are NOT interface settings (excluded when building ui).
-_TRIGGERS = ("apply_to_all_existing_users", "reset_all_users_to_factory")
-_NON_UI = _TRIGGERS + ("bulk_users_per_second",)
-
-# How long after account creation the seed is still repaired. Covers only the
-# browser's start-up: it reads the settings once, and a read that beat the seed
-# gets written back stale on its next save. Both triggers are events, so the
-# repair is immediate and this is just the cut-off past which an account is
-# never read again - not a retry interval.
-_REPAIR_WINDOW_SECONDS = 300
-
-# Sibling of `ui` in the user's settings blob, marking a seed we have since seen
-# survive. It has to live OUTSIDE `ui`: the frontend rewrites `ui` wholesale on
-# every settings save, and Users.update_user_settings_by_id merges only at the
-# top level, so anything stored next to `ui` is untouched by both.
-_SEEDED_KEY = "interfaceDefaultsSeeded"
-
-# Users are read in chunks so a bulk pass never loads a whole large instance.
-_USER_CHUNK = 100
-
-# Hold references to background bulk tasks so the loop cannot garbage-collect one
-# mid-run (per asyncio.create_task's documented caveat).
+# Keeps a background bulk pass from being garbage-collected mid-run.
 _BG_TASKS: set = set()
 
 
@@ -391,20 +152,75 @@ def _spawn(coro):
     return task
 
 
-def _pixels_or_blank(value) -> str:
-    """A compression side is a positive pixel count or blank (no limit). '0' is
-    truthy in JS and would resize to a 0px canvas; junk yields NaN dimensions.
-    isdecimal (not isdigit) so superscripts don't crash int(); str(int()) folds
-    non-ASCII decimals like Arabic-Indic to plain ASCII the frontend can parse."""
-    text = str(value or "").strip()
-    return str(int(text)) if text.isdecimal() and int(text) > 0 else ""
+def _mask_from_paths(paths) -> dict:
+    """Build a nested dict shaped like the paths, so _subtract can walk it."""
+    mask: dict = {}
+    for path in paths:
+        current = mask
+        for part in path[:-1]:
+            current = current.setdefault(part, {})
+        current[path[-1]] = True
+    return mask
+
+
+def _assign(target: dict, path, value) -> None:
+    current = target
+    for part in path[:-1]:
+        nested = current.get(part)
+        if not isinstance(nested, dict):
+            nested = {}
+            current[part] = nested
+        current = nested
+    current[path[-1]] = value
+
+
+def _remove(target: dict, path) -> None:
+    """Remove one path and any dict it leaves empty behind it."""
+    if len(path) == 1:
+        target.pop(path[0], None)
+        return
+    nested = target.get(path[0])
+    if isinstance(nested, dict):
+        _remove(nested, path[1:])
+        if not nested:
+            target.pop(path[0], None)
+
+
+def _subtract(settings: dict, mask: dict) -> dict:
+    """Return settings without the paths the mask names. Sub-keys the mask does
+    not name survive, so clearing `title.auto` leaves the rest of `title` alone.
+    """
+    result = {}
+    for key, value in settings.items():
+        if key not in mask:
+            result[key] = value
+            continue
+        masked = mask[key]
+        if isinstance(masked, dict) and isinstance(value, dict):
+            nested = _subtract(value, masked)
+            if nested:
+                result[key] = nested
+    return result
+
+
+def _deep_merge(base: dict, override: dict) -> dict:
+    """Merge override into base and return a new dict, recursing into nested dicts
+    so sub-keys the override omits survive. Neither input is mutated and the result
+    shares no dict with override: one defaults snapshot is reused for every user,
+    so handing out references would let one user's later write reach the others."""
+    merged = dict(base)
+    for key, value in override.items():
+        current = merged.get(key)
+        if isinstance(value, dict) and isinstance(current, dict):
+            merged[key] = _deep_merge(current, value)
+        else:
+            merged[key] = deepcopy(value)
+    return merged
 
 
 def _action_buttons_or_none(raw):
-    """Validate the floating-action-buttons JSON. Returns a clean list of
-    {id, label, input, prompt} buttons, or None to mean 'do not manage' when the
-    valve is blank or malformed (all-or-nothing, so a typo never pushes a broken
-    set). Canonicalises to exactly the four keys Open WebUI reads."""
+    """Validate the floating-action-buttons JSON. Returns a clean button list, or
+    None to mean 'do not manage', so a typo never pushes a broken set."""
     if isinstance(raw, str):
         raw = raw.strip()
         if not raw:
@@ -412,9 +228,7 @@ def _action_buttons_or_none(raw):
         try:
             raw = json.loads(raw)
         except ValueError:
-            log.warning(
-                "interface-defaults: floating_action_buttons is not valid JSON, ignoring"
-            )
+            log.warning("interface-defaults: quick action JSON is invalid, ignoring")
             return None
     if not isinstance(raw, list) or not raw:
         return None
@@ -441,605 +255,212 @@ def _action_buttons_or_none(raw):
     return buttons
 
 
-def _deep_merge(base: dict, override: dict) -> dict:
-    """Merge override into base and return a new dict, recursing into nested
-    dicts so sub-keys the override omits survive. Neither input is mutated, and
-    the result shares no dict with override: one ui snapshot is reused for every
-    user, so handing out references would let one user's write reach the others.
-    """
-    merged = dict(base)
-    for key, value in override.items():
-        current = merged.get(key)
-        if isinstance(value, dict) and isinstance(current, dict):
-            merged[key] = _deep_merge(current, value)
-        else:
-            merged[key] = deepcopy(value)
-    return merged
-
-
 class Event:
     class Valves(BaseModel):
-        # ── UI ──────────────────────────────────────────────────────────────
-        textScale: float = Field(
-            title="Text Scale", default=1.0, description="UI scale (1.0 - 1.5)"
-        )
-        highContrastMode: bool = Field(
-            title="High Contrast Mode", default=False, description="High contrast mode"
-        )
-        showChatTitleInTab: bool = Field(
-            title="Chat Title in Browser Tab",
-            default=True,
-            description="Display chat title in browser tab",
-        )
-        notificationSound: bool = Field(
-            title="Notification Sound", default=True, description="Notification sound"
-        )
-        notificationSoundAlways: bool = Field(
-            title="Always Play Notification Sound",
+        # ── actions ──────────────────────────────────────────────────────────
+        apply_defaults_to_all_users: bool = Field(
             default=False,
-            description="Always play notification sound",
-        )
-        userLocation: bool = Field(
-            title="Allow User Location",
-            default=False,
-            description="Allow access to user location",
-        )
-        hapticFeedback: bool = Field(
-            title="Haptic Feedback",
-            default=False,
-            description="Haptic feedback (Android)",
-        )
-        copyFormatted: bool = Field(
-            title="Copy Formatted Text",
-            default=False,
-            description="Copy formatted text",
-        )
-        showUpdateToast: bool = Field(
-            title="Update Available Toast",
-            default=True,
-            description="Toast notifications for new updates (admin)",
-        )
-        showChangelog: bool = Field(
-            title="What's New on Login",
-            default=True,
-            description='Show "What\'s New" modal on login (admin)\n\n---\n\n#### 💬 Chat Behavior',
-        )
-
-        # ── Chat ────────────────────────────────────────────────────────────
-        enableMessageQueue: bool = Field(
-            title="Message Queue", default=True, description="Enable message queue"
-        )
-        chatDirection: Literal["auto", "LTR", "RTL"] = Field(
-            title="Chat Direction",
-            default="auto",
-            description="Chat text direction",
-            json_schema_extra={
-                "input": {
-                    "type": "select",
-                    "options": [
-                        {
-                            "value": "auto",
-                            "label": "Auto (follow the interface language)",
-                        },
-                        {"value": "LTR", "label": "Left to Right"},
-                        {"value": "RTL", "label": "Right to Left"},
-                    ],
-                }
-            },
-        )
-        landingPageMode: Literal["", "chat"] = Field(
-            title="Landing Page Mode",
-            default="",
-            description="Which view users land on after opening Open WebUI",
-            json_schema_extra={
-                "input": {
-                    "type": "select",
-                    "options": [
-                        {"value": "", "label": "Default (home screen)"},
-                        {"value": "chat", "label": "Chat"},
-                    ],
-                }
-            },
-        )
-        chatBubble: bool = Field(
-            title="Chat Bubble UI", default=True, description="Chat bubble UI"
-        )
-        showUsername: bool = Field(
-            title="Show Username Instead of You",
-            default=False,
-            description="Display username instead of You (bubble UI off)",
-        )
-        widescreenMode: bool = Field(
-            title="Widescreen Mode", default=False, description="Widescreen mode"
-        )
-        temporaryChatByDefault: bool = Field(
-            title="Temporary Chats by Default",
-            default=False,
-            description="New chats are temporary by default",
-        )
-        chatFadeStreamingText: bool = Field(
-            title="Fade Streaming Text",
-            default=True,
-            description="Fade effect for streaming text",
-        )
-        renderMarkdownInUserMessages: bool = Field(
-            title="Markdown in User Messages",
-            default=True,
-            description="Render markdown in user messages",
-        )
-        renderMarkdownInAssistantMessages: bool = Field(
-            title="Markdown in Assistant Messages",
-            default=True,
-            description="Render markdown in assistant messages",
-        )
-        titleAutoGenerate: bool = Field(
-            title="Auto-Generate Titles",
-            default=True,
-            description="Title auto-generation",
-        )
-        autoFollowUps: bool = Field(
-            title="Auto-Generate Follow-Ups",
-            default=True,
-            description="Follow-up auto-generation",
-        )
-        autoTags: bool = Field(
-            title="Auto-Generate Tags",
-            default=True,
-            description="Chat tags auto-generation",
-        )
-        responseAutoCopy: bool = Field(
-            title="Auto-Copy Responses",
-            default=False,
-            description="Auto-copy response to clipboard",
-        )
-        insertSuggestionPrompt: bool = Field(
-            title="Insert Suggestion Prompts",
-            default=False,
-            description="Insert suggestion prompt to input",
-        )
-        keepFollowUpPrompts: bool = Field(
-            title="Keep Follow-Up Prompts",
-            default=False,
-            description="Keep follow-up prompts in chat",
-        )
-        insertFollowUpPrompt: bool = Field(
-            title="Insert Follow-Up Prompts",
-            default=False,
-            description="Insert follow-up prompt to input",
-        )
-        regenerateMenu: bool = Field(
-            title="Regenerate Menu", default=True, description="Regenerate menu"
-        )
-        collapseCodeBlocks: bool = Field(
-            title="Collapse Code Blocks",
-            default=False,
-            description="Always collapse code blocks",
-        )
-        expandDetails: bool = Field(
-            title="Expand Details", default=False, description="Always expand details"
-        )
-        renderMarkdownInPreviews: bool = Field(
-            title="Markdown in Previews",
-            default=True,
-            description="Render markdown in previews",
-        )
-        displayMultiModelResponsesInTabs: bool = Field(
-            title="Multi-Model Responses in Tabs",
-            default=False,
-            description="Display multi-model responses in tabs",
-        )
-        scrollOnBranchChange: bool = Field(
-            title="Scroll on Branch Change",
-            default=True,
-            description="Scroll on branch change",
-        )
-        scrollOnResponseGeneration: bool = Field(
-            title="Scroll on Response Generation",
-            default=True,
-            description="Scroll along while a response is generated (0.11.0+)",
-        )
-        showFilesOnTerminalSelect: bool = Field(
-            title="Files on Terminal Select",
-            default=True,
-            description="Show files on terminal select",
-        )
-        stylizedPdfExport: bool = Field(
-            title="Stylized PDF Export", default=True, description="Stylized PDF export"
-        )
-        showFloatingActionButtons: bool = Field(
-            title="Floating Quick Actions",
-            default=True,
-            description="Floating quick actions",
-        )
-        floatingActionButtons: str = Field(
-            title="Floating Quick Action Buttons (JSON)",
-            default="",
-            description='The actual quick-action buttons shown when text is selected, as a JSON array (leave Default to keep Open WebUI\'s built-in Ask/Explain). Each button is {"id","label","input","prompt"}; prompt supports {{SELECTED_CONTENT}}, {{CONTENT}} and {{INPUT_CONTENT}}. See the plugin README for a copy-paste tutorial and admin ideas. Invalid JSON is ignored.\n\n---\n\n#### ⌨️ Input',
-        )
-
-        # ── Input ───────────────────────────────────────────────────────────
-        ctrlEnterToSend: bool = Field(
-            title="Ctrl+Enter to Send",
-            default=False,
-            description="Ctrl+Enter to send (off = Enter to send)",
-        )
-        richTextInput: bool = Field(
-            title="Rich Text Input",
-            default=True,
-            description="Rich text input for chat",
-        )
-        promptAutocomplete: bool = Field(
-            title="Prompt Autocomplete",
-            default=False,
-            description="Prompt autocompletion",
-        )
-        showFormattingToolbar: bool = Field(
-            title="Formatting Toolbar",
-            default=False,
-            description="Show formatting toolbar (rich text on)",
-        )
-        insertPromptAsRichText: bool = Field(
-            title="Insert Prompts as Rich Text",
-            default=False,
-            description="Insert prompt as rich text (rich text on)",
-        )
-        largeTextAsFile: bool = Field(
-            title="Paste Large Text as File",
-            default=False,
-            description="Paste large text as a file\n\n---\n\n#### 🧩 Artifacts",
-        )
-
-        # ── Artifacts ───────────────────────────────────────────────────────
-        detectArtifacts: bool = Field(
-            title="Detect Artifacts",
-            default=True,
-            description="Detect artifacts automatically",
-        )
-        iframeSandboxAllowSameOrigin: bool = Field(
-            title="iframe Sandbox Allow Same Origin",
-            default=False,
-            description="Let sandboxed iframes (rendered HTML: artifacts, previews, embeds) access the same origin as Open WebUI",
-        )
-        iframeSandboxAllowForms: bool = Field(
-            title="iframe Sandbox Allow Forms",
-            default=False,
-            description="Let sandboxed iframes (rendered HTML: artifacts, previews, embeds) submit forms\n\n---\n\n#### 🎙️ Voice & Calls",
-        )
-
-        # ── Voice ───────────────────────────────────────────────────────────
-        voiceInterruption: bool = Field(
-            title="Voice Interruption in Call",
-            default=False,
-            description="Allow voice interruption in call",
-        )
-        showEmojiInCall: bool = Field(
-            title="Emoji in Call",
-            default=False,
-            description="Display emoji in call\n\n---\n\n#### 📎 Files & Search",
-        )
-
-        # ── File ────────────────────────────────────────────────────────────
-        defaultUploadContext: Literal["focused", "full"] = Field(
-            title="Default File Upload Context",
-            default="focused",
-            description="How attached files are sent to the model by default (0.11.0+)",
-            json_schema_extra={
-                "input": {
-                    "type": "select",
-                    "options": [
-                        {"value": "focused", "label": "Using Focused Retrieval"},
-                        {"value": "full", "label": "Using Entire Document"},
-                    ],
-                }
-            },
-        )
-        imageCompression: bool = Field(
-            title="Image Compression",
-            default=False,
-            description="Compress images before upload",
-        )
-        imageCompressionInChannels: bool = Field(
-            title="Image Compression in Channels",
-            default=True,
-            description="Compress images in channels (compression on)",
-        )
-        imageCompressionWidth: str = Field(
-            title="Max Image Width (px)",
-            default="",
-            description="Max image width in px (blank = no limit)",
-        )
-        imageCompressionHeight: str = Field(
-            title="Max Image Height (px)",
-            default="",
-            description="Max image height in px (blank = no limit)",
-        )
-
-        # Reassembled into their real ui shape on apply:
-        webSearchAlways: bool = Field(
-            title="Web Search by Default",
-            default=False,
-            description="Enable web search by default (maps to webSearch='always')\n\n---\n\n#### ⚡ One-Shot Actions",
-        )
-
-        bulk_users_per_second: int = Field(
-            title="Bulk Speed (Users per Second)",
-            default=20,
-            description="Speed limit for the two bulk actions below, in users per second, so applying to thousands of users never freezes the instance (0 = no limit).",
-        )
-
-        # --- one-shot trigger "buttons" (tick + Save; they untick themselves) ---
-        apply_to_all_existing_users: bool = Field(
-            title="Apply to All Existing Users",
-            default=False,
-            description="▶️ **Button, one-time, post-install.** Tick + Save to push the settings you switched to **Custom** above to **all existing users**. Settings left on **Default** are not touched, so every user keeps their own choice for those. **New users are always seeded automatically** on signup while this function is enabled, with or without this button; it only exists to catch up the users who were created before installation. Runs slowly in the background at the rate set above, so the instance stays responsive, and unticks itself.",
+            title="Apply Defaults to All Users",
+            description=(
+                f"**Overwrites.** Every setting configured in {ADMIN_LINK} is written "
+                "into every existing user, replacing the choice they made for it. "
+                "Settings you have not configured are left alone.\n\n"
+                "One-shot: unticks itself on save and runs in the background."
+            ),
         )
         reset_all_users_to_factory: bool = Field(
-            title="Reset All Users to Factory",
             default=False,
-            description="⚠️ **Button, full factory reset.** Tick + Save to clear **every interface setting this function manages** for **every user** (reverting everyone to Open WebUI's built-in defaults for those, even ones you never pushed) **and** put every setting above back to **Default**, so nothing is managed any more. Other preferences (system prompt, default model, audio, notifications) are left untouched. Unticks itself.",
+            title="Reset All Users to Factory",
+            description=(
+                "**Destructive, and it ignores your configuration.** Clears *every* "
+                "interface setting from *every* user, including options you never "
+                "configured, so the whole instance falls back to Open WebUI's built-ins "
+                f"and to whatever you set in {ADMIN_LINK}.\n\n"
+                "Chats, direct connections, tool servers, pinned models and the "
+                "default model are **not** touched.\n\n"
+                "One-shot: unticks itself on save and runs in the background."
+            ),
+        )
+        bulk_users_per_second: int = Field(
+            default=20,
+            title="Bulk Write Rate",
+            description=(
+                "Users per second for either one-shot pass. Lower is gentler on the "
+                "database, `0` runs flat out.\n\n"
+                "---\n\n"
+                "#### 🔔 Notifications"
+            ),
+        )
+
+        # ── notifications ────────────────────────────────────────────────────
+        desktop_notifications: bool = Field(
+            default=False,
+            title="Desktop Notifications",
+            description="`Settings → Notifications`. Browser notifications for finished responses. Users still grant the browser permission themselves.",
+        )
+        notification_sound: bool = Field(
+            default=True,
+            title="Notification Sound",
+            description="`Settings → Notifications`. Play a sound with in-app toast notifications.",
+        )
+        notification_sound_when_focused: bool = Field(
+            default=False,
+            title="Notification Sound While Tab Focused",
+            description=(
+                "Play the notification sound even while the tab is in the foreground. "
+                "Open WebUI reads this setting but ships **no toggle for it anywhere**, "
+                "so this valve is the only way to set it.\n\n"
+                "---\n\n"
+                "#### 💬 Interaction"
+            ),
+        )
+
+        # ── interaction ──────────────────────────────────────────────────────
+        keyboard_shortcuts: bool = Field(
+            default=True,
+            title="Keyboard Shortcuts",
+            description="`Settings → Keyboard shortcuts`. Enable shortcuts and the hotkey hints shown in the UI.",
+        )
+        memory: bool = Field(
+            default=False,
+            title="Memory",
+            description="`Settings → Personalization`. Enable the memory feature.",
+        )
+        system_prompt: str = Field(
+            default="",
+            title="System Prompt",
+            description=(
+                "`Settings → General`. The personal system prompt every user starts "
+                "with. This is the *user-level* prompt, so a model's own system prompt "
+                "still applies on top of it.\n\n"
+                "---\n\n"
+                "#### 🔊 Speech & Voice"
+            ),
+        )
+
+        # ── speech and voice ─────────────────────────────────────────────────
+        hands_free_voice_calls: bool = Field(
+            default=False,
+            title="Hands-Free Voice Calls",
+            description="`Settings → Audio`. Start voice calls in hands-free conversation mode.",
+        )
+        auto_send_after_transcription: bool = Field(
+            default=False,
+            title="Auto-Send After Transcription",
+            description="`Settings → Audio`. Send transcribed voice input as soon as speech recognition finishes.",
+        )
+        auto_read_responses_aloud: bool = Field(
+            default=False,
+            title="Auto-Read Responses Aloud",
+            description="`Settings → Audio`. Read every response out loud automatically.",
+        )
+        speech_to_text_engine: Literal["", "web"] = Field(
+            default="",
+            title="Speech-to-Text Engine",
+            description="`Settings → Audio`. Blank uses the engine configured in `Admin Panel → Settings → Audio`. `web` uses the browser's own recognition.",
+        )
+        speech_to_text_language: str = Field(
+            default="",
+            title="Speech-to-Text Language",
+            description="`Settings → Audio`. Recognition language as ISO-639-1, for example `en`. Blank auto-detects.",
+        )
+        text_to_speech_voice: str = Field(
+            default="",
+            title="Text-to-Speech Voice",
+            description="`Settings → Audio`. A browser voice name when no TTS engine is configured, otherwise a voice id from your configured engine.",
+        )
+        speech_playback_speed: float = Field(
+            default=1.0,
+            title="Speech Playback Speed",
+            description="`Settings → Audio`. Speech playback rate. `1` is normal speed.",
+        )
+        allow_non_local_voices: bool = Field(
+            default=False,
+            title="Allow Non-Local Voices",
+            description=(
+                "`Settings → Audio`. Offer browser voices that are not provided by a "
+                "local speech service.\n\n"
+                "---\n\n"
+                "#### ✨ Quick Actions"
+            ),
+        )
+
+        # ── quick actions ────────────────────────────────────────────────────
+        quick_action_buttons: str = Field(
+            default="",
+            title="Quick Action Buttons (JSON)",
+            description=(
+                "The buttons Open WebUI offers when a user selects text in a message. "
+                f"There is a visual editor for these in {ADMIN_LINK}; this valve exists "
+                "so a whole set can be pasted at once. Invalid JSON is ignored.\n\n"
+                "```json\n"
+                '[{"id": "summarize", "label": "Summarize", "input": false, '
+                '"prompt": "Summarize this: {{SELECTED_CONTENT}}"}]'
+                "\n"
+                "```"
+            ),
         )
 
     def __init__(self):
         self.valves = self.Valves()
-        self._function_id: Optional[str] = None
-        self._redis = None
-        self._schedule_bootstrap()
 
-    # ── cross-container convergence (Redis pub/sub) ──────────────────────────
+    # ── config overlay ───────────────────────────────────────────────────────
 
-    def _get_redis(self):
-        if self._redis is not None:
-            return self._redis
-        try:
-            from open_webui.env import REDIS_URL
-            from open_webui.utils.redis import get_redis_connection
+    def _extras_from_valves(self) -> dict:
+        """The settings.ui paths this function currently manages, as {path: value}.
 
-            if not REDIS_URL:
-                return None
-            self._redis = get_redis_connection(
-                REDIS_URL, async_mode=True, decode_responses=True
-            )
-        except Exception:
-            self._redis = None
-        return self._redis
-
-    def _app_redis(self, app: Any):
-        """Prefer the app's shared async client; fall back to our own."""
-        redis = getattr(getattr(app, "state", None), "redis", None)
-        return redis if redis is not None else self._get_redis()
-
-    def _schedule_bootstrap(self) -> None:
-        """Re-arm this process after a (re)load, including a peer's reload
-        broadcast where no event follows. Without it the registry would still
-        hold the previous instance's producer and serve its stale valves."""
-        try:
-            loop = asyncio.get_running_loop()
-        except RuntimeError:
-            return  # imported outside a running app (tests, tooling)
-
-        async def bootstrap():
-            try:
-                from open_webui.main import app
-            except Exception:
-                return
-            try:
-                fid = getattr(app.state, STATE_FUNCTION_ID, None) or (
-                    await self._resolve_function_id()
-                )
-                if fid:
-                    self._function_id = fid
-                    try:
-                        app.state.__setattr__(STATE_FUNCTION_ID, fid)
-                    except Exception:
-                        pass
-                # __init__ starts from empty valves; the dispatcher only fills
-                # them on a dispatch, and a reload is not one.
-                await self._refresh_valves()
-                self._publish_fragment(app)
-                await self._ensure_reload_subscriber(app)
-                previous = getattr(app.state, STATE_INSTALLED_BUILD, None)
-                app.state.__setattr__(STATE_INSTALLED_BUILD, FUNCTION_BUILD_ID)
-                if previous != FUNCTION_BUILD_ID:
-                    log.info("interface-defaults: build %s loaded", FUNCTION_BUILD_ID)
-                    await self._publish_reload(app, "build")
-            except Exception:
-                log.warning("interface-defaults: bootstrap failed", exc_info=True)
-
-        loop.create_task(bootstrap())
-
-    async def _resolve_function_id(self) -> Optional[str]:
-        """Find our own row by content signature, for the paths where the
-        dispatcher has not handed us __id__ yet."""
-        try:
-            from open_webui.models.functions import Functions
-
-            rows = await Functions.get_functions_by_type("event")
-            own = next(
-                (f for f in rows if CONTENT_SIGNATURE in (f.content or "")), None
-            )
-            return own.id if own else None
-        except Exception:
-            log.warning("interface-defaults: could not resolve this function's id")
-            return None
-
-    async def _refresh_valves(self) -> None:
-        if not self._function_id:
-            return
-        try:
-            from open_webui.models.functions import Functions
-
-            stored = await Functions.get_function_valves_by_id(self._function_id)
-            if stored is not None:
-                self.valves = self.Valves(**stored)
-        except Exception:
-            log.warning(
-                "interface-defaults: could not re-read valves from the database"
-            )
-
-    def _publish_fragment(self, app: Any) -> None:
-        """(Re)point the shared loader at THIS instance's valves."""
-        try:
-            asset_register(
-                app,
-                LOADER_PATH,
-                "interface-defaults",
-                INTERFACE_JS_BLOCK_START,
-                INTERFACE_JS_BLOCK_END,
-                lambda: build_interface_js_block(self._ui_from_valves()),
-            )
-        except Exception:
-            log.exception("interface-defaults: could not publish the loader fragment")
-
-    async def _ensure_reload_subscriber(self, app: Any) -> None:
-        """One long-lived subscriber per process. On a peer's broadcast it drops
-        this process's plugin caches and re-imports the source from the database,
-        converging both the code and the valves. No-op without Redis."""
-        if getattr(app.state, STATE_RELOAD_SUB, None) is not None:
-            return
-        redis = self._app_redis(app)
-        if redis is None:
-            return
-        try:
-            pubsub = redis.pubsub()
-            await pubsub.subscribe(RELOAD_CHANNEL)
-        except Exception:
-            log.warning("interface-defaults: reload subscribe failed")
-            return
-
-        async def listen():
-            try:
-                async for message in pubsub.listen():
-                    if message.get("type") != "message":
-                        continue
-                    raw = message.get("data")
-                    if isinstance(raw, (bytes, bytearray)):
-                        raw = raw.decode("utf-8", "ignore")
-                    try:
-                        payload = json.loads(raw) if raw else {}
-                    except Exception:
-                        payload = {}
-                    # Our own echo: the publisher must not reload itself
-                    # mid-handler.
-                    if payload.get("origin") == PROCESS_TOKEN:
-                        continue
-                    # A build we already run. Build announcements only - a valve
-                    # change leaves the build id untouched, so guarding those on
-                    # it would drop exactly the broadcasts we need.
-                    if payload.get("kind") == "build" and payload.get(
-                        "build"
-                    ) == getattr(app.state, STATE_INSTALLED_BUILD, None):
-                        continue
-                    try:
-                        await self._reload_from_db(app)
-                    except Exception:
-                        log.warning("interface-defaults: reload from db failed")
-            except asyncio.CancelledError:
-                raise
-            except Exception:
-                log.warning("interface-defaults: reload listener stopped")
-
-        # Mark before creating the task so a concurrent event cannot double-start it.
-        app.state.__setattr__(STATE_RELOAD_SUB, True)
-        try:
-            app.state.__setattr__(STATE_RELOAD_SUB, asyncio.create_task(listen()))
-        except Exception:
-            app.state.__setattr__(STATE_RELOAD_SUB, None)
-            log.warning("interface-defaults: reload listener could not start")
-
-    async def _reload_from_db(self, app: Any) -> None:
-        """Drop this process's plugin caches and re-exec the DB source, so a
-        peer's save upgrades THIS process. Re-running our own in-memory code
-        would leave every container but the saving one on its old build."""
-        from types import SimpleNamespace
-
-        from open_webui.utils.plugin import (
-            get_function_contents_cache,
-            get_function_module_from_cache,
-            get_functions_cache,
-        )
-
-        fid = (
-            getattr(app.state, STATE_FUNCTION_ID, None)
-            or self._function_id
-            or await self._resolve_function_id()
-        )
-        if not fid:
-            return
-        ctx = SimpleNamespace(app=app)
-        get_functions_cache(ctx).pop(fid, None)
-        get_function_contents_cache(ctx).pop(fid, None)
-        # Re-exec -> a fresh Event() whose _schedule_bootstrap re-reads the
-        # valves and re-points the loader fragment at itself.
-        await get_function_module_from_cache(ctx, fid)
-
-    async def _publish_reload(self, app: Any, kind: str) -> None:
-        """Tell every peer to converge. Published from bootstrap and from
-        event() only - never from the listener - so it cannot cascade.
-
-        Blast radius, stated plainly: every container re-imports this function
-        within a Redis round trip. That is the point - and it is not new reach,
-        only new speed, since get_function_module_from_cache already re-execs a
-        changed row on each container's next dispatched event. A save that fails
-        to import never gets here, so peers keep the last good build."""
-        redis = self._app_redis(app)
-        if redis is None:
-            return
-        try:
-            await redis.publish(
-                RELOAD_CHANNEL,
-                json.dumps(
-                    {"origin": PROCESS_TOKEN, "build": FUNCTION_BUILD_ID, "kind": kind}
-                ),
-            )
-        except Exception:
-            log.warning("interface-defaults: reload publish failed")
-
-    # ── helpers ──────────────────────────────────────────────────────────────
-
-    def _ui_from_valves(self) -> dict:
-        """The interface ui keys to write into a user.
-
-        Only settings switched to Custom in the Valves UI are stored (Open WebUI
-        persists valves with exclude_unset), so those are exactly the ones this
-        function manages. Fields left on Default are never written, and every
-        user keeps whatever they chose for them.
+        Open WebUI persists a function's valves with exclude_unset, so this is
+        exactly the set the admin switched from Default to Custom.
         """
-        ui = self.valves.model_dump(exclude_unset=True)
-        for key in _NON_UI:
-            ui.pop(key, None)
-        if "textScale" in ui:
-            ui["textScale"] = min(
-                1.5, max(1.0, ui["textScale"])
-            )  # slider range; 15 would be 15x text
-        if "floatingActionButtons" in ui:
-            # str valve holding JSON -> the array the frontend reads, or drop it
-            buttons = _action_buttons_or_none(ui.pop("floatingActionButtons"))
-            if buttons is not None:
-                ui["floatingActionButtons"] = buttons
-        if "titleAutoGenerate" in ui:
-            ui["title"] = {"auto": ui.pop("titleAutoGenerate")}
-        if "webSearchAlways" in ui:
-            ui["webSearch"] = "always" if ui.pop("webSearchAlways") else None
-        # Nested key: emit only the customized sides, _deep_merge keeps the rest.
-        compression_size = {
-            side: _pixels_or_blank(ui.pop(valve))
-            for side, valve in (
-                ("width", "imageCompressionWidth"),
-                ("height", "imageCompressionHeight"),
-            )
-            if valve in ui
-        }
-        if compression_size:
-            ui["imageCompressionSize"] = compression_size
-        return ui
+        chosen = self.valves.model_dump(exclude_unset=True)
+        for key in NON_UI:
+            chosen.pop(key, None)
+        extras = {}
+        for valve, value in chosen.items():
+            if valve == "quick_action_buttons":
+                buttons = _action_buttons_or_none(value)
+                if buttons is None:
+                    continue
+                extras[("floatingActionButtons",)] = buttons
+                continue
+            path = EXTRA_PATHS.get(valve)
+            if path:
+                extras[path] = value
+        return extras
 
-    async def _iter_user_ids(self, chunk: int = _USER_CHUNK):
-        """Yield user ids a chunk at a time. Users.get_users() would load every
-        user, each carrying their whole settings blob, and re-run a COUNT per
-        page; we only need ids because _seed_user re-reads the user anyway.
-        Keyset paginated on the primary key: a bulk pass runs for minutes, and
-        an OFFSET would skip users when accounts are created or deleted mid-run.
-        The session is closed before each pause so nothing is held while paced."""
+    async def _sync_overlay(self) -> int:
+        """Write our valves into the config row Open WebUI overlays onto users,
+        and withdraw anything we wrote before that is back on Default."""
+        from open_webui.models.config import Config
+
+        defaults = await Config.get(DEFAULTS_CONFIG_KEY)
+        defaults = dict(defaults) if isinstance(defaults, dict) else {}
+        previous = await Config.get(OWNED_CONFIG_KEY)
+        previous = (
+            [tuple(path) for path in previous] if isinstance(previous, list) else []
+        )
+
+        extras = self._extras_from_valves()
+        for path in previous:
+            if path not in extras:
+                _remove(defaults, path)
+        for path, value in extras.items():
+            _assign(defaults, path, value)
+
+        await Config.upsert(
+            {
+                DEFAULTS_CONFIG_KEY: defaults,
+                OWNED_CONFIG_KEY: [list(path) for path in extras],
+            }
+        )
+        return len(extras)
+
+    # ── bulk passes ──────────────────────────────────────────────────────────
+
+    async def _iter_user_ids(self, chunk: int = USER_CHUNK):
+        """Yield user ids a chunk at a time, keyset paginated on the primary key.
+        A bulk pass runs for minutes, and an OFFSET would skip users when accounts
+        are created or deleted mid-run. The session is closed before each pause."""
         from open_webui.internal.db import get_async_db_context
         from open_webui.models.users import User
         from sqlalchemy import select
@@ -1057,104 +478,7 @@ class Event:
                 return
             after = ids[-1]
 
-    async def _seed_user(
-        self, user_id: str, ui: dict, *, mark_conformant: bool = False
-    ) -> str:
-        """Apply `ui` to one user. Returns 'written', 'conformant', 'nothing'
-        (no setting is Custom) or 'missing' (no such user).
-
-        mark_conformant is how the login safety net retires itself: the mark is
-        only written once the settings are observed already in place, i.e. an
-        earlier seed demonstrably survived. Marking at write time instead would
-        pin the very case this is meant to repair - a seed the browser then
-        overwrote - as permanently done."""
-        from open_webui.models.users import Users
-
-        if not ui:
-            return "nothing"
-        user = await Users.get_user_by_id(user_id)
-        if not user:
-            return "missing"
-        settings = user.settings.model_dump() if user.settings else {}
-        current_ui = settings.get("ui") or {}
-        merged = _deep_merge(current_ui, ui)
-        if merged == current_ui:
-            if mark_conformant and not settings.get(_SEEDED_KEY):
-                await Users.update_user_settings_by_id(user_id, {_SEEDED_KEY: True})
-            return "conformant"  # skip the write and its race window
-        await Users.update_user_settings_by_id(user_id, {"ui": merged})
-        return "written"
-
-    async def _repair(self, user_id: str, trigger: str) -> None:
-        """Re-apply to a just-created, unmarked account.
-
-        Bounded twice - by the mark and by account age. Unbounded, this would
-        re-force a managed setting on anyone who turned it off, and would push
-        the admin's config across the whole instance on install; both contradict
-        "users keep their own choice".
-
-        Safe against feedback: our writes go through the model layer, which
-        publishes nothing. Only the HTTP route emits user.settings_updated, so a
-        repair cannot retrigger itself."""
-        from open_webui.models.users import Users
-
-        ui = self._ui_from_valves()
-        if not ui:
-            return
-        user = await Users.get_user_by_id(user_id)
-        if not user:
-            return
-        settings = user.settings.model_dump() if user.settings else {}
-        if settings.get(_SEEDED_KEY):
-            return
-        created_at = getattr(user, "created_at", 0) or 0  # epoch seconds
-        if created_at and created_at < time.time() - _REPAIR_WINDOW_SECONDS:
-            return
-        if await self._seed_user(user_id, ui, mark_conformant=True) == "written":
-            log.info(
-                "interface-defaults: restored defaults for %s after %s "
-                "(the seed at account creation had been overwritten)",
-                user_id,
-                trigger,
-            )
-
-    async def _apply_to_all(self, ui: dict, rate: int = 20):
-        if not ui:
-            log.info(
-                "interface-defaults: nothing to apply, no setting is set to Custom"
-            )
-            return
-        applied = 0
-        try:
-            async for user_id in self._iter_user_ids():
-                try:
-                    if await self._seed_user(user_id, ui) == "written":
-                        applied += 1
-                except Exception:
-                    log.exception("interface-defaults: apply failed for %s", user_id)
-                if rate > 0:
-                    # Trickle instead of hammering the single database writer:
-                    # 4000+ users in one tight loop freezes a live instance.
-                    await asyncio.sleep(1 / rate)
-        except Exception:
-            # A chunk-read error escapes the per-user guard; log it rather than
-            # dying silently and leaving the pass half-applied with no trace.
-            log.exception("interface-defaults: apply pass aborted early")
-        log.info("interface-defaults: applied defaults to %d existing user(s)", applied)
-
-    def _managed_ui_keys(self) -> set:
-        """Top-level settings.ui keys this function owns. `title` is excluded: we
-        only own its `auto` sub-key, the rest of that dict belongs to Open WebUI."""
-        sources = {
-            "titleAutoGenerate",
-            "webSearchAlways",
-            "imageCompressionWidth",
-            "imageCompressionHeight",
-        }
-        plain = set(self.Valves.model_fields) - set(_NON_UI) - sources
-        return plain | {"webSearch", "imageCompressionSize"}
-
-    async def _reset_user(self, user_id: str, managed: set) -> bool:
+    async def _clear_user(self, user_id: str, mask: dict) -> bool:
         from open_webui.models.users import Users
 
         user = await Users.get_user_by_id(user_id)
@@ -1162,69 +486,64 @@ class Event:
             return False
         settings = user.settings.model_dump() if user.settings else {}
         ui = settings.get("ui") or {}
-        new_ui = {k: v for k, v in ui.items() if k not in managed}
-        title = new_ui.get("title")
-        if isinstance(title, dict):
-            siblings = {k: v for k, v in title.items() if k != "auto"}
-            if siblings:
-                new_ui["title"] = siblings
-            else:
-                new_ui.pop("title", None)
-        updated = {}
-        if new_ui != ui:
-            updated["ui"] = new_ui
-        if settings.get(_SEEDED_KEY):
-            # Cleared, not deleted: update_user_settings_by_id can only merge, so
-            # a falsy value is the only way to retract the mark. A factory reset
-            # that left it set would block the login safety net forever.
-            updated[_SEEDED_KEY] = False
-        if not updated:
-            return False  # nothing managed present: skip the write
-        await Users.update_user_settings_by_id(user_id, updated)
+        stripped = _subtract(ui, mask)
+        if stripped == ui:
+            return False  # nothing of ours present: skip the write and its race window
+        await Users.update_user_settings_by_id(user_id, {"ui": stripped})
         return True
 
-    async def _reset_all(self, rate: int = 20):
-        # settings.ui holds the user's WHOLE settings store (system prompt, default
-        # model, audio, notification webhook, pinned models), not just the Interface
-        # tab, so clear the interface keys instead of wiping ui.
-        managed = self._managed_ui_keys()
-        reset = 0
+    async def _write_user(self, user_id: str, defaults: dict) -> bool:
+        from open_webui.models.users import Users
+
+        user = await Users.get_user_by_id(user_id)
+        if not user:
+            return False
+        settings = user.settings.model_dump() if user.settings else {}
+        ui = settings.get("ui") or {}
+        merged = _deep_merge(ui, defaults)
+        if merged == ui:
+            return False  # already conformant: skip the write and its race window
+        await Users.update_user_settings_by_id(user_id, {"ui": merged})
+        return True
+
+    async def _bulk(self, payload: dict, rate: int, label: str, write: bool) -> None:
+        if not payload:
+            log.info("interface-defaults: %s found nothing configured to apply", label)
+            return
+        touch = self._write_user if write else self._clear_user
+        cleared = 0
         try:
             async for user_id in self._iter_user_ids():
                 try:
-                    if await self._reset_user(user_id, managed):
-                        reset += 1
+                    if await touch(user_id, payload):
+                        cleared += 1
                 except Exception:
-                    log.exception("interface-defaults: reset failed for %s", user_id)
+                    log.exception(
+                        "interface-defaults: %s failed for %s", label, user_id
+                    )
                 if rate > 0:
+                    # Trickle instead of hammering the single database writer:
+                    # thousands of users in one tight loop freezes a live instance.
                     await asyncio.sleep(1 / rate)
         except Exception:
-            log.exception("interface-defaults: reset pass aborted early")
-        log.info("interface-defaults: reset %d user(s) to factory defaults", reset)
+            log.exception("interface-defaults: %s aborted early", label)
+        log.info("interface-defaults: %s updated %d user(s)", label, cleared)
 
-    async def _clear_triggers(self, function_id: str):
-        """Untick the trigger toggles in the DB (keeps the configured settings).
-        The model write does not publish the event, so there is no re-fire loop."""
+    async def _clear_triggers(self, function_id: str) -> None:
+        """Untick the buttons in the DB, keeping the configured settings. The
+        model write publishes nothing, so there is no re-fire loop."""
         from open_webui.models.functions import Functions
 
         valves = await Functions.get_function_valves_by_id(function_id)
         if not valves:
-            # The model layer swallows read errors and returns None; writing the
-            # `or {}` fallback would silently erase the admin's whole config.
+            # The model layer returns None on a read error; writing an `or {}`
+            # fallback would silently erase the admin's whole config.
             return
-        if not any(key in valves for key in _TRIGGERS):
-            return  # nothing ticked: no write (keeps the startup sweep cheap)
-        for key in _TRIGGERS:
+        if not any(key in valves for key in TRIGGERS):
+            return
+        for key in TRIGGERS:
             valves.pop(key, None)
         await Functions.update_function_valves_by_id(function_id, valves)
-
-    async def _reset_valves(self, function_id: str):
-        """Restore this function's config to factory: every field back to Default,
-        i.e. nothing is managed. Storing the dumped defaults instead would mark
-        all of them as explicitly set, so the next apply would push all of them."""
-        from open_webui.models.functions import Functions
-
-        await Functions.update_function_valves_by_id(function_id, {})
 
     # ── event entry point ────────────────────────────────────────────────────
 
@@ -1238,116 +557,50 @@ class Event:
     ):
         payload = event or {}
 
-        # Capture our own id on every dispatch: the valves_updated ownership
-        # check and the reload path both need it.
-        if __id__:
-            self._function_id = __id__
-            if __app__ is not None:
-                try:
-                    __app__.state.__setattr__(STATE_FUNCTION_ID, __id__)
-                except Exception:
-                    pass
-
-        # 0) Publish the fragment and arm reloads. Idempotent, so both run on
-        # every event: startup covers a booting container, anything else covers
-        # one that loaded lazily.
-        if __app__ is not None:
-            self._publish_fragment(__app__)
-            try:
-                await self._ensure_reload_subscriber(__app__)
-                if (
-                    getattr(__app__.state, STATE_INSTALLED_BUILD, None)
-                    != FUNCTION_BUILD_ID
-                ):
-                    __app__.state.__setattr__(STATE_INSTALLED_BUILD, FUNCTION_BUILD_ID)
-                    log.info("interface-defaults: build %s loaded", FUNCTION_BUILD_ID)
-                    await self._publish_reload(__app__, "build")
-            except Exception:
-                log.warning("interface-defaults: reload setup failed", exc_info=True)
-
-        # 1) Seed every brand-new user (signup, oauth, ldap, scim, admin-created),
-        # whatever role they were given - pending accounts included.
-        if __event_name__ == "user.created":
-            user_id = (payload.get("subject") or {}).get("id")
-            if not user_id:
-                log.warning("interface-defaults: user.created carried no subject id")
-                return
-            ui = self._ui_from_valves()
-            if not ui:
-                log.warning(
-                    "interface-defaults: %s not seeded, no setting is set to Custom",
-                    user_id,
-                )
-                return
-            started = time.time()
-            try:
-                outcome = await self._seed_user(user_id, ui)
-            except Exception:
-                log.exception("interface-defaults: seeding %s failed", user_id)
-                return
-            # Elapsed time is the number that matters: past a few hundred ms
-            # the browser has already read its settings for the session.
-            log.info(
-                "interface-defaults: seeded %s with %d setting(s) [%s] in %.0f ms",
-                user_id,
-                len(ui),
-                outcome,
-                (time.time() - started) * 1000,
-            )
-            return
-
-        # 2) Safety net for the first seconds of an account's life, while the
-        # browser is still booting and can still write back a settings snapshot
-        # it read before the seed landed. settings_updated is the important one:
-        # it fires on exactly that overwrite, so the repair follows it within
-        # milliseconds instead of waiting for anything.
-        if __event_name__ in ("auth.login", "user.settings_updated"):
-            user_id = (payload.get("subject") or {}).get("id")
-            if user_id:
-                try:
-                    await self._repair(user_id, __event_name__)
-                except Exception:
-                    log.exception(
-                        "interface-defaults: repair of %s after %s failed",
-                        user_id,
-                        __event_name__,
-                    )
-            return
-
-        # 3) Drop a trigger that never ran: ticked while disabled (valves save
-        # without dispatch), or persisted by a crash between the valves save and
-        # the untick. Either way it must not fire late on some later save.
+        # Drop a button ticked while the function was disabled, or left ticked by
+        # a crash before the pass started, so it cannot fire late on a later save.
         if __event_name__ in ("function.enabled", "system.startup.completed"):
-            if (
-                __event_name__ == "system.startup.completed"
-                or (payload.get("subject") or {}).get("id") == __id__
+            if __event_name__ == "system.startup.completed" or (
+                (payload.get("subject") or {}).get("id") == __id__
             ):
                 await self._clear_triggers(__id__)
             return
 
-        # 4) Trigger buttons: fire when THIS function's admin valves are saved.
-        if __event_name__ == "function.valves_updated":
-            if (payload.get("subject") or {}).get("id") != __id__:
-                return
-            if (payload.get("data") or {}).get("scope") == "user":
-                return  # per-user valves, not the admin config (no UserValves today)
-            # A valve change reaches only the saving container and leaves the
-            # build id untouched, so peers need an explicit broadcast.
-            if __app__ is not None:
-                await self._publish_reload(__app__, "valves")
-            do_reset = bool(self.valves.reset_all_users_to_factory)
-            do_apply = bool(self.valves.apply_to_all_existing_users)
-            rate = max(0, int(self.valves.bulk_users_per_second or 0))
-            if not (do_reset or do_apply):
-                return
-            # Bulk op runs in the background so the admin's Save returns immediately.
-            if do_reset:
-                # Full factory reset: restore this config to defaults AND clear every user.
-                await self._reset_valves(__id__)
-                _spawn(self._reset_all(rate))
-            elif do_apply:
-                # Snapshot the configured ui first, then untick only the trigger so the
-                # configured settings are kept (new users keep getting seeded with them).
-                ui = self._ui_from_valves()
-                await self._clear_triggers(__id__)
-                _spawn(self._apply_to_all(ui, rate))
+        if __event_name__ != "function.valves_updated":
+            return
+        if (payload.get("subject") or {}).get("id") != __id__:
+            return
+        if (payload.get("data") or {}).get("scope") == "user":
+            return  # per-user valves, not the admin config
+
+        managed = await self._sync_overlay()
+        log.info("interface-defaults: managing %d extra setting(s)", managed)
+
+        do_reset = bool(self.valves.reset_all_users_to_factory)
+        do_apply = bool(self.valves.apply_defaults_to_all_users)
+        if not (do_reset or do_apply):
+            return
+
+        rate = max(0, int(self.valves.bulk_users_per_second or 0))
+        await self._clear_triggers(__id__)
+
+        if do_reset:
+            mask = _mask_from_paths(
+                list(NATIVE_INTERFACE_PATHS) + list(EXTRA_PATHS.values())
+            )
+            _spawn(self._bulk(mask, rate, "factory reset", write=False))
+            return
+
+        # Apply overwrites: the configured defaults are written into every user,
+        # so a personal choice that disagrees with one of them is replaced.
+        from open_webui.models.config import Config
+
+        defaults = await Config.get(DEFAULTS_CONFIG_KEY)
+        _spawn(
+            self._bulk(
+                defaults if isinstance(defaults, dict) else {},
+                rate,
+                "apply to all users",
+                write=True,
+            )
+        )

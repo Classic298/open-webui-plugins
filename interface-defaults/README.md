@@ -2,50 +2,34 @@
 
 <img width="6400" height="1600" alt="banner-interface-defaults" src="https://github.com/user-attachments/assets/57c46cdc-96a1-4f4e-a451-dacef6d55320" />
 
-Set the **Settings → Interface** defaults for your entire instance from one function's Valves. Only the settings you switch to **Custom** are managed, so you can enforce one option without touching anything else your users have configured. New users are seeded automatically, and two one-shot buttons let you apply your settings to everyone or factory-reset the whole instance.
+Open WebUI 0.11.1 added **Admin Panel → Settings → General → Default Interface Settings**, which sets instance-wide defaults for everything in a user's Interface settings. This function is the companion to that page. It adds the two buttons the page does not have, and defaults for the user settings the page does not reach.
 
-> [!TIP]
-> **🚀 [Jump to Setup](#setup)** — paste, enable, configure. Under a minute, no restart.
+> [!IMPORTANT]
+> Requires Open WebUI **0.11.1 or newer**. On 0.11.0 and older the native defaults page does not exist and this function has nothing to work with.
 
-<img width="2800" height="940" alt="04-functions-list" src="https://github.com/user-attachments/assets/00b08fb7-c7cc-4ab1-a317-58b504a1e621" />
+> [!IMPORTANT]
+> **Upgrading from 1.3.0?** Every valve was renamed in 1.4.0, so your saved valve configuration is dropped on upgrade and the function manages nothing until you set it again. Reconfigure the Valves, then tick **Apply Defaults to All Users**.
 
-<img width="2360" height="2480" alt="01-valves-overview" src="https://github.com/user-attachments/assets/78fdbf34-1b0b-44cb-8307-7d5db58af1b2" />
+<!-- IMAGE 4.png - Admin Panel > Settings > General with Default Interface Settings expanded -->
+![Default Interface Settings in the admin panel](4.png)
 
-<img width="2360" height="2480" alt="02-valves-quick-actions" src="https://github.com/user-attachments/assets/10e842ad-fc67-4384-ab05-5fd398ceaa9d" />
+## ✨ What it adds
 
-<img width="2360" height="2480" alt="03-valves-triggers" src="https://github.com/user-attachments/assets/de57c9e2-a267-4a6c-be26-a454964378a6" />
-
-<img width="2800" height="1280" alt="05-quick-actions-live" src="https://github.com/user-attachments/assets/f2407d82-f325-4f77-b777-33ce9ad4e84c" />
-
-<img width="2600" height="2000" alt="06-user-settings-interface" src="https://github.com/user-attachments/assets/b287a5d0-8532-45c1-8f15-6328cf3fc567" />
-
-## ✨ Features
-
-- **You manage only what you set** — a setting left on **Default** in the Valves is never written to anyone, so each user keeps their own choice for it. Flip a setting to **Custom** and it becomes instance policy, even if the value you pick happens to equal Open WebUI's factory value.
-- **Automatic seeding of new users** — every account created via signup, OAuth, LDAP, SCIM, or by an admin inherits your Custom settings.
-- **Apply to all existing users** — a one-shot button to push your Custom settings to everyone already on the instance, leaving their other settings alone.
-- **Full factory reset** — a one-shot button that clears every user's interface settings *and* puts this function's config back to Default.
-- **Standardize the text-selection quick actions** — set the floating **Ask/Explain**-style buttons instance-wide from one JSON valve (Translate, Summarize, Fix grammar, whatever fits your users). See [the tutorial below](#setting-the-quick-action-buttons-json).
-- **Native Valves UI** — booleans render as toggles, direction as a dropdown, text scale as a number. No custom UI.
-- **Nothing outside the Interface settings is ever touched.** Open WebUI keeps a user's whole settings store (system prompt, default model, audio, notification webhook, pinned models) in the same `settings.ui` object as the interface options, so both buttons operate key-by-key and leave the rest alone.
+- **Apply defaults to all existing users, overwriting them.** The native page only reaches a user for a setting they have never personally changed. Anyone who has ever opened their Interface settings has a stored value for every option, so they inherit nothing. This button writes every setting you configured into every existing user, replacing the choice they made for it. Settings you have not configured are left alone.
+- **Reset all users to factory.** Clears every interface setting from every user, including options you never configured, so the instance falls back to Open WebUI's built-ins.
+- **Defaults for settings the native page does not cover.** Notifications, keyboard shortcuts, memory, the personal system prompt, and the whole speech/voice block. These are written into the same config row the native page uses, so they behave exactly like the native defaults: applied live, inherited by new accounts, overridable per user.
 
 ## ✅ How it works
 
-Open WebUI dispatches events in-process to any `Event` function that defines an `event` handler. This plugin reacts to:
+Open WebUI keeps instance defaults in one config row (`ui.default_interface_settings`) and merges it underneath each user's own `settings.ui` on every read. A user only stores the settings they actually deviate on, so changing a default moves everyone who has not overridden it.
 
-- `user.created` → writes your Custom interface settings into the new user's `settings.ui`. Fires for signup, OAuth, LDAP, SCIM and admin-created accounts.
-- `function.valves_updated` (its own) → runs the apply / reset when you tick a trigger toggle and **Save**, unticking it first via the model layer (no re-publish, so there is no loop).
-- `function.enabled` / `system.startup.completed` (its own) → discards any trigger left ticked without running (saved while disabled, or persisted by a crash before the job started), so it cannot fire unexpectedly on a later save.
-
-Both bulk operations run in the background, so saving returns immediately even on large instances.
-
-Open WebUI stores a function's valves with `exclude_unset`, meaning only the fields you switched to **Custom** are persisted at all. This function reads exactly that set, which is why a setting on **Default** can never overwrite a user's own choice, and why writes merge into a user's existing `settings.ui` rather than replacing it.
+- **The extra valves** are merged into that same row. A valve switched back to **Default** is withdrawn from it again. Nothing else in the row is touched, so what you configure on the native page survives.
+- **Apply** merges that row into every user's `settings.ui`, so a personal choice that disagrees with one of your defaults is overwritten. Settings absent from the row are untouched, and a user who already matches is skipped without a write.
+- **Reset** removes every interface settings path this function knows about, configured or not.
+- Both buttons untick themselves and run in the background, so **Save** returns immediately. A button ticked while the function is disabled, or left ticked by a crash, is discarded on the next enable or startup rather than firing late.
 
 > [!NOTE]
-> **Apply vs reset.** *Apply* keeps your configured settings (so new users keep getting them) and only writes the ones set to Custom. *Reset* is a true factory reset: it clears every user's interface settings **and** returns this function's own config to Default, so nothing is managed afterwards.
-
-> [!IMPORTANT]
-> **`settings.ui` is not just the Interface tab.** Open WebUI's frontend persists its entire settings store under that key, so a user's system prompt, default model, audio/TTS config, notification webhook and pinned models live right next to `chatBubble` and `widescreenMode`. Both buttons read a user's full `settings.ui`, change **only the interface keys this function manages**, and write it back, so everything else is preserved unchanged (it is re-written with the same value, not deleted). A settings save a user makes in the same instant the pass touches their row can be lost, the same lost-update the built-in settings modal already has; it is bounded to that one save and self-heals on their next save.
+> `settings.ui` holds a user's whole settings store, so their direct connections, tool servers, pinned models and default model live right next to `chatBubble`. Both buttons operate on an explicit list of interface settings paths and leave everything else alone.
 
 ## Components
 
@@ -55,35 +39,54 @@ Open WebUI stores a function's valves with `exclude_unset`, meaning only the fie
 
 ## Setup
 
+<!-- IMAGE 1.png - Admin Panel > Functions with Interface Defaults installed and enabled -->
+![The function in the Functions list](1.png)
+
 1. Copy the contents of `event.py`, or click **Get** on the Community page.
 2. In Open WebUI, go to **Admin Panel → Functions → +** (Import/Create).
-3. Paste the code and click **Save**.
-4. **Enable** the function.
-5. Open its **Valves**. Click a setting from **Default** to **Custom** for each option you want to enforce, and pick its value. Leave everything else on **Default**.
-6. *(First install only)* Tick **Apply to all existing users** and **Save** to seed everyone already on the instance.
+3. Paste the code and click **Save**, then **Enable** the function.
+4. Configure your interface defaults on **Admin Panel → Settings → General → Default Interface Settings** as usual.
+5. Open this function's **Valves** for anything that page does not cover, and switch it from **Default** to **Custom**.
+6. Tick **Apply defaults to all existing users** and **Save** to bring everyone already on the instance onto those defaults.
 
-## Usage
+## Valves
 
-- **New users** — nothing to do; they're seeded automatically on registration.
-- **Enforce one option across the instance** — set just that option to **Custom**, tick **Apply to all existing users**, and **Save**. Everyone gets that option; all of their other settings stay exactly as they were.
-- **Change a setting later** — edit the Valves, then either leave it (new users get the change automatically) or tick **Apply to all existing users** + **Save** to push it to everyone.
-- **Stop managing a setting** — switch it back to **Default**. Existing users keep whatever value they currently have; it is simply no longer enforced.
-- **Start over** — tick **Reset all users to factory** + **Save**.
+<!-- IMAGE 2.png - Valves panel, top: the two one-shot buttons and the Notifications group -->
+![Valves: the one-shot buttons](2.png)
+
+<!-- IMAGE 3.png - Valves panel, scrolled: Speech & Voice and Quick Actions groups -->
+![Valves: speech, voice and quick actions](3.png)
+
+| Setting | What it does |
+|-------|--------------|
+| **Apply Defaults to All Users** | One-shot. Overwrites every existing user with the settings you configured. |
+| **Reset All Users to Factory** | One-shot. Clears every interface setting from every user. |
+| **Bulk Write Rate** | Users per second for either pass. Lower is gentler on the database, `0` runs flat out. |
+| **🔔 Notifications** | |
+| Desktop Notifications | Browser notifications for finished responses. Users still grant the browser permission themselves. |
+| Notification Sound | Sound with in-app toast notifications. |
+| Notification Sound While Tab Focused | Sound even while the tab is in the foreground. Open WebUI has no toggle for this anywhere. |
+| **💬 Interaction** | |
+| Keyboard Shortcuts | Shortcuts and the hotkey hints shown in the UI. |
+| Memory | The memory feature. |
+| System Prompt | The personal system prompt every user starts with. |
+| **🔊 Speech & Voice** | |
+| Hands-Free Voice Calls | Start voice calls in hands-free conversation mode. |
+| Auto-Send After Transcription | Send transcribed voice input as soon as recognition finishes. |
+| Auto-Read Responses Aloud | Read every response out loud automatically. |
+| Speech-to-Text Engine / Language | Recognition engine and language. |
+| Text-to-Speech Voice / Speech Playback Speed / Allow Non-Local Voices | Voice, playback rate, and whether non-local browser voices are offered. |
+| **✨ Quick Actions** | |
+| Quick Action Buttons (JSON) | Text-selection quick action buttons, for pasting a whole set at once. |
 
 > [!WARNING]
-> The two buttons act on **every** user, in chunks, in the background. *Apply* overwrites only your **Custom** settings for all existing users; *Reset* clears the interface settings this function manages instance-wide, even ones you never set. Both untick themselves before the background job starts, so an already-open form may show the toggle as still ticked until you refresh. A trigger ticked while the function is **disabled**, or left ticked by a server crash before the job ran, is discarded on the next enable or startup rather than firing late. If the server restarts **mid-pass** the remainder is not resumed; just tick the button again (repeating is safe, every write is idempotent).
+> Both buttons act on **every** user, in chunks, in the background. They untick themselves before the pass starts, so an already-open form may show a button as still ticked until you refresh. If the server restarts mid-pass the remainder is not resumed; tick the button again, repeating is safe.
 
 ## Setting the quick-action buttons (JSON)
 
-Most valves are a toggle or a number, but one is a small JSON config: **Floating Quick Action Buttons**. These are the buttons Open WebUI pops up when a user **selects text** in a message (out of the box: *Ask* and *Explain*). This valve lets you replace that set instance-wide, so you can give everyone a standard toolbox of one-click prompts.
+**Floating Quick Action Buttons** are what Open WebUI pops up when a user **selects text** in a message (out of the box: *Ask* and *Explain*). The native defaults page has a visual editor for these. This valve exists so a whole set can be pasted in one go.
 
-**How to set it**
-
-1. In the Valves, click **Floating Quick Action Buttons (JSON)** from **Default** to **Custom**.
-2. Paste a **JSON array** of button objects (below), then **Save**.
-3. Tick **Apply to all existing users** + **Save** to push it to everyone (new users get it automatically).
-
-Leave it on **Default** to keep Open WebUI's built-in Ask/Explain. Invalid JSON is ignored (nothing is pushed, so a typo can't break anyone), and it stays separate from the **Floating Quick Actions** on/off toggle, which decides whether the buttons show at all.
+Paste a **JSON array** of button objects, then **Save**. Invalid JSON is ignored, so a typo cannot break anyone.
 
 **Each button** is an object with four fields:
 
@@ -115,12 +118,4 @@ Leave it on **Default** to keep Open WebUI's built-in Ask/Explain. Invalid JSON 
 ]
 ```
 
-**Ideas for admins** — pick the ones that fit your users:
-
-- **Language teams:** *Translate* (with `input` for the target language), *Rephrase formally*, *Rephrase casually*.
-- **Writing / support:** *Fix grammar*, *Improve writing*, *Make more concise*, *Change tone to friendly*.
-- **Analysts / PMs:** *Summarize*, *Extract action items*, *List pros and cons*, *Turn into a checklist*.
-- **Engineering:** *Explain this code*, *Find bugs or edge cases*, *Add comments*, *Write a test for this*.
-- **Learning / onboarding:** *Explain simply*, *Give an example*, *Define the key terms*.
-
-A good default set is 3–5 buttons: too many and the popup gets crowded. Since a push replaces each user's whole button list, keep the config you apply as the complete set you want everyone to have.
+A good default set is 3–5 buttons: too many and the popup gets crowded. A push replaces the whole button list, so keep the config you apply as the complete set you want everyone to have.
