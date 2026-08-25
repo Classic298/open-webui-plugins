@@ -1,6 +1,6 @@
 # Vision Bridge
 
-<img width="6400" height="1600" alt="banner-vision-bridge" src="https://github.com/user-attachments/assets/cbbe17c2-a529-44db-b87c-ec9ecf62f03a" />
+<img width="6400" height="1600" alt="banner-vision-bridge" src="https://github.com/user-attachments/assets/dc53b0d3-ead0-45c4-8128-f08f6152e7ca" />
 
 Give a **text-only model the ability to work with images**, with no core changes. A filter takes the image out of the request (so the text-only model never breaks on an image it cannot accept) and leaves a marker in its place. A tool then lets the model send that image to a separate vision model on demand, asking whatever it wants, as many times as it wants. The image itself stays in the chat untouched.
 
