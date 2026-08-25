@@ -2,3 +2,7 @@
 banner_*.html
 # rendered output — regenerate with: node render.mjs
 banner-*.png
+
+# generated icons — regenerate with: python squares.py && node render_squares.mjs
+square_*.html
+square-*.png

@@ -33,7 +33,9 @@ body::after {{ content:""; position:absolute; left:0; top:0; bottom:0; width:6px
 .titlerow {{ display:flex; align-items:center; gap:22px; }}
 .glyph {{ font-size:{ts-10}px; line-height:1; filter:drop-shadow(0 6px 20px {a1}66); }}
 h1 {{ font-size:{ts}px; line-height:1.0; font-weight:800; letter-spacing:-1.6px;
-  padding:8px 10px 22px 0; margin-bottom:-22px;
+  padding:8px 10px 44px 0; margin-bottom:-44px;  /* background-clip:text paints only inside the padding box;
+     22px was shorter than the descender, so the tail of a 'g' rendered invisible. Equal negative margin keeps
+     the margin-box height unchanged, so nothing else on the banner moves. */
   background:linear-gradient(180deg,#fff,{a2}); -webkit-background-clip:text; background-clip:text; color:transparent; }}
 .tag {{ margin-top:18px; font-size:25px; line-height:1.4; color:#a6a6bd; max-width:840px; font-weight:400; }}
 .tag b {{ color:#e7e5ff; font-weight:600; }}
@@ -256,7 +258,7 @@ def m_prune(a1, a2):  # database, throttle gauge, metered trickle, progress bar,
 banners = {
   "interface-defaults": dict(a1="#7c6ef0", a2="#a78bfa", emoji="🎛️", title="Interface Defaults", title_size=86,
     badges=["Event function","Auto-seed","Bulk apply","Native Valves"],
-    tag="Set <b>Settings &rarr; Interface</b> defaults for your whole instance from one function's Valves. New users seeded automatically on signup, OAuth and SCIM.",
+    tag="Open WebUI's <b>Default Interface Settings</b> page cannot push your defaults onto <b>existing</b> users. This adds that, a full factory reset, and defaults for the settings that page cannot reach.",
     motif=m_controls("#7c6ef0","#a78bfa")),
   "inline-visualizer-v2": dict(a1="#14b8a6", a2="#7c6ef0", emoji="📊", title="Inline Visualizer", title_size=78,
     badges=["Tool + Skill","Live rendered","Chart.js · D3 · Plotly","Conversational"],
