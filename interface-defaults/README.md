@@ -1,6 +1,6 @@
 # 🎛️ Interface Defaults
 
-<img width="6400" height="1600" alt="banner-interface-defaults" src="https://github.com/user-attachments/assets/57c46cdc-96a1-4f4e-a451-dacef6d55320" />
+<img width="6400" height="1600" alt="banner-interface-defaults" src="https://github.com/user-attachments/assets/f76ab3d6-8d4b-4872-8ba5-29c8c024d970" />
 
 Open WebUI 0.11.1 added **Admin Panel → Settings → General → Default Interface Settings**, which sets instance-wide defaults for everything in a user's Interface settings. This function is the companion to that page. It adds the two buttons the page does not have, and defaults for the user settings the page does not reach.
 
