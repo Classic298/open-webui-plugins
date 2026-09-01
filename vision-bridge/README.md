@@ -2,7 +2,7 @@
 
 <img width="6400" height="1600" alt="banner-vision-bridge" src="https://github.com/user-attachments/assets/dc53b0d3-ead0-45c4-8128-f08f6152e7ca" />
 
-Give a **text-only model the ability to work with images**, with no core changes. A filter takes the image out of the request (so the text-only model never breaks on an image it cannot accept) and leaves a marker in its place. A tool then lets the model send that image to a separate vision model on demand, asking whatever it wants, as many times as it wants. The image itself stays in the chat untouched.
+Give a **text-only model the ability to work with images**, with no core changes. A filter takes the image out of the request (so the text-only model never breaks on an image it cannot accept) and leaves a marker in its place. The tools then let the model send either a chat attachment or an image file in the connected Open Terminal to a separate vision model on demand. Chat attachments stay untouched and can be inspected as many times as needed.
 
 > [!IMPORTANT]
 > **Requires Open WebUI `0.11.0` or newer.** Both parts resolve chat ids through the core helper added in that release. They will not load on older versions.
@@ -46,8 +46,16 @@ Vision Bridge keeps the image and defers the looking. The text-only model drives
 ## How it works
 
 1. **Filter** runs on the request to the text-only model. Each image part is replaced with a text marker: `[Image attached — file_id: <id>. Call analyze_image(...) to inspect it.]`, or `[Image attached. Call analyze_image(query="…") to inspect the most recent image.]` when the id is not in the request (Open WebUI inlines uploaded images before filters run). The model receives the marker, never the image. The image stays in the chat and in storage.
-2. **Model calls `analyze_image(file_id, query)`** whenever it needs to see something. The tool resolves the file id to the stored image, sends it plus the question to the configured vision model, and returns the answer as text.
-3. **Re-query any time.** Because the image is never consumed or deleted, the model can call the tool again with a new question and get a fresh, different answer about the same image.
+2. **For chat attachments, the model calls `analyze_image(file_id, query)`.** The tool resolves the file id to the stored image, sends it plus the question to the configured vision model, and returns the answer as text.
+3. **For files in Open Terminal, the model calls `analyze_terminal_image(path, query)`.** The tool reads the image from the currently connected terminal and sends it directly to the configured vision model.
+4. **The filter adds tool-selection instructions.** They tell the model which vision tool to use, require real visual verification after generating or modifying an image, and reserve `read_file` for non-image content. Inline images returned by tools are also persisted before they are replaced with markers when possible.
+5. **Re-query any time.** Because an image is not consumed by analysis, the model can call the appropriate tool again with a new question.
+
+### Images generated in Open Terminal
+
+The additional `analyze_terminal_image` tool is required for the **Open WebUI → Open Terminal** workflow. A terminal-generated image exists at a terminal path, not as a chat attachment with a file id, so `analyze_image` could not find it. Previously this made the workflow stall: the bridge returned a missing-image error and the model could not continue with visual verification.
+
+Use `analyze_image` for images attached to the conversation and `analyze_terminal_image(path="...", query="...")` for PNG, JPEG, WebP, or other image files created or stored in the connected terminal. Do not call `read_file` first for a terminal image—the new tool performs that read internally and forwards the image to the vision model. For animations or GIFs, extract representative frames and inspect them with `analyze_terminal_image` when reliable visual verification is needed.
 
 ```
 ┌──────────────┐   image stripped    ┌──────────────┐
