@@ -3,7 +3,7 @@ title: Interface Defaults
 author: Classic298
 author_url: https://github.com/Classic298
 funding_url: https://github.com/Classic298
-version: 1.4.0
+version: 1.4.1
 required_open_webui_version: 0.11.1
 description: Companion to Admin Panel → Settings → General → Default Interface Settings. Adds the two things that page has no button for - force every existing user onto the configured defaults, and factory-reset the whole instance - plus defaults for the user settings that page does not reach (notifications, keyboard shortcuts, memory, personal system prompt, speech/voice).
 """
@@ -55,8 +55,9 @@ NON_UI = TRIGGERS + ("bulk_users_per_second",)
 
 # Every settings.ui path the native Default Interface Settings editor renders.
 # A factory reset clears exactly these (plus EXTRA_PATHS below). settings.ui also
-# holds a user's direct connections, tool servers, pinned models and default
-# model, which are not interface options and are never touched.
+# holds a user's advanced model parameters, direct connections, tool servers,
+# terminal servers, pinned models and default model, which are not interface
+# options and are never touched.
 NATIVE_INTERFACE_PATHS = (
     ("autoFollowUps",),
     ("autoTags",),
@@ -74,6 +75,7 @@ NATIVE_INTERFACE_PATHS = (
     ("enableMessageQueue",),
     ("expandDetails",),
     ("floatingActionButtons",),
+    ("fontFamily",),
     ("hapticFeedback",),
     ("highContrastMode",),
     ("iframeSandboxAllowDownloads",),
@@ -262,22 +264,38 @@ class Event:
             default=False,
             title="Apply Defaults to All Users",
             description=(
-                f"**Overwrites.** Every setting configured in {ADMIN_LINK} is written "
-                "into every existing user, replacing the choice they made for it. "
-                "Settings you have not configured are left alone.\n\n"
+                "**Copies your defaults into every user, and freezes them there.**\n\n"
+                f"Every setting you configured in {ADMIN_LINK} is written into each "
+                "existing user's own settings, replacing the choice they made for it. "
+                "Settings you left on Default are not written, so if you configured "
+                "nothing this does nothing at all.\n\n"
+                "Afterwards each user *owns* those values, so a later change to your "
+                "defaults will **not** reach them: a user's own setting always wins "
+                "over a default. Use this to force a value in place once, and to pin "
+                "users to how the instance looks today.\n\n"
                 "One-shot: unticks itself on save and runs in the background."
             ),
         )
         reset_all_users_to_factory: bool = Field(
             default=False,
-            title="Reset All Users to Factory",
+            title="Reset All Users to Defaults",
             description=(
-                "**Destructive, and it ignores your configuration.** Clears *every* "
-                "interface setting from *every* user, including options you never "
-                "configured, so the whole instance falls back to Open WebUI's built-ins "
-                f"and to whatever you set in {ADMIN_LINK}.\n\n"
-                "Chats, direct connections, tool servers, pinned models and the "
-                "default model are **not** touched.\n\n"
+                "**Deletes every interface setting from every user, and it ignores "
+                "your configuration.** Every setting the admin page lists, plus the "
+                "extra ones below, is removed from each user, including the ones you "
+                "never configured.\n\n"
+                "Nothing is written in its place. Users end up owning no interface "
+                "settings at all, so they fall back to whatever you set in "
+                f"{ADMIN_LINK}, and to Open WebUI's built-ins everywhere you set "
+                "nothing. Your admin configuration itself is **not** cleared or reset "
+                "by this.\n\n"
+                "Because the users then own nothing, every later change you make to "
+                "your defaults reaches all of them. This is the opposite of *Apply "
+                "Defaults to All Users*: Apply freezes users onto a value, Reset "
+                "un-freezes them.\n\n"
+                "Not touched: chats, advanced model parameters, direct connections, "
+                "tool servers, terminal servers, pinned models and the default "
+                "model.\n\n"
                 "One-shot: unticks itself on save and runs in the background."
             ),
         )
@@ -285,8 +303,14 @@ class Event:
             default=20,
             title="Bulk Write Rate",
             description=(
-                "Users per second for either one-shot pass. Lower is gentler on the "
-                "database, `0` runs flat out.\n\n"
+                "Users per second for either one-shot pass above. Lower is gentler on "
+                "the database, `0` runs flat out.\n\n"
+                "---\n\n"
+                "The settings below are the *user* settings the admin page has no "
+                "field for. Each one you switch away from Default is added to your "
+                "instance defaults, and each one you switch back is withdrawn again. "
+                "They apply to new users on their own; the two buttons above are what "
+                "pushes them onto existing users.\n\n"
                 "---\n\n"
                 "#### 🔔 Notifications"
             ),
