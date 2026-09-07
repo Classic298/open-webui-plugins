@@ -4,7 +4,7 @@ author: Classic298
 author_url: https://github.com/Classic298
 funding_url: https://github.com/Classic298
 version: 1.4.1
-required_open_webui_version: 0.11.1
+required_open_webui_version: 0.11.3
 description: Companion to Admin Panel → Settings → General → Default Interface Settings. Adds the two things that page has no button for - force every existing user onto the configured defaults, and factory-reset the whole instance - plus defaults for the user settings that page does not reach (notifications, keyboard shortcuts, memory, personal system prompt, speech/voice).
 """
 
@@ -280,15 +280,16 @@ class Event:
             default=False,
             title="Reset All Users to Defaults",
             description=(
+                "## **DANGEROUS** \n "
                 "**Deletes every interface setting from every user, and it ignores "
                 "your configuration.** Every setting the admin page lists, plus the "
                 "extra ones below, is removed from each user, including the ones you "
                 "never configured.\n\n"
-                "Nothing is written in its place. Users end up owning no interface "
-                "settings at all, so they fall back to whatever you set in "
+                "Nothing is written in its place. **Users end up owning no interface "
+                "settings at all**, so they fall back to whatever you set in "
                 f"{ADMIN_LINK}, and to Open WebUI's built-ins everywhere you set "
                 "nothing. Your admin configuration itself is **not** cleared or reset "
-                "by this.\n\n"
+                "by this. This also includes the settings below (like System Prompt).\n\n"
                 "Because the users then own nothing, every later change you make to "
                 "your defaults reaches all of them. This is the opposite of *Apply "
                 "Defaults to All Users*: Apply freezes users onto a value, Reset "
