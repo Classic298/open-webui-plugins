@@ -664,7 +664,7 @@ class VectorDatabaseCleaner(ABC):
             return set()
         return _file_ids_from_metadatas(getattr(result, "metadatas", None))
 
-    def _present_kb_file_ids(self, kb_ids) -> dict:
+    def present_kb_file_ids(self, kb_ids) -> dict:
         """Return {kb_id: file ids found in that KB's collection}."""
         present = {}
         for kb_id in kb_ids:
@@ -672,26 +672,13 @@ class VectorDatabaseCleaner(ABC):
             present[kb_id] = self._collection_file_ids(kb_id)
         return present
 
-    def _stale_kb_chunk_file_ids(self, kb_file_ids: dict, recent_file_ids: Set[str]) -> dict:
-        """Return {kb_id: file ids} whose chunks sit in the KB collection without a knowledge_file link."""
-        stale = {}
-        for kb_id, present in self._present_kb_file_ids(kb_file_ids).items():
-            extra = present - kb_file_ids[kb_id] - recent_file_ids
-            if extra:
-                stale[kb_id] = extra
-        return stale
-
-    def count_stale_kb_chunks(self, kb_file_ids: dict, recent_file_ids: Set[str]) -> int:
-        """Count (knowledge base, file) pairs whose chunks would be deleted."""
-        return sum(len(file_ids) for file_ids in self._stale_kb_chunk_file_ids(kb_file_ids, recent_file_ids).values())
-
-    def cleanup_stale_kb_chunks(self, kb_file_ids: dict, recent_file_ids: Set[str]) -> int:
-        """Delete chunks of files a knowledge base no longer lists; returns the (KB, file) pairs cleaned."""
+    def delete_kb_file_chunks(self, kb_file_ids: dict) -> int:
+        """Delete the chunks of the given {kb_id: file ids}; returns the (KB, file) pairs deleted."""
         client = getattr(self, "vector_db_client", None)
         if client is None:
             return 0
         deleted = 0
-        for kb_id, file_ids in self._stale_kb_chunk_file_ids(kb_file_ids, recent_file_ids).items():
+        for kb_id, file_ids in kb_file_ids.items():
             for file_id in file_ids:
                 try:
                     client.delete(collection_name=kb_id, filter={"file_id": file_id})
@@ -1619,10 +1606,10 @@ class PGVectorDatabaseCleaner(VectorDatabaseCleaner):
             log.debug(f"PGVector id-only fetch failed for {collection_name}: {e}")
             return super()._collection_point_ids(collection_name)
 
-    def _present_kb_file_ids(self, kb_ids) -> dict:
+    def present_kb_file_ids(self, kb_ids) -> dict:
         """One pass over document_chunk (collection_name is unindexed); falls back per KB (e.g. pgcrypto)."""
         if not self.session or text is None:
-            return super()._present_kb_file_ids(kb_ids)
+            return super().present_kb_file_ids(kb_ids)
         try:
             rows = self.session.execute(
                 text(
@@ -1641,7 +1628,7 @@ class PGVectorDatabaseCleaner(VectorDatabaseCleaner):
             if self.session:
                 self.session.rollback()
             log.debug(f"PGVector file_id scan failed: {e}")
-            return super()._present_kb_file_ids(kb_ids)
+            return super().present_kb_file_ids(kb_ids)
 
     def _present_memory_ids_by_user(self, uids: "list") -> Optional[dict]:
         """Enumerate every user's memory point ids in one query.
@@ -3127,6 +3114,11 @@ try:
 except ImportError:
     ChannelWebhook = None
 try:
+    from open_webui.models.knowledge import KnowledgeFile
+except ImportError:
+    KnowledgeFile = None
+
+try:
     from open_webui.models.access_grants import AccessGrant
 except ImportError:
     AccessGrant = None
@@ -3277,28 +3269,21 @@ async def get_all_file_row_ids() -> Set[str]:
         return {str(fid) async for (fid,) in stream_rows(db, File.id)}
 
 
-async def get_kb_file_ids(kb_ids: Set[str]) -> Optional[dict]:
-    """Return {kb_id: file ids linked in knowledge_file} for the given KBs, None when the table is missing."""
+async def get_kb_file_ids(kb_ids: Set[str]) -> dict:
+    """Return {kb_id: file ids linked in knowledge_file} for the given KBs."""
     kb_file_ids = {kb_id: set() for kb_id in kb_ids}
 
     async def _scan():
         async with get_async_db() as db:
-            result = await db.execute(text("SELECT knowledge_id, file_id FROM knowledge_file"))
-            while rows := result.fetchmany(5000):
-                await _scan_pace(len(rows))
-                _prog_tick(len(rows))
-                for kb_id, file_id in rows:
-                    linked = kb_file_ids.get(str(kb_id))
-                    if linked is not None and file_id:
-                        linked.add(str(file_id))
+            async for _row_id, kb_id, file_id in stream_rows(
+                db, KnowledgeFile.id, KnowledgeFile.knowledge_id, KnowledgeFile.file_id
+            ):
+                _prog_tick()
+                linked = kb_file_ids.get(str(kb_id))
+                if linked is not None and file_id:
+                    linked.add(str(file_id))
 
-    try:
-        await retry_on_db_lock(_scan)
-    except _TABLE_MISSING_ERRORS as e:
-        if _is_table_missing_error(e):
-            log.debug(f"knowledge_file table does not exist, skipping stale KB chunk reconciliation: {e}")
-            return None
-        raise
+    await retry_on_db_lock(_scan)
     return kb_file_ids
 
 
@@ -3307,6 +3292,28 @@ async def get_recent_file_ids(grace_hours: int) -> Set[str]:
     grace_cutoff = int(time.time()) - grace_hours * 3600
     async with get_async_db_context() as db:
         return {str(fid) async for (fid,) in stream_rows(db, File.id, filter_clause=File.updated_at > grace_cutoff)}
+
+
+async def get_stale_kb_file_ids(vector_cleaner, active_kb_ids: Set[str], grace_hours: int) -> dict:
+    """Return {kb_id: file ids} whose chunks sit in the KB collection without a knowledge_file link.
+
+    Vector snapshot first: a file is embedded, then touched, then linked, so a
+    link missing from the later SQL snapshot is a real removal, never an add in flight.
+    """
+    if KnowledgeFile is None:
+        log.debug("knowledge_file table does not exist, skipping stale KB chunk reconciliation")
+        return {}
+    _prog_stage("Reading knowledge base embeddings", len(active_kb_ids))
+    present = await asyncio.to_thread(vector_cleaner.present_kb_file_ids, active_kb_ids)
+    _prog_stage("Scanning knowledge base links")
+    kb_file_ids = await get_kb_file_ids(active_kb_ids)
+    recent_file_ids = await get_recent_file_ids(grace_hours)
+    stale = {}
+    for kb_id, file_ids in present.items():
+        extra = file_ids - kb_file_ids[kb_id] - recent_file_ids
+        if extra:
+            stale[kb_id] = extra
+    return stale
 
 
 async def cleanup_dangling_junction_rows() -> int:
@@ -5594,14 +5601,8 @@ async def run_prune(form_data: PruneDataForm) -> dict:
             )
             stale_kb_chunks = 0
             if form_data.delete_stale_kb_chunks:
-                _prog_stage("Scanning knowledge base links")
-                kb_file_ids = await get_kb_file_ids(active_kb_ids)
-                if kb_file_ids:
-                    recent_file_ids = await get_recent_file_ids(form_data.orphan_file_grace_hours)
-                    _prog_stage("Checking knowledge base embeddings", len(kb_file_ids))
-                    stale_kb_chunks = await asyncio.to_thread(
-                        vector_cleaner.count_stale_kb_chunks, kb_file_ids, recent_file_ids
-                    )
+                stale = await get_stale_kb_file_ids(vector_cleaner, active_kb_ids, form_data.orphan_file_grace_hours)
+                stale_kb_chunks = sum(len(file_ids) for file_ids in stale.values())
             orphaned_memories = 0
             if form_data.delete_orphaned_memories:
                 memory_ids_by_user = await get_memory_ids_by_user(active_user_ids)
@@ -6143,16 +6144,11 @@ async def run_prune(form_data: PruneDataForm) -> dict:
 
         # Chunks of files removed from a knowledge base while their file row lives on.
         if form_data.delete_stale_kb_chunks:
-            _prog_stage("Scanning knowledge base links")
-            kb_file_ids = await get_kb_file_ids(active_kb_ids)
-            if kb_file_ids:
-                recent_file_ids = await get_recent_file_ids(form_data.orphan_file_grace_hours)
-                _prog_stage("Reconciling knowledge base embeddings", len(kb_file_ids))
-                deleted_stale = await asyncio.to_thread(
-                    vector_cleaner.cleanup_stale_kb_chunks, kb_file_ids, recent_file_ids
-                )
-                if deleted_stale > 0:
-                    log.info(f"Deleted stale embeddings of {deleted_stale} removed knowledge base files")
+            stale = await get_stale_kb_file_ids(vector_cleaner, active_kb_ids, form_data.orphan_file_grace_hours)
+            _prog_stage("Deleting stale knowledge base embeddings", len(stale))
+            deleted_stale = await asyncio.to_thread(vector_cleaner.delete_kb_file_chunks, stale)
+            if deleted_stale > 0:
+                log.info(f"Deleted stale embeddings of {deleted_stale} removed knowledge base files")
         else:
             log.info("Skipping stale KB chunk cleanup (disabled)")
 
