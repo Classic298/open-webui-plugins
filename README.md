@@ -8,7 +8,6 @@ Each plugin lives in its own folder with a README explaining what it does, what 
 
 ## Plugins
 
-<!-- Only plugins that have a banner get an icon; each one links to its folder. -->
 | | Plugin | Description | Components |
 |---|--------|-------------|------------|
 | <a href="inline-visualizer-v2/"><img width="1600" height="1600" alt="square-inline-visualizer-v2" src="https://github.com/user-attachments/assets/893e5b95-0551-4369-b3bf-922fffc768fb" /></a> | [Inline Visualizer v2](inline-visualizer-v2/) | 🔹 **LIVE RENDERED** 🔹 Your model draws **interactive charts, dashboards, diagrams and mini-apps right in the chat**, appearing live while the answer streams. Everything matches your light/dark theme automatically, and you can click a bar or a node and ask the model about it. Works with hand-written SVG/HTML and with Chart.js, D3, Vega-Lite, ECharts, Plotly, vis-network and Tone.js. | Tool + Skill |
@@ -16,9 +15,16 @@ Each plugin lives in its own folder with a README explaining what it does, what 
 | <a href="interface-defaults/"><img width="1600" height="1600" alt="square-interface-defaults" src="https://github.com/user-attachments/assets/b4e0e91b-d4f6-459a-b3a6-dcc90df85280" /></a> | [Interface Defaults](interface-defaults/) | Open WebUI's **Default Interface Settings** page cannot push your defaults onto **existing** users. This adds that, a full factory reset, and defaults for the settings that page cannot reach: notifications, keyboard shortcuts, memory, the personal system prompt and the speech/voice block. | Event |
 | <a href="email-composer/"><img width="1600" height="1600" alt="square-email-composer" src="https://github.com/user-attachments/assets/1c064281-0918-4253-a90a-8e11d37ea66c" /></a> | [Email Composer](email-composer/) | Draft emails with your model and get a **real email card in the chat**: edit the rich text, adjust To/CC/BCC and priority, then download it as .eml or hand it to your mail app with one click. | Tool |
 | <a href="mcp-app-bridge/"><img width="1600" height="1600" alt="square-mcp-app-bridge" src="https://github.com/user-attachments/assets/5aaa2720-5ba4-4c06-b8b3-b8b861182b55" /></a> | [MCP App Bridge](mcp-app-bridge/) | Use **MCP Apps** (SEP-1865) inside your chat: connect an MCP server and its tools **bring their own interactive interface**, rendered as an embedded panel right where the model called them. No middleware and no core changes needed. | Tool |
-| <a href="vision-bridge/"><img width="1600" height="1600" alt="square-vision-bridge" src="https://github.com/user-attachments/assets/ea2c1b67-15ca-4568-9e96-1daa9605bba2" /></a> | [Vision Bridge](vision-bridge/) | Lets a **text-only model work with images**: attach a picture and the model asks a separate vision model to look at it on demand, then comes back with new questions about the same image any time. No core changes. | Filter + Tool |
-|  | [Inline Visualizer](inline-visualizer/) | 🗄️ **LEGACY (v1)** 🗄️ The original version: interactive charts and visualizations in chat, rendered once the answer finishes, with the same theme-aware design system and Chart.js/D3 support. | Tool + Skill |
-|  | [Keep reasoning_content](keep-reasoning-content/) | Feeds a reasoning model its own prior chain of thought back, so DeepSeek / Kimi / MiMo / vLLM models stay coherent across tool calls and follow-up turns. Fixes the `reasoning_content is missing` break mid-tool-call. | Filter |
+| <a href="vision-bridge/"><img width="1600" height="1600" alt="square-vision-bridge" src="https://github.com/user-attachments/assets/ea2c1b67-15ca-4568-9e96-1daa9605bba2" /></a> | [Vision Bridge](vision-bridge/) | Lets a **text-only model work with images**: attach a picture, or let the model create one in Open Terminal, and it asks a separate vision model to look at it on demand, then comes back with new questions about the same image any time. No core changes. | Filter + Tool |
+
+## Legacy
+
+No longer maintained. They stay here for reference and may stop working with newer Open WebUI releases.
+
+| Plugin | Description | Components |
+|--------|-------------|------------|
+| [Inline Visualizer](inline-visualizer/) | The original v1: interactive charts and visualizations in chat, rendered once the answer finishes. Superseded by [Inline Visualizer v2](inline-visualizer-v2/). | Tool + Skill |
+| [Keep reasoning_content](keep-reasoning-content/) | Feeds a reasoning model its own prior chain of thought back, so DeepSeek / Kimi / MiMo / vLLM models stay coherent across tool calls and follow-up turns. Fixes the `reasoning_content is missing` break mid-tool-call. | Filter |
 
 ---
 
