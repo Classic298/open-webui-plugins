@@ -3,7 +3,7 @@ title: Prune
 author: classic298
 author_url: https://github.com/Classic298
 funding_url: https://github.com/Classic298/prune-open-webui
-version: 0.10.10
+version: 0.10.11
 required_open_webui_version: 0.10.2
 description: Automatic, throttled database and storage cleanup. Configure retention via Valves (0 = disabled); pruning runs event-driven on one worker only, slowly, so a live instance stays responsive.
 """
@@ -151,6 +151,7 @@ class PruneDataForm(BaseModel):
     delete_orphaned_prompts: bool = True
     delete_orphaned_knowledge_bases: bool = True
     delete_orphaned_kb_metadata: bool = True
+    delete_stale_kb_chunks: bool = True
     delete_orphaned_memories: bool = True
     delete_orphaned_models: bool = True
     delete_orphaned_notes: bool = True
@@ -203,6 +204,7 @@ class PrunePreviewResult(BaseModel):
     orphaned_uploads: int = 0
     orphaned_vector_collections: int = 0
     orphaned_kb_metadata: int = 0
+    stale_kb_chunks: int = 0
     orphaned_memories: int = 0
     orphaned_chat_messages: int = 0
     orphaned_automations: int = 0
@@ -231,6 +233,7 @@ class PrunePreviewResult(BaseModel):
             + self.orphaned_uploads
             + self.orphaned_vector_collections
             + self.orphaned_kb_metadata
+            + self.stale_kb_chunks
             + self.orphaned_memories
             + self.orphaned_chat_messages
             + self.orphaned_automations
@@ -285,6 +288,7 @@ class PrunePreviewResult(BaseModel):
             "Storage": {
                 "Orphaned vector collections": self.orphaned_vector_collections,
                 "Orphaned KB metadata embeddings": self.orphaned_kb_metadata,
+                "Stale knowledge base embeddings": self.stale_kb_chunks,
                 "Orphaned memories": self.orphaned_memories,
             },
             "Cache": {
@@ -472,6 +476,17 @@ def _collect_file_ids_from_texts(text_values, valid_ids, odd_ids=()):
 KNOWLEDGE_BASES_COLLECTION = "knowledge-bases"
 
 
+def _file_ids_from_metadatas(metadatas) -> Set[str]:
+    """Collect file_id values from a GetResult-style nested metadata list."""
+    file_ids: Set[str] = set()
+    for batch in metadatas or []:
+        for meta in batch if isinstance(batch, (list, tuple)) else [batch]:
+            file_id = meta.get("file_id") if isinstance(meta, dict) else None
+            if file_id:
+                file_ids.add(str(file_id))
+    return file_ids
+
+
 class VectorDatabaseCleaner(ABC):
     """
     Abstract base class for vector database cleanup operations.
@@ -631,6 +646,59 @@ class VectorDatabaseCleaner(ABC):
         for kb_id in present:
             if kb_id not in active_kb_ids:
                 yield (kb_id, KNOWLEDGE_BASES_COLLECTION)
+
+    # ── Stale file embeddings inside live knowledge base collections ──
+    #
+    # Removing a file (or a whole directory) from a knowledge base drops the
+    # knowledge_file row; released Open WebUI versions leave the chunks in the
+    # KB collection, so retrieval keeps citing files the KB no longer lists.
+    def _collection_file_ids(self, collection_name: str) -> Optional[Set[str]]:
+        """Return the file ids referenced by a collection's chunk metadata, or None if unavailable."""
+        client = getattr(self, "vector_db_client", None)
+        if client is None:
+            return None
+        try:
+            if not client.has_collection(collection_name):
+                return None
+            result = client.get(collection_name)
+        except Exception as e:
+            log.debug(f"Could not read collection {collection_name}: {e}")
+            return None
+        return _file_ids_from_metadatas(getattr(result, "metadatas", None) if result is not None else None)
+
+    def _stale_kb_chunk_file_ids(self, kb_file_ids: dict, protected_file_ids: Set[str]) -> dict:
+        """Return {kb_id: file ids} whose chunks sit in the KB collection without a knowledge_file link."""
+        stale = {}
+        for kb_id, linked_file_ids in kb_file_ids.items():
+            _prog_tick()
+            present = self._collection_file_ids(kb_id)
+            if not present:
+                continue
+            extra = {fid for fid in present if fid not in linked_file_ids and fid not in protected_file_ids}
+            if extra:
+                stale[kb_id] = extra
+        return stale
+
+    def count_stale_kb_chunks(self, kb_file_ids: dict, protected_file_ids: Set[str]) -> int:
+        """Count (knowledge base, file) pairs whose chunks would be deleted."""
+        return sum(len(file_ids) for file_ids in self._stale_kb_chunk_file_ids(kb_file_ids, protected_file_ids).values())
+
+    def cleanup_stale_kb_chunks(self, kb_file_ids: dict, protected_file_ids: Set[str]) -> int:
+        """Delete chunks of files a knowledge base no longer lists; returns the (KB, file) pairs cleaned."""
+        client = getattr(self, "vector_db_client", None)
+        if client is None:
+            return 0
+        deleted = 0
+        for kb_id, file_ids in self._stale_kb_chunk_file_ids(kb_file_ids, protected_file_ids).items():
+            for file_id in file_ids:
+                try:
+                    client.delete(collection_name=kb_id, filter={"file_id": file_id})
+                    deleted += 1
+                except Exception as e:
+                    log.debug(f"Failed to delete stale chunks of {file_id} in {kb_id}: {e}")
+        if deleted:
+            log.info(f"Deleted stale embeddings of {deleted} removed knowledge base files")
+        return deleted
 
     # ── Memories (per-user 'user-memory-{uid}' collections) ──
     #
@@ -793,6 +861,15 @@ class ChromaDatabaseCleaner(VectorDatabaseCleaner):
         self.vector_db_client = vector_db_client
         self.vector_dir = Path(cache_dir).parent / "vector_db"
         self.chroma_db_path = self.vector_dir / "chroma.sqlite3"
+
+    def _collection_file_ids(self, collection_name: str) -> Optional[Set[str]]:
+        """Metadata-only fetch; the unified client's get() would load every document too."""
+        try:
+            collection = self.vector_db_client.client.get_collection(name=collection_name)
+            return _file_ids_from_metadatas([collection.get(include=["metadatas"])["metadatas"]])
+        except Exception as e:
+            log.debug(f"ChromaDB metadata fetch failed for {collection_name}: {e}")
+            return super()._collection_file_ids(collection_name)
 
     def count_orphaned_collections(
         self,
@@ -1539,6 +1616,27 @@ class PGVectorDatabaseCleaner(VectorDatabaseCleaner):
                 self.session.rollback()
             log.debug(f"PGVector id-only fetch failed for {collection_name}: {e}")
             return super()._collection_point_ids(collection_name)
+
+    def _collection_file_ids(self, collection_name: str) -> Optional[Set[str]]:
+        """Select only the file_id metadata key; falls back to client.get() (e.g. pgcrypto)."""
+        if not self.session or text is None:
+            return super()._collection_file_ids(collection_name)
+        try:
+            rows = self.session.execute(
+                text(
+                    "SELECT DISTINCT vmetadata->>'file_id' FROM document_chunk "
+                    "WHERE collection_name = :c AND vmetadata ? 'file_id'"
+                ),
+                {"c": collection_name},
+            )
+            file_ids = {str(fid) for (fid,) in rows if fid}
+            self.session.rollback()  # read-only transaction
+            return file_ids
+        except Exception as e:
+            if self.session:
+                self.session.rollback()
+            log.debug(f"PGVector file_id fetch failed for {collection_name}: {e}")
+            return super()._collection_file_ids(collection_name)
 
     def _present_memory_ids_by_user(self, uids: "list") -> Optional[dict]:
         """Enumerate every user's memory point ids in one query.
@@ -3172,6 +3270,37 @@ async def get_all_file_row_ids() -> Set[str]:
     """
     async with get_async_db_context() as db:
         return {str(fid) async for (fid,) in stream_rows(db, File.id)}
+
+
+async def get_kb_file_ids(kb_ids: Set[str]) -> Optional[dict]:
+    """Return {kb_id: file ids linked in knowledge_file} for the given KBs, None when the table is missing."""
+    kb_file_ids = {kb_id: set() for kb_id in kb_ids}
+    try:
+        async with get_async_db() as db:
+            result = await db.execute(text("SELECT knowledge_id, file_id FROM knowledge_file"))
+            for kb_id, file_id in result.fetchall():
+                linked = kb_file_ids.get(str(kb_id))
+                if linked is not None and file_id:
+                    linked.add(str(file_id))
+    except _TABLE_MISSING_ERRORS as e:
+        if _is_table_missing_error(e):
+            return None
+        raise
+    return kb_file_ids
+
+
+async def get_recent_file_ids(form_data) -> Set[str]:
+    """File rows inside the orphan grace window (a KB upload is embedded before it is linked)."""
+    grace_cutoff = int(time.time()) - max(
+        0, int(getattr(form_data, "orphan_file_grace_hours", 0) or 0)
+    ) * 3600
+    async with get_async_db_context() as db:
+        return {
+            str(fid)
+            async for (fid, _created_at) in stream_rows(
+                db, File.id, File.created_at, filter_clause=File.created_at > grace_cutoff
+            )
+        }
 
 
 async def cleanup_dangling_junction_rows() -> int:
@@ -5457,6 +5586,15 @@ async def run_prune(form_data: PruneDataForm) -> dict:
                 if form_data.delete_orphaned_kb_metadata
                 else 0
             )
+            stale_kb_chunks = 0
+            if form_data.delete_stale_kb_chunks:
+                kb_file_ids = await get_kb_file_ids(active_kb_ids)
+                if kb_file_ids:
+                    recent_file_ids = await get_recent_file_ids(form_data)
+                    _prog_stage("Checking knowledge base embeddings", len(kb_file_ids))
+                    stale_kb_chunks = await asyncio.to_thread(
+                        vector_cleaner.count_stale_kb_chunks, kb_file_ids, recent_file_ids
+                    )
             orphaned_memories = 0
             if form_data.delete_orphaned_memories:
                 memory_ids_by_user = await get_memory_ids_by_user(active_user_ids)
@@ -5493,6 +5631,7 @@ async def run_prune(form_data: PruneDataForm) -> dict:
                 orphaned_uploads=orphaned_uploads,
                 orphaned_vector_collections=orphaned_vector_collections,
                 orphaned_kb_metadata=orphaned_kb_metadata,
+                stale_kb_chunks=stale_kb_chunks,
                 orphaned_memories=orphaned_memories,
                 audio_cache_files=audio_cache_files,
                 orphaned_chat_messages=orphaned_counts["chat_messages"],
@@ -5995,6 +6134,18 @@ async def run_prune(form_data: PruneDataForm) -> dict:
         else:
             log.info("Skipping orphaned KB metadata cleanup (disabled)")
 
+        # Chunks of files removed from a knowledge base while their file row lives on.
+        if form_data.delete_stale_kb_chunks:
+            kb_file_ids = await get_kb_file_ids(active_kb_ids)
+            if kb_file_ids:
+                recent_file_ids = await get_recent_file_ids(form_data)
+                _prog_stage("Reconciling knowledge base embeddings", len(kb_file_ids))
+                await asyncio.to_thread(
+                    vector_cleaner.cleanup_stale_kb_chunks, kb_file_ids, recent_file_ids
+                )
+        else:
+            log.info("Skipping stale KB chunk cleanup (disabled)")
+
         # Clean orphaned memories (memories deleted by active users that
         # left their vector point behind).
         if form_data.delete_orphaned_memories:
@@ -6299,6 +6450,10 @@ def _form_from_valves(v: dict) -> PruneDataForm:
         delete_orphaned_kb_metadata=v.get(
             "delete_orphaned_knowledge_base_metadata",
             v.get("delete_orphaned_kb_metadata", True),
+        ),
+        delete_stale_kb_chunks=v.get(
+            "delete_stale_knowledge_base_chunks",
+            v.get("delete_stale_kb_chunks", True),
         ),
         delete_orphaned_memories=v["delete_orphaned_memories"],
         delete_orphaned_models=v["delete_orphaned_models"],
@@ -6861,6 +7016,10 @@ class Event:
             default=True,
             description="Delete leftover search-index entries of knowledge bases that no longer exist (every knowledge base has one hidden embedding used for searching across knowledge bases).",
         )
+        delete_stale_knowledge_base_chunks: bool = Field(
+            default=True,
+            description="Delete embeddings of files that were removed from a knowledge base but whose chunks were left in its collection, so retrieval stops citing them.",
+        )
         delete_orphaned_memories: bool = Field(
             default=False,
             description="Off by default: memory reconciliation probes each user's vector collection one by one (~1 min/user without dedicated DB indexes, so 1000 users can take 1000+ min on a constrained database). When on, removes leftover embeddings whose memory entry is gone, plus the stored memories of deleted users.\n\n---\n\n#### 🧰 Orphaned: Workspace",
@@ -7189,6 +7348,8 @@ const SECTIONS = [
    tip:'A knowledge base still reachable by a living user, an existing group or a public grant is kept, with all its files and vectors.'},
   {k:'delete_orphaned_kb_metadata',t:'chk',def:true,label:'Leftover search-index entries',
    tip:'Every knowledge base has one hidden embedding used for searching across knowledge bases; this removes entries whose knowledge base is gone.'},
+  {k:'delete_stale_kb_chunks',t:'chk',def:true,label:'Stale knowledge base embeddings',
+   tip:'Files removed from a knowledge base (or a deleted folder) can leave their chunks in its collection, so answers keep citing them; this removes those chunks.'},
   {k:'delete_orphaned_memories',t:'chk',def:false,label:'Orphaned memories',
    tip:'Leftover memory embeddings whose entry was deleted, and the stored memories of deleted users.',
    warn:'Not recommended yet: memory scanning runs per-user (~1 min each without DB indexes), so ~1000 users can take 1000+ minutes on a constrained database.'},
@@ -7364,7 +7525,7 @@ const SUMMARY_KEYS={
   'Orphaned functions':'orphaned_functions','Orphaned prompts':'orphaned_prompts','Orphaned knowledge bases':'orphaned_knowledge_bases',
   'Old knowledge bases (age-based)':'old_knowledge_bases','Orphaned models':'orphaned_models','Orphaned notes':'orphaned_notes',
   'Orphaned skills':'orphaned_skills','Orphaned folders':'orphaned_folders','Orphaned vector collections':'orphaned_vector_collections',
-  'Orphaned KB metadata embeddings':'orphaned_kb_metadata','Orphaned memories':'orphaned_memories','Old audio cache files':'audio_cache_files'
+  'Orphaned KB metadata embeddings':'orphaned_kb_metadata','Stale knowledge base embeddings':'stale_kb_chunks','Orphaned memories':'orphaned_memories','Old audio cache files':'audio_cache_files'
 };
 let previewRunId=null;
 function renderPreview(result,runId){
