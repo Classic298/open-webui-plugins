@@ -3,11 +3,12 @@ title: MCP App Bridge
 author: Classic298
 author_url: https://github.com/Classic298
 funding_url: https://github.com/Classic298
-version: 0.6.0
-description: Wraps MCP server tools and renders MCP App UI resources (ui://) as Rich UI embeds using Open WebUI's existing embed system. Context-efficient discovery: paginated summary listing plus keyword search, so full schemas are only loaded for the top matching tools. Spec-compliant: honors server-declared CSP, dispatches ui/notifications/tool-result for AppBridge SDK compatibility. No middleware changes needed.
+version: 0.7.0
+description: Wraps MCP server tools and renders MCP App UI resources (ui://) as Rich UI embeds using Open WebUI's existing embed system. Context-efficient discovery: paginated summary listing plus keyword search, so full schemas are only loaded for the top matching tools. Spec-compliant: honors server-declared CSP, dispatches ui/notifications/tool-result for AppBridge SDK compatibility. Authenticates with a static bearer token or with per-user OAuth 2.1 (dynamic client registration or static credentials), reusing Open WebUI's own MCP OAuth machinery. No middleware changes needed.
 """
 
 import json
+import logging
 from typing import Literal
 from contextlib import AsyncExitStack
 
@@ -19,6 +20,13 @@ from mcp.client.streamable_http import streamablehttp_client
 
 LIST_PAGE_SIZE = 25
 SEARCH_RESULT_LIMIT = 5
+
+# Prefix for the OAuth client this tool registers with Open WebUI's client
+# manager. Kept distinct from the "mcp:<server_id>" keys used by admin-configured
+# MCP tool servers so the two never collide.
+OAUTH_CLIENT_PREFIX = "mcp:tool"
+
+log = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -174,6 +182,28 @@ async def _connect_mcp(url: str, headers: dict | None) -> tuple[AsyncExitStack, 
 
 
 # ---------------------------------------------------------------------------
+# OAuth 2.1
+# ---------------------------------------------------------------------------
+
+
+class AuthorizationRequired(Exception):
+    """No usable OAuth session for this user yet; they must sign in first."""
+
+    def __init__(self, authorize_url: str):
+        super().__init__(authorize_url)
+        self.authorize_url = authorize_url
+
+
+def _is_unauthorized(exc: Exception) -> bool:
+    """Whether an MCP transport error was an HTTP 401."""
+    status_code = getattr(getattr(exc, "response", None), "status_code", None)
+    if status_code == 401:
+        return True
+    message = str(exc).lower()
+    return "401" in message or "unauthorized" in message
+
+
+# ---------------------------------------------------------------------------
 # Tool class
 # ---------------------------------------------------------------------------
 
@@ -203,9 +233,37 @@ class Tools:
             default="",
             description="Streamable-HTTP URL of the MCP server.",
         )
+        auth_method: Literal["bearer", "oauth_2.1", "oauth_2.1_static"] = Field(
+            default="bearer",
+            description="How to authenticate: 'bearer' uses auth_token, 'oauth_2.1' signs each user in via dynamic client registration, 'oauth_2.1_static' uses the client id/secret below.",
+        )
         auth_token: str = Field(
             default="",
-            description="Bearer token for MCP server authentication (optional).",
+            description="Bearer token for MCP server authentication (auth_method 'bearer'; leave empty for an unauthenticated server).",
+        )
+        oauth_server_url: str = Field(
+            default="",
+            description="OAuth authorization server URL. Leave empty to discover it from the MCP server (RFC 9728).",
+        )
+        oauth_scope: str = Field(
+            default="",
+            description="Space or comma separated OAuth scopes. Leave empty to use the scopes the server advertises.",
+        )
+        oauth_client_id: str = Field(
+            default="",
+            description="OAuth client id (auth_method 'oauth_2.1_static' only).",
+        )
+        oauth_client_secret: str = Field(
+            default="",
+            description="OAuth client secret (auth_method 'oauth_2.1_static' only).",
+        )
+        oauth_resource_parameter: Literal["auto", "include", "omit"] = Field(
+            default="auto",
+            description="Whether to send the RFC 8707 'resource' parameter. 'auto' sends it unless the scopes already carry a resource indicator.",
+        )
+        oauth_client_info: str = Field(
+            default="",
+            description="Managed automatically: encrypted OAuth client registration. Clear this to force re-registration.",
         )
         tool_blocklist: str = Field(
             default="",
@@ -215,10 +273,186 @@ class Tools:
     def __init__(self):
         self.valves = self.Valves()
 
-    def _build_headers(self) -> dict | None:
-        if not self.valves.auth_token:
+    # --- auth ---------------------------------------------------------------
+
+    def _oauth_enabled(self) -> bool:
+        return self.valves.auth_method in ("oauth_2.1", "oauth_2.1_static")
+
+    def _oauth_client_key(self, tool_id: str) -> str:
+        return f"{OAUTH_CLIENT_PREFIX}:{tool_id}"
+
+    def _oauth_connection(self) -> dict:
+        """Connection-shaped dict so Open WebUI's OAuth option helpers apply."""
+        return {
+            "url": self.valves.mcp_server_url,
+            "type": "mcp",
+            "auth_type": self.valves.auth_method,
+            "info": {
+                "oauth_scope": self.valves.oauth_scope,
+                "oauth_resource_parameter": self.valves.oauth_resource_parameter,
+            },
+        }
+
+    def _stored_client_info(self) -> dict | None:
+        blob = (self.valves.oauth_client_info or "").strip()
+        if not blob:
             return None
-        return {"Authorization": f"Bearer {self.valves.auth_token}"}
+
+        from open_webui.utils.oauth import decrypt_data
+
+        try:
+            return decrypt_data(blob)
+        except Exception as e:
+            log.warning("Stored OAuth client info is unreadable, re-registering: %s", e)
+            return None
+
+    async def _persist_client_info(self, tool_id: str, blob: str) -> None:
+        from open_webui.models.tools import Tools as ToolsTable
+
+        valves = await ToolsTable.get_tool_valves_by_id(tool_id) or {}
+        valves["oauth_client_info"] = blob
+        await ToolsTable.update_tool_valves_by_id(tool_id, valves)
+        self.valves.oauth_client_info = blob
+
+    async def _register_oauth_client(self, request, tool_id: str) -> str:
+        """Ensure an OAuth client for this tool exists in Open WebUI's manager.
+
+        Registers once (dynamic client registration or static credentials) and
+        keeps the result in this tool's valves, so a restart does not force the
+        user through registration again.
+        """
+        from open_webui.utils.oauth import (
+            OAuthClientInformationFull,
+            apply_connection_oauth_options,
+            encrypt_data,
+            get_oauth_client_info_with_dynamic_client_registration,
+            get_oauth_client_info_with_static_credentials,
+        )
+
+        manager = request.app.state.oauth_client_manager
+        client_key = self._oauth_client_key(tool_id)
+        if await manager.get_client(client_key) is not None:
+            return client_key
+
+        client_info = self._stored_client_info()
+        if client_info is None:
+            oauth_server_url = self.valves.oauth_server_url or self.valves.mcp_server_url
+            oauth_scope = self.valves.oauth_scope or None
+
+            if self.valves.auth_method == "oauth_2.1_static":
+                if not (self.valves.oauth_client_id and self.valves.oauth_client_secret):
+                    raise RuntimeError(
+                        "auth_method 'oauth_2.1_static' needs oauth_client_id and oauth_client_secret."
+                    )
+                registration = await get_oauth_client_info_with_static_credentials(
+                    request,
+                    client_key,
+                    oauth_server_url,
+                    oauth_client_id=self.valves.oauth_client_id,
+                    oauth_client_secret=self.valves.oauth_client_secret,
+                    oauth_scope=oauth_scope,
+                )
+            else:
+                registration = await get_oauth_client_info_with_dynamic_client_registration(
+                    request,
+                    client_key,
+                    oauth_server_url,
+                    oauth_scope=oauth_scope,
+                )
+
+            client_info = registration.model_dump(mode="json")
+            await self._persist_client_info(tool_id, encrypt_data(client_info))
+
+        if self.valves.auth_method == "oauth_2.1_static" and self.valves.oauth_client_id:
+            client_info["client_id"] = self.valves.oauth_client_id
+            client_info["client_secret"] = self.valves.oauth_client_secret or None
+
+        client_info = apply_connection_oauth_options(self._oauth_connection(), client_info)
+        manager.add_client(client_key, OAuthClientInformationFull(**client_info))
+        return client_key
+
+    async def _authorize_url(self, request, client_key: str) -> str:
+        from open_webui.models.config import Config
+
+        webui_url = await Config.get("webui.url")
+        base_url = str(webui_url or request.base_url).rstrip("/")
+        return f"{base_url}/oauth/clients/{client_key}/authorize"
+
+    async def _build_headers(
+        self,
+        request=None,
+        user: dict | None = None,
+        tool_id: str | None = None,
+        force_refresh: bool = False,
+    ) -> dict | None:
+        if not self._oauth_enabled():
+            if not self.valves.auth_token:
+                return None
+            return {"Authorization": f"Bearer {self.valves.auth_token}"}
+
+        user_id = (user or {}).get("id")
+        if request is None or not user_id or not tool_id:
+            raise RuntimeError(
+                "OAuth 2.1 authentication requires this tool to run inside a user chat request."
+            )
+
+        client_key = await self._register_oauth_client(request, tool_id)
+        token = await request.app.state.oauth_client_manager.get_oauth_token(
+            user_id, client_key, force_refresh=force_refresh
+        )
+        if not token or not token.get("access_token"):
+            raise AuthorizationRequired(await self._authorize_url(request, client_key))
+        return {"Authorization": f"Bearer {token['access_token']}"}
+
+    async def _run_with_session(self, operation, request, user, tool_id):
+        """Run ``operation(session)`` against the MCP server, retrying once on 401."""
+        last_error = None
+        for attempt in (0, 1):
+            headers = await self._build_headers(
+                request=request, user=user, tool_id=tool_id, force_refresh=attempt == 1
+            )
+            retry_on_401 = attempt == 0 and self._oauth_enabled()
+
+            try:
+                stack, session = await _connect_mcp(self.valves.mcp_server_url, headers)
+            except Exception as e:
+                if retry_on_401 and _is_unauthorized(e):
+                    last_error = e
+                    continue
+                raise
+
+            try:
+                return await operation(session)
+            except Exception as e:
+                if retry_on_401 and _is_unauthorized(e):
+                    last_error = e
+                    continue
+                raise
+            finally:
+                await stack.aclose()
+
+        raise last_error if last_error else RuntimeError("MCP request failed.")
+
+    async def _authorization_message(self, error: AuthorizationRequired, event_emitter) -> str:
+        if event_emitter:
+            try:
+                await event_emitter(
+                    {
+                        "type": "notification",
+                        "data": {
+                            "type": "info",
+                            "content": "Sign in to the MCP server to continue.",
+                        },
+                    }
+                )
+            except Exception:
+                pass
+        return (
+            "Authorization required: this user has not signed in to the MCP server yet. "
+            "Show the user this sign-in link exactly as it is and ask them to open it, "
+            "then run the same call again:\n"
+            f"{error.authorize_url}"
+        )
 
     def _blocked_tools(self) -> set[str]:
         names = (name.strip() for name in self.valves.tool_blocklist.split(","))
@@ -229,7 +463,14 @@ class Tools:
         blocked = self._blocked_tools()
         return [tool for tool in result.tools if tool.name not in blocked]
 
-    async def list_mcp_tools(self, offset: int = 0) -> str:
+    async def list_mcp_tools(
+        self,
+        offset: int = 0,
+        __request__=None,
+        __user__=None,
+        __id__=None,
+        __event_emitter__=None,
+    ) -> str:
         """
         Browse the extra tools available via ``call_mcp_tool``, as a
         paginated list of names and short descriptions. Parameter
@@ -240,28 +481,38 @@ class Tools:
         :param offset: Pagination offset; pass the previous page's ``next_offset``.
         :return: JSON page of tool summaries.
         """
-        stack, session = await _connect_mcp(
-            self.valves.mcp_server_url, self._build_headers()
-        )
-        try:
+        page_offset = max(offset, 0)
+
+        async def operation(session):
             tools = await self._list_allowed_tools(session)
-            offset = max(offset, 0)
             payload = {
                 "total": len(tools),
-                "offset": offset,
+                "offset": page_offset,
                 "tools": [
                     _tool_summary(tool)
-                    for tool in tools[offset : offset + LIST_PAGE_SIZE]
+                    for tool in tools[page_offset : page_offset + LIST_PAGE_SIZE]
                 ],
                 "hint": "Call search_mcp_tools with a keyword or tool name to get a tool's parameters before calling it.",
             }
-            if offset + LIST_PAGE_SIZE < len(tools):
-                payload["next_offset"] = offset + LIST_PAGE_SIZE
+            if page_offset + LIST_PAGE_SIZE < len(tools):
+                payload["next_offset"] = page_offset + LIST_PAGE_SIZE
             return json.dumps(payload, ensure_ascii=False)
-        finally:
-            await stack.aclose()
 
-    async def search_mcp_tools(self, query: str) -> str:
+        try:
+            return await self._run_with_session(
+                operation, __request__, __user__, __id__
+            )
+        except AuthorizationRequired as e:
+            return await self._authorization_message(e, __event_emitter__)
+
+    async def search_mcp_tools(
+        self,
+        query: str,
+        __request__=None,
+        __user__=None,
+        __id__=None,
+        __event_emitter__=None,
+    ) -> str:
         """
         Find extra tools matching a keyword or name, returning their
         full parameter schemas. Use this before ``call_mcp_tool``:
@@ -270,10 +521,7 @@ class Tools:
         :param query: Keyword(s) or a tool name to search for.
         :return: JSON list of matching tools with parameters.
         """
-        stack, session = await _connect_mcp(
-            self.valves.mcp_server_url, self._build_headers()
-        )
-        try:
+        async def operation(session):
             tools = await self._list_allowed_tools(session)
             normalized_query = query.lower().strip()
             terms = normalized_query.split()
@@ -312,13 +560,22 @@ class Tools:
                     "Refine the query or use list_mcp_tools to browse."
                 )
             return json.dumps(payload, ensure_ascii=False)
-        finally:
-            await stack.aclose()
+
+        try:
+            return await self._run_with_session(
+                operation, __request__, __user__, __id__
+            )
+        except AuthorizationRequired as e:
+            return await self._authorization_message(e, __event_emitter__)
 
     async def call_mcp_tool(
         self,
         tool_name: str,
         arguments: str = "{}",
+        __request__=None,
+        __user__=None,
+        __id__=None,
+        __event_emitter__=None,
     ) -> str | tuple:
         """
         Use a tool discovered via ``search_mcp_tools`` or
@@ -340,10 +597,7 @@ class Tools:
 
         args = json.loads(arguments) if isinstance(arguments, str) else arguments
 
-        stack, session = await _connect_mcp(
-            self.valves.mcp_server_url, self._build_headers()
-        )
-        try:
+        async def operation(session):
             # --- Find the tool and check for UI resource ---
             tools_result = await session.list_tools()
             ui_resource_uri = None
@@ -483,5 +737,10 @@ class Tools:
                     f" The tool returned the following data:\n{result_text}"
                 )
             return response, result_context
-        finally:
-            await stack.aclose()
+
+        try:
+            return await self._run_with_session(
+                operation, __request__, __user__, __id__
+            )
+        except AuthorizationRequired as e:
+            return await self._authorization_message(e, __event_emitter__)
