@@ -18,7 +18,7 @@ This tutorial/handbook shows you how to actually use the tool and build beautifu
 2. Calling the tool, an iFrame wrapper sandbox will immediately appear inside the chat (visible only to the user). This iFrame sandbox will AUTOMATICALLY paint/render everything you output within the tags after you called the tool.
 3. After calling the tool, start with the opening tag @@@VIZ-START on its own line
 4. Next, after the opening tag, emit the HTML/SVG content (no <!DOCTYPE>, <html>, <head>, <body>)
-5. Once you are done writing the code for the visualization, immediately close with @@@VIZ-END on its own line
+5. Once you are done writing the code for the visualization, immediately close with @@@VIZ-END on its own line, followed by ONE EMPTY LINE. Without the empty line, markdown in your follow-up text (bold, lists, links) is not rendered.
 6. Done! The visualization is complete. Continue with any follow-up text to the user.
 
 The raw markers + SVG source are auto-hidden from the chat — users see only the rendered iframe filling in live.
@@ -38,7 +38,7 @@ As you can see, each query token attends to all key tokens simultaneously.
 """
 
 **Streaming rules:**
-- Use the delimiters EXACTLY @@@VIZ-START and @@@VIZ-END — case-sensitive, on their own lines. Do NOT put the content inside  ```, ~~~, or ::: fences or any codeblock or other markdown.
+- Use the delimiters EXACTLY @@@VIZ-START and @@@VIZ-END — case-sensitive, on their own lines, with an empty line after @@@VIZ-END before any follow-up text. Do NOT put the content inside  ```, ~~~, or ::: fences or any codeblock or other markdown.
 - Do NOT wrap in HTML tags like <viz> or <svg data-iv> — only the text markers are detected.
 - Emit **exactly ONE** @@@VIZ-START … @@@VIZ-END pair per tool call. For multiple visualizations, call the tool multiple times.
 - Structure the content as always: <style> first → visible content → <script> last.

@@ -3,7 +3,7 @@ title: Inline Visualizer
 author: Classic298
 author_url: https://github.com/Classic298
 funding_url: https://github.com/Classic298
-version: 2.2.2
+version: 2.2.3
 required_open_webui_version: 0.10.2
 description: Renders interactive HTML/SVG visualizations inline in chat. Requires "iframe Sandbox Allow Same Origin" to be enabled in Open WebUI Settings -> Interface. For design instructions, the model should call view_skill("visualize").
 """
@@ -4078,7 +4078,7 @@ class Tools:
 
         Hard output rules:
         - Use the delimiters exactly: @@@VIZ-START and @@@VIZ-END.
-        - Put each delimiter on its own line.
+        - Put each delimiter on its own line, and leave one empty line after @@@VIZ-END before any follow-up text.
         - Emit exactly one @@@VIZ-START / @@@VIZ-END pair per tool call.
         - Do not wrap the visualization in Markdown code fences.
         - Do not use ```html, ```svg, ~~~, :::, or any other fenced block.
@@ -4133,7 +4133,9 @@ return (() => {
         result_context = (
             f'Visualization wrapper "{title}" is mounted and waiting for content. '
             f"Now emit the HTML/SVG in your NEXT text response wrapped in the "
-            f"TEXT delimiters @@@VIZ-START and @@@VIZ-END, each on their own line. "
+            f"TEXT delimiters @@@VIZ-START and @@@VIZ-END, each on their own line, "
+            f"with ONE EMPTY LINE after @@@VIZ-END before any follow-up text "
+            f"(otherwise markdown in that text will not render). "
             f"The wrapper will tail your stream and render live. These are PLAIN "
             f"TEXT markers — NOT a ``` code fence, NOT HTML tags, NOT a ::: fence. "
             f"Example:\n\n"
