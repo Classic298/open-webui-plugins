@@ -34,6 +34,13 @@ def _is_image(file: dict) -> bool:
     return file.get("type") == "image" or (file.get("content_type") or "").startswith("image/")
 
 
+def _status_emitter(event_emitter):
+    async def status(text, done=False):
+        if event_emitter:
+            await event_emitter({"type": "status", "data": {"description": text, "done": done}})
+    return status
+
+
 class Tools:
     class Valves(BaseModel):
         vision_model_id: str = Field(
@@ -71,9 +78,7 @@ class Tools:
         :return: The vision model's answer as text.
         """
 
-        async def status(d, done=False):
-            if __event_emitter__:
-                await __event_emitter__({"type": "status", "data": {"description": d, "done": done}})
+        status = _status_emitter(__event_emitter__)
 
         if not self.valves.vision_model_id:
             return "Vision Bridge is not configured: set a vision_model_id in the tool valves."
@@ -119,9 +124,7 @@ class Tools:
         :return: The vision model's answer as text.
         """
 
-        async def status(d, done=False):
-            if __event_emitter__:
-                await __event_emitter__({"type": "status", "data": {"description": d, "done": done}})
+        status = _status_emitter(__event_emitter__)
 
         if not self.valves.vision_model_id:
             return "Vision Bridge is not configured: set a vision_model_id in the tool valves."
@@ -135,7 +138,7 @@ class Tools:
         # Core already resolved the terminal's tools for this request.
         read_file = ((__metadata__ or {}).get("tools") or {}).get("read_file") or {}
         if read_file.get("type") != "terminal":
-            return "No terminal is attached to this chat."
+            return "This chat has no terminal with a read_file tool."
 
         await status(f"Reading {path} from the terminal…")
         data_url, _ = await read_file["callable"](path=path)

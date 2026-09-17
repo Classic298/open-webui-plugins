@@ -28,7 +28,7 @@ Legend: 🚫 feature not in that version · ⚡ present, v2 expands it · ✅ pr
 | **Pre-styled bare HTML** | 🚫 N/A — model styles every primitive from scratch. | ✅ Drop a vanilla `<button>`, `<input>` (every common type), `<textarea>`, `<select>`, `<label>`, `<fieldset>`, `<table>`, `<details>` / `<summary>`, `<blockquote>`, `<kbd>`, `<hr>`, `<mark>`, `<dl>` (in `data-layout="grid"` and `inline` modes too) and they come out theme-matched. Adding `class` or `style` opts out — model can still go fully custom. **Smaller payloads, faster generation, consistent look across visualizations.** |
 | **Accent palette** | 🚫 N/A | ✅ `data-accent="teal"` (or `coral`, `pink`, `gray`, `blue`, `green`, `amber`, `red`) on any element recolors focus rings, checkboxes, radios, and `var(--accent)` consumers. 9 named values matching the chart ramps. Light/dark handled per-theme. |
 | **Accessibility defaults** | 🚫 N/A | ✅ `aria-invalid="true"` paints a red border on inputs/textareas/selects; `:focus-visible` draws a clear accent outline on keyboard focus only (mouse focus stays subtle). |
-| **CDN library catalog in skill** | ⚡ Chart.js, D3.js examples | ✅ Chart.js, D3.js, Vega-Lite, **ECharts**, **Plotly**, **vis-network** (standalone bundle), **Tone.js / Wavesurfer** — each with a vetted CDN URL and "when to reach for it" guidance. Allowlisted in strict CSP out of the box (scripts only: CDN stylesheets and fonts stay blocked at every level). |
+| **CDN library catalog in skill** | ⚡ Chart.js, D3.js examples | ✅ Chart.js, D3.js, Vega-Lite, **ECharts**, **Plotly**, **vis-network** (standalone bundle), **Tone.js / Wavesurfer** — each with a vetted CDN URL and "when to reach for it" guidance. Allowlisted in strict CSP out of the box (scripts only: CDN stylesheets and fonts stay blocked at every level except None). |
 | **Chart-type coverage in skill** | ⚡ Bar / line / doughnut / scatter | ✅ Adds stacked bars/areas, radar, KPI cards with sparklines, progress bars, ranking strips, KPI donuts, custom-shape charts (thermometers, batteries, fuel gauges), plus comparison cards, slider-driven explainers, tabs (with hidden-panel init guidance), step-through walkthroughs. |
 | **Stream-completion feedback** | 🚫 N/A — no stream. | ✅ Localized "Visualization ready" toast in the top-right + an optional soft chime. Fires only when a real stream was seen — reopening a finished chat stays quiet. The chime is off-switchable via the `chime` valve (off → chime code isn't shipped at all). |
 | **i18n surface** | ⚡ 1 string × 47 languages = 47 translations (download tooltip) | ✅ 8 strings × 48 languages = **384 translations** — download tooltip, loader label, "unavailable" notice (title + body), "Copied" toast, "Visualization ready" toast, "Export failed" toast, "Visualization script error" toast. Auto-detected from `<html data-iv-lang>`, `localStorage.locale`, and `navigator.language`. |
@@ -286,9 +286,9 @@ polished output — no class or inline style needed.
 | **Definition lists** | `<dl>` in three layouts — bare (stacked glossary), `data-layout="grid"` (two-column card), `data-layout="inline"` (pill row) |
 
 Adding a `class` or `style` attribute to any of these opts out of the
-default styling, except `<code>`, `<dl data-layout>` and the form control accent color, which always apply, and `<textarea>`, which only opts out via `class`. Otherwise it opts out of the
-default styling — the model can still go fully custom when the design
-calls for it.
+default styling, so the model can still go fully custom when the design
+calls for it. Exceptions: `<code>`, `<dl data-layout>` and the form control
+accent color always apply, and `<textarea>` only opts out via `class`.
 
 ---
 
@@ -340,7 +340,7 @@ When DevTools is open, the browser attempts to fetch `.map` files for loaded lib
 
 ## 🔌 Offline mode — self-hosting the CDN libraries
 
-*(new in v2.2.0)* The **Offline** security level guarantees **nothing leaves your Open WebUI host**: no CDNs and no external images (fonts and media are host-only at every level). The only request the tool itself ever makes is the same-origin chats-API read described under [Security](#-security). It exists for air-gapped networks and privacy-hardened deployments.
+*(new in v2.2.0)* The **Offline** security level guarantees **nothing leaves your Open WebUI host**: no CDNs and no external images (fonts and media are host-only at every level except None). The only request the tool itself ever makes is the same-origin chats-API read described under [Security](#-security). It exists for air-gapped networks and privacy-hardened deployments.
 
 Two ways to use it:
 

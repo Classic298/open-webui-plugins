@@ -672,7 +672,7 @@ Values are JSON-serialized. If localStorage is blocked (private browsing, sandbo
 ## CDN libraries
 
 Strict-mode CSP allowlists three CDN hosts for scripts. Any script served from them
-loads — no plugin tweaking needed, even in strict security mode. Stylesheets and fonts from CDNs are blocked at every level, so inline the CSS a library needs.
+loads — no plugin tweaking needed, even in strict security mode. Stylesheets and fonts from CDNs are blocked at every level except none, so inline the CSS a library needs.
 
 Allowed hosts:
 - cdnjs.cloudflare.com — widest coverage
