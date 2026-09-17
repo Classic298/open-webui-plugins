@@ -648,8 +648,7 @@ class VectorDatabaseCleaner(ABC):
                 yield (kb_id, KNOWLEDGE_BASES_COLLECTION)
 
     # ── Stale file embeddings inside live knowledge base collections ──
-    # Deleting a KB directory with its contents only drops the knowledge_file
-    # rows in released Open WebUI versions; the chunks stay and keep being cited.
+    # A file removed from a KB whose chunks were left behind keeps being cited.
     def _collection_file_ids(self, collection_name: str) -> Set[str]:
         """Return the file ids referenced by a collection's chunk metadata."""
         client = getattr(self, "vector_db_client", None)
@@ -7028,7 +7027,7 @@ class Event:
         )
         delete_stale_knowledge_base_chunks: bool = Field(
             default=True,
-            description="Delete embeddings a knowledge base no longer lists (deleting a folder with its contents leaves them behind in current Open WebUI releases), so retrieval stops citing those files. Files touched inside the grace window are skipped, so keep the window above 0 while files get added. Chroma and PGVector read only metadata; Milvus and Qdrant load each knowledge base's chunks during the check.",
+            description="Delete embeddings of files a knowledge base no longer lists (left behind by a deleted folder, a bug or a crashed removal), so retrieval stops citing those files. Files touched inside the grace window are skipped, so keep the window above 0 while files get added. Chroma and PGVector read only metadata; Milvus and Qdrant load each knowledge base's chunks during the check.",
         )
         delete_orphaned_memories: bool = Field(
             default=False,
@@ -7359,7 +7358,7 @@ const SECTIONS = [
   {k:'delete_orphaned_kb_metadata',t:'chk',def:true,label:'Leftover search-index entries',
    tip:'Every knowledge base has one hidden embedding used for searching across knowledge bases; this removes entries whose knowledge base is gone.'},
   {k:'delete_stale_kb_chunks',t:'chk',def:true,label:'Files with stale knowledge base embeddings',
-   tip:'Deleting a folder inside a knowledge base with its contents leaves the chunks of those files in its collection, so answers keep citing them; this removes the chunks of every file the knowledge base no longer lists. Files touched inside the grace window are skipped. On Milvus and Qdrant the check loads each knowledge base\u2019s chunks.'},
+   tip:'Chunks of files a knowledge base no longer lists (left behind by a deleted folder, a bug or a crashed removal) keep getting cited; this removes them. Files touched inside the grace window are skipped. On Milvus and Qdrant the check loads each knowledge base\u2019s chunks.'},
   {k:'delete_orphaned_memories',t:'chk',def:false,label:'Orphaned memories',
    tip:'Leftover memory embeddings whose entry was deleted, and the stored memories of deleted users.',
    warn:'Not recommended yet: memory scanning runs per-user (~1 min each without DB indexes), so ~1000 users can take 1000+ minutes on a constrained database.'},
