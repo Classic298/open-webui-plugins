@@ -288,7 +288,7 @@ class PrunePreviewResult(BaseModel):
             "Storage": {
                 "Orphaned vector collections": self.orphaned_vector_collections,
                 "Orphaned KB metadata embeddings": self.orphaned_kb_metadata,
-                "Stale knowledge base embeddings": self.stale_kb_chunks,
+                "Files with stale knowledge base embeddings": self.stale_kb_chunks,
                 "Orphaned memories": self.orphaned_memories,
             },
             "Cache": {
@@ -665,18 +665,24 @@ class VectorDatabaseCleaner(ABC):
         return _file_ids_from_metadatas(getattr(result, "metadatas", None))
 
     def present_kb_file_ids(self, kb_ids) -> dict:
-        """Return {kb_id: file ids found in that KB's collection}."""
+        """Return {kb_id: file ids found in that KB's collection}, probed like the memory collections."""
+        kb_list = list(kb_ids)
         present = {}
-        for kb_id in kb_ids:
-            _prog_tick()
-            present[kb_id] = self._collection_file_ids(kb_id)
+        workers = max(1, min(self._MEMORY_PROBE_WORKERS, len(kb_list)))
+        if workers == 1:
+            for kb_id in kb_list:
+                _prog_tick()
+                present[kb_id] = self._collection_file_ids(kb_id)
+            return present
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            for kb_id, file_ids in zip(kb_list, pool.map(self._collection_file_ids, kb_list)):
+                _prog_tick()
+                present[kb_id] = file_ids
         return present
 
     def delete_kb_file_chunks(self, kb_file_ids: dict) -> int:
         """Delete the chunks of the given {kb_id: file ids}; returns the (KB, file) pairs deleted."""
         client = getattr(self, "vector_db_client", None)
-        if client is None:
-            return 0
         deleted = 0
         for kb_id, file_ids in kb_file_ids.items():
             for file_id in file_ids:
@@ -852,6 +858,8 @@ class ChromaDatabaseCleaner(VectorDatabaseCleaner):
     def _collection_file_ids(self, collection_name: str) -> Set[str]:
         """Metadata-only fetch; the unified client's get() would load every document too."""
         try:
+            if not self.vector_db_client.has_collection(collection_name):
+                return set()
             collection = self.vector_db_client.client.get_collection(
                 name=collection_name, embedding_function=None
             )
@@ -1606,29 +1614,26 @@ class PGVectorDatabaseCleaner(VectorDatabaseCleaner):
             log.debug(f"PGVector id-only fetch failed for {collection_name}: {e}")
             return super()._collection_point_ids(collection_name)
 
-    def present_kb_file_ids(self, kb_ids) -> dict:
-        """One pass over document_chunk (collection_name is unindexed); falls back per KB (e.g. pgcrypto)."""
+    def _collection_file_ids(self, collection_name: str) -> Set[str]:
+        """Select only the file_id metadata key; falls back to client.get() (e.g. pgcrypto)."""
         if not self.session or text is None:
-            return super().present_kb_file_ids(kb_ids)
+            return super()._collection_file_ids(collection_name)
         try:
             rows = self.session.execute(
                 text(
-                    "SELECT DISTINCT collection_name, vmetadata->>'file_id' "
-                    "FROM document_chunk WHERE vmetadata ? 'file_id'"
-                )
+                    "SELECT DISTINCT vmetadata->>'file_id' FROM document_chunk "
+                    "WHERE collection_name = :c AND vmetadata ? 'file_id'"
+                ),
+                {"c": collection_name},
             )
-            present = {kb_id: set() for kb_id in kb_ids}
-            for collection_name, file_id in rows:
-                if collection_name in present and file_id:
-                    present[collection_name].add(str(file_id))
+            file_ids = {str(fid) for (fid,) in rows if fid}
             self.session.rollback()  # read-only transaction
-            _prog_tick(len(present))
-            return present
+            return file_ids
         except Exception as e:
             if self.session:
                 self.session.rollback()
-            log.debug(f"PGVector file_id scan failed: {e}")
-            return super().present_kb_file_ids(kb_ids)
+            log.debug(f"PGVector file_id fetch failed for {collection_name}: {e}")
+            return super()._collection_file_ids(collection_name)
 
     def _present_memory_ids_by_user(self, uids: "list") -> Optional[dict]:
         """Enumerate every user's memory point ids in one query.
@@ -3274,7 +3279,7 @@ async def get_kb_file_ids(kb_ids: Set[str]) -> dict:
     kb_file_ids = {kb_id: set() for kb_id in kb_ids}
 
     async def _scan():
-        async with get_async_db() as db:
+        async with get_async_db_context() as db:
             async for _row_id, kb_id, file_id in stream_rows(
                 db, KnowledgeFile.id, KnowledgeFile.knowledge_id, KnowledgeFile.file_id
             ):
@@ -7351,8 +7356,8 @@ const SECTIONS = [
    tip:'A knowledge base still reachable by a living user, an existing group or a public grant is kept, with all its files and vectors.'},
   {k:'delete_orphaned_kb_metadata',t:'chk',def:true,label:'Leftover search-index entries',
    tip:'Every knowledge base has one hidden embedding used for searching across knowledge bases; this removes entries whose knowledge base is gone.'},
-  {k:'delete_stale_kb_chunks',t:'chk',def:true,label:'Stale knowledge base embeddings',
-   tip:'Deleting a folder inside a knowledge base with its contents leaves the files\' chunks in its collection, so answers keep citing them; this removes chunks of files the knowledge base no longer lists.'},
+  {k:'delete_stale_kb_chunks',t:'chk',def:true,label:'Files with stale knowledge base embeddings',
+   tip:'Deleting a folder inside a knowledge base with its contents leaves the chunks of those files in its collection, so answers keep citing them; this removes the chunks of every file the knowledge base no longer lists.'},
   {k:'delete_orphaned_memories',t:'chk',def:false,label:'Orphaned memories',
    tip:'Leftover memory embeddings whose entry was deleted, and the stored memories of deleted users.',
    warn:'Not recommended yet: memory scanning runs per-user (~1 min each without DB indexes), so ~1000 users can take 1000+ minutes on a constrained database.'},
@@ -7528,7 +7533,7 @@ const SUMMARY_KEYS={
   'Orphaned functions':'orphaned_functions','Orphaned prompts':'orphaned_prompts','Orphaned knowledge bases':'orphaned_knowledge_bases',
   'Old knowledge bases (age-based)':'old_knowledge_bases','Orphaned models':'orphaned_models','Orphaned notes':'orphaned_notes',
   'Orphaned skills':'orphaned_skills','Orphaned folders':'orphaned_folders','Orphaned vector collections':'orphaned_vector_collections',
-  'Orphaned KB metadata embeddings':'orphaned_kb_metadata','Stale knowledge base embeddings':'stale_kb_chunks','Orphaned memories':'orphaned_memories','Old audio cache files':'audio_cache_files'
+  'Orphaned KB metadata embeddings':'orphaned_kb_metadata','Files with stale knowledge base embeddings':'stale_kb_chunks','Orphaned memories':'orphaned_memories','Old audio cache files':'audio_cache_files'
 };
 let previewRunId=null;
 function renderPreview(result,runId){

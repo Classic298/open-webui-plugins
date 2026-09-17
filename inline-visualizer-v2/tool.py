@@ -13,9 +13,8 @@ from typing import Literal
 
 # Build marker embedded into the rendered iframe so the running
 # version can be verified at runtime (search DevTools for
-# `data-iv-build` on <html>).  Bump on every protocol-level change
-# so stale cached iframes can be spotted immediately.
-_IV_BUILD = "2.2.2"
+# `data-iv-build` on <html>).  Keep in sync with the frontmatter version.
+_IV_BUILD = "2.2.3"
 
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field
@@ -1508,7 +1507,7 @@ function _ivDlMenu(ev) {
 }
 
 function _ivBaseName() {
-  var name = (document.title || 'visualization').replace(/[<>:"\\/|?*]+/g, '-').replace(/\s+/g, ' ').trim();
+  var name = (document.title || 'visualization').replace(/[<>:"\\/|?*]+/g, '-').replace(/\\s+/g, ' ').trim();
   if (!name) name = 'visualization';
   if (name.length > 200) name = name.substring(0, 200).trim();
   return name;
@@ -1809,7 +1808,7 @@ function _ivDownload() {
   if (dlWrap) document.body.appendChild(dlWrap);
   html = html.replace('html, body { overflow: hidden; }', '');
 
-  var fileName = (document.title || 'visualization').replace(/[<>:"\\/|?*]+/g, '-').replace(/\s+/g, ' ').trim();
+  var fileName = (document.title || 'visualization').replace(/[<>:"\\/|?*]+/g, '-').replace(/\\s+/g, ' ').trim();
   if (!fileName) fileName = 'visualization';
   // Cap at 200 chars to stay under the Windows 255-char filename limit.
   if (fileName.length > 200) fileName = fileName.substring(0, 200).trim();
@@ -3088,7 +3087,7 @@ STREAMING_OBSERVER_SCRIPT = """
   // as text. Re-inflate consecutive bare CSS rules so the iframe can
   // apply them. Strict pattern + ≥2 adjacent rules guards against
   // accidental matches on JSON / object literals.
-  var _ivCssRule = /[A-Za-z@.#:*\[\]>+\-,\s_~()='"&]+\{\s*(?:[A-Za-z-]+\s*:\s*[^;{}<>]+;\s*)+\}/g;
+  var _ivCssRule = /[A-Za-z@.#:*\\[\\]>+\\-,\\s_~()='"&]+\\{\\s*(?:[A-Za-z-]+\\s*:\\s*[^;{}<>]+;\\s*)+\\}/g;
   function reinflateBareCSS(text) {
     if (/<style[\\s>]/i.test(text)) return text;
     _ivCssRule.lastIndex = 0;
@@ -3110,7 +3109,7 @@ STREAMING_OBSERVER_SCRIPT = """
       var group = groups[g];
       var slice = text.substring(group.start, group.end);
       // Require multiple rules in the group
-      var braces = slice.match(/\{/g);
+      var braces = slice.match(/\\{/g);
       if (!braces || braces.length < 2) continue;
       text = text.substring(0, group.start) + '<style>' + slice + '</style>' + text.substring(group.end);
     }
@@ -3208,8 +3207,8 @@ STREAMING_OBSERVER_SCRIPT = """
       var cleaned = value
         .split(START_MARK).join('')
         .split(END_MARK).join('')
-        .replace(/<\/[a-z][a-z0-9]*\s*>/gi, '');
-      try { textNode.nodeValue = cleaned.replace(/^\s+|\s+$/g, '') ? cleaned : ''; }
+        .replace(/<\\/[a-z][a-z0-9]*\\s*>/gi, '');
+      try { textNode.nodeValue = cleaned.replace(/^\\s+|\\s+$/g, '') ? cleaned : ''; }
       catch(e) {}
     }
   }
@@ -3731,9 +3730,6 @@ STREAMING_OBSERVER_SCRIPT = """
 </script>
 """
 
-
-# Kept for backwards compatibility in case anything references the old name
-INJECTED_SCRIPTS = BODY_SCRIPTS
 
 
 # ---------------------------------------------------------------------------

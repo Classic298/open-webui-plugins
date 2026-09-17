@@ -56,7 +56,7 @@ As you can see, each query token attends to all key tokens simultaneously.
 
 These tags get theme-aware default styling **when emitted without a class or inline style attribute**.
 Other attributes (placeholder, value, id, aria-*, min/max, etc.) are fine — they don't disable the defaults.
-Adding class or style is treated as an opt-out: the default is suppressed and you can style it from scratch.
+Adding class or style is treated as an opt-out: the default is suppressed and you can style it from scratch (exceptions: <code>, <dl data-layout> and the form-control accent color always apply; <textarea> opts out via class only).
 Useful for short forms or quick UIs where the design doesn't need to deviate.
 
 Pre-styled elements included in the tool:
@@ -157,7 +157,7 @@ The tool injects theme-aware CSS variables that adapt to light/dark mode automat
 | --font-mono | Code font |
 | --radius-md / --radius-lg / --radius-xl | 8px / 12px / 16px |
 
-### Color ramps (9 ramps, auto light/dark)
+### Color ramps (9 ramps; the 50/200/600/800 stops adapt to light/dark, the 400 stop is a fixed hex for data series)
 
 Each ramp provides fill, stroke, and text variants that adapt to the theme automatically via CSS classes.
 
@@ -220,7 +220,7 @@ font-size. They track the theme automatically.
 | .node | Cursor-pointer + hover opacity on a <g> | Mark a <g> as clickable. Pair with onclick="sendPrompt(...)" so a user can drill into the topic. |
 | .arr | 1.5px stroke matching theme borders | Arrow lines and connectors. Combine with marker-end="url(#arrow)". |
 | .leader | 0.5px dashed guide line | Pulling a label to a part of an illustration when the label can't sit on top of it. |
-| .c-{ramp} | Sets fill/stroke + text colors on a whole <g> from one of the 9 color ramps | Color a node by category — apply .c-teal (etc.) to a <g> and every shape and text inside picks up the matching ramp. Un-classed, un-filled <path>/<polygon> children (pie wedges, areas) take the ramp's series color; on a classed or filled mark, fill="currentColor" opts back in. |
+| .c-{ramp} | Sets fill/stroke + text colors on a whole <g> from one of the 9 color ramps | Color a node by category — apply .c-teal (etc.) to a <g> and its direct child shapes and text pick up the matching ramp (nest deeper and you must class the inner element). Un-classed, un-filled <path>/<polygon> children (pie wedges, areas) take the ramp's series color; on a classed or filled mark, fill="currentColor" opts back in. |
 
 ### Sizing text inside boxes
 
@@ -607,7 +607,7 @@ Visualizations should feel alive and polished — not static images dumped into 
 - **Expandable sections** — use collapsible <details> elements or JS-toggled sections so users can explore at their own pace without overwhelming them upfront
 - **Hover effects** — nodes, buttons, and cards should respond to hover (the .node class adds this for SVG elements; for HTML, use :hover styles)
 - **Smooth transitions** — add transition: all 0.2s ease to interactive elements for a polished feel
-- **Active states** — when a user selects an option or clicks a tab, make the selection visually clear with the .active class or distinct styling
+- **Active states** — when a user selects an option or clicks a tab, make the selection visually clear with a class of your own (e.g. .active, it is not pre-styled) or distinct styling
 - **Progressive disclosure** — show a clean overview first, let the user click to reveal detail (tabs, accordions, or sendPrompt for model-powered drill-down)
 
 **The goal is to build something that feels like a real app component embedded in chat with reactivity, sections and extra elements** — not a screenshot. If the visualization has multiple facets, give the user controls to explore them. If it has hierarchical information, let them expand and collapse. If it has data, let them sort or filter.
@@ -616,7 +616,7 @@ Visualizations should feel alive and polished — not static images dumped into 
 
 ## openLink bridge — opening URLs from visualizations
 
-openLink(url) opens a URL in a new browser tab from within the visualization iframe. Normal <a href="..."> links inside an iframe can behave unpredictably (opening inside the iframe, being blocked by sandbox restrictions, etc.). This function handles that by opening the link in the parent window instead.
+openLink(url) opens a URL in a new browser tab from within the visualization iframe (at the strict and offline security levels the URL's query string is stripped). Normal <a href="..."> links inside an iframe can behave unpredictably (opening inside the iframe, being blocked by sandbox restrictions, etc.). This function handles that by opening the link in the parent window instead.
 
 <button onclick="openLink('https://docs.example.com/api-reference')">
   Open API docs ↗
@@ -671,8 +671,8 @@ Values are JSON-serialized. If localStorage is blocked (private browsing, sandbo
 
 ## CDN libraries
 
-Strict-mode CSP allowlists three CDN hosts. Anything served from them
-loads — no plugin tweaking needed, even in strict security mode.
+Strict-mode CSP allowlists three CDN hosts for scripts. Any script served from them
+loads — no plugin tweaking needed, even in strict security mode. Stylesheets and fonts from CDNs are blocked at every level, so inline the CSS a library needs.
 
 Allowed hosts:
 - cdnjs.cloudflare.com — widest coverage

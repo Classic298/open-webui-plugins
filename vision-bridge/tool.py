@@ -133,16 +133,12 @@ class Tools:
             return "User not found."
 
         # Core already resolved the terminal's tools for this request.
-        read_file = ((__metadata__ or {}).get("tools") or {}).get("read_file")
-        if not read_file:
+        read_file = ((__metadata__ or {}).get("tools") or {}).get("read_file") or {}
+        if read_file.get("type") != "terminal":
             return "No terminal is attached to this chat."
 
         await status(f"Reading {path} from the terminal…")
-        try:
-            data_url, _ = await read_file["callable"](path=path)
-        except Exception as e:
-            log.exception("Vision Bridge terminal read failed")
-            return f"Could not read the image from the terminal: {e}"
+        data_url, _ = await read_file["callable"](path=path)
         if not isinstance(data_url, str) or not data_url.startswith("data:image/"):
             return f"The terminal did not return an image for {path}: {str(data_url)[:300]}"
 
