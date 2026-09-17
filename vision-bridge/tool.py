@@ -18,7 +18,6 @@ from open_webui.models.chats import Chats
 from open_webui.utils.misc import get_message_list
 from open_webui.utils.chat_id import is_saved_chat_id
 from open_webui.utils.chat import generate_chat_completion
-from open_webui.utils.tools import get_terminal_tools
 from open_webui.utils.files import get_image_base64_from_file_id
 
 log = logging.getLogger(__name__)
@@ -106,7 +105,6 @@ class Tools:
         __request__: Any = None,
         __user__: Optional[dict] = None,
         __metadata__: Optional[dict] = None,
-        __oauth_token__: Optional[dict] = None,
         __event_emitter__: Optional[Callable[[dict], Any]] = None,
     ) -> str:
         """
@@ -134,17 +132,14 @@ class Tools:
         if not user:
             return "User not found."
 
-        terminal_id = (__metadata__ or {}).get("terminal_id")
-        if not terminal_id:
+        # Core already resolved the terminal's tools for this request.
+        read_file = ((__metadata__ or {}).get("tools") or {}).get("read_file")
+        if not read_file:
             return "No terminal is attached to this chat."
 
         await status(f"Reading {path} from the terminal…")
         try:
-            terminal_tools, _ = await get_terminal_tools(
-                __request__, terminal_id, user,
-                {"__user__": __user__, "__metadata__": __metadata__, "__request__": __request__, "__oauth_token__": __oauth_token__},
-            )
-            data_url, _ = await terminal_tools["read_file"]["callable"](path=path)
+            data_url, _ = await read_file["callable"](path=path)
         except Exception as e:
             log.exception("Vision Bridge terminal read failed")
             return f"Could not read the image from the terminal: {e}"

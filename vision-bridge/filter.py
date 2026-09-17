@@ -38,6 +38,10 @@ def _has_image(content: Any) -> bool:
     return isinstance(content, list) and any(isinstance(part, dict) and part.get("type") == "image_url" for part in content)
 
 
+def _has_terminal(metadata: Optional[dict]) -> bool:
+    return any(tool.get("type") == "terminal" for tool in ((metadata or {}).get("tools") or {}).values())
+
+
 def _is_image(file: dict) -> bool:
     return file.get("type") == "image" or (file.get("content_type") or "").startswith("image/")
 
@@ -124,9 +128,11 @@ class Filter:
         return body
 
     async def request(self, body: dict, __metadata__: Optional[dict] = None) -> dict:
-        """Runs after core resolved the tools: hide the terminal tool when no terminal is attached."""
-        if body.get("tools") and not (__metadata__ or {}).get("terminal_id"):
-            body["tools"] = [tool for tool in body["tools"] if (tool.get("function") or {}).get("name") != "analyze_terminal_image"]
+        """Runs after core resolved the tools: hide the terminal tool when core resolved no terminal."""
+        if body.get("tools") and not _has_terminal(__metadata__):
+            body["tools"] = [
+                tool for tool in body["tools"] if (tool.get("function") or {}).get("name") != "analyze_terminal_image"
+            ]
         return body
 
     async def _describe(self, target, user, request, chat_id, event_emitter):
