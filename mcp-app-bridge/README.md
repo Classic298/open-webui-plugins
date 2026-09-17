@@ -78,7 +78,7 @@ The bridge honors the MCP Apps spec security model:
 
 1. Click the **gear icon** next to the MCP App Bridge tool
 2. Set **mcp_server_url** to your MCP server's streamable HTTP endpoint
-3. Set **auth_token** if your server requires authentication
+3. Pick an **auth_method** (see [Authentication](#authentication)) and fill in the matching valves
 4. Set **tool_blocklist** to a comma-separated list of tool names to hide from the model and block from execution (optional)
 5. Save
 
@@ -91,6 +91,30 @@ The bridge honors the MCP Apps spec security model:
 ### 4. Use It
 
 Ask your model to interact with the MCP server. It will call `search_mcp_tools` (or `list_mcp_tools` to browse) to discover available tools, then `call_mcp_tool` to execute them. Tools with UI resources render as interactive embeds inline in the chat.
+
+## Authentication
+
+The `auth_method` valve picks how the bridge authenticates against the MCP server:
+
+| `auth_method` | What it does | Valves used |
+|---|---|---|
+| `bearer` (default) | Sends a single static token for every user. Leave `auth_token` empty for an unauthenticated server. | `auth_token` |
+| `oauth_2.1` | Each user signs in to the MCP server themselves. The bridge registers itself at the authorization server with dynamic client registration (RFC 7591). | `oauth_server_url`, `oauth_scope`, `oauth_resource_parameter` |
+| `oauth_2.1_static` | Same per-user sign-in, but with a client id and secret you registered by hand. | `oauth_client_id`, `oauth_client_secret`, `oauth_server_url`, `oauth_scope`, `oauth_resource_parameter` |
+
+### How the OAuth 2.1 flow works
+
+The bridge reuses Open WebUI's own MCP OAuth machinery, so the flow is the same one admin-configured MCP tool servers use:
+
+1. On the first tool call the bridge discovers the authorization server from the MCP server (RFC 9728 protected resource metadata, then RFC 8414 / OIDC discovery), then registers an OAuth client and stores the result in its own valves. `oauth_server_url` overrides discovery when a server does not publish metadata.
+2. The client is registered with Open WebUI's OAuth client manager under the key `mcp:tool:<tool_id>`, so its redirect URI is Open WebUI's existing callback route, `/oauth/clients/mcp:tool:<tool_id>/callback`.
+3. Users without a session get a sign-in link back from the tool (`/oauth/clients/mcp:tool:<tool_id>/authorize`) plus a toast. Opening it runs the standard authorization code flow with PKCE (S256), and the callback stores the token per user.
+4. Later calls use that user's access token, refreshed automatically when it is close to expiry. A `401` from the MCP server forces one refresh and retry before the call fails.
+
+Tokens live in Open WebUI's `oauth_session` table, one per user, so users only ever see the tools they personally authorized. The `oauth_client_info` valve holds the encrypted client registration. Clear it to force a fresh registration.
+
+> [!NOTE]
+> The OAuth client is registered in the worker process that ran the tool. On a multi-worker or multi-node deployment without sticky sessions, the sign-in link can land on a worker that has not loaded the client yet and return a 404. Retrying the tool call, then the link, resolves it.
 
 ## Testing with the Demo Server
 
