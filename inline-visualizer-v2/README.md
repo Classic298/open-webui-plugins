@@ -479,13 +479,7 @@ Open **Workspace → Tools → Inline Visualizer → gear icon**, flip the **`ch
 <details>
 <summary><b>I updated <code>tool.py</code> and nothing changed</b></summary>
 
-**BEFORE Open WebUI 0.9.5**, Open WebUI didn't hot-reload tool source codes if the tool changed. You have to paste the new contents into **Workspace → Tools → Inline Visualizer → Save** again and then restart your Open WebUI.
-
-Additionally, existing chats keep their old iframe baked into `message.embeds[]` — only newly-triggered tool calls pick up the update.
-
-On **multi-worker deployments** (`UVICORN_WORKERS > 1`), each worker process has its own in-memory tool module cache. A save updates the worker that handled the save request; every other worker keeps its old compiled module until the backend restarts. If you're on a multi-worker setup and you see stale behavior even from fresh chats, restart the backend.
-
-**Open WebUI 0.9.5 and newer is no longer affected by this. Changing the tool's source code will update it across all workers instantly now**
+Existing chats keep their old iframe baked into `message.embeds[]` — only newly-triggered tool calls pick up the update.
 </details>
 
 ---
