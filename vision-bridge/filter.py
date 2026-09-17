@@ -4,7 +4,7 @@ author: Classic298
 author_url: https://github.com/Classic298
 funding_url: https://github.com/Classic298
 version: 1.1.0
-description: Let a text-only model handle images without core changes: strips each image in the request to a file-id marker (pair with the analyze_image tool), or in describe mode swaps it for a text description.
+description: Let a text-only model handle images without core changes: strips each image in the request to a file-id marker (pair with the Vision Bridge tool for chat and Open Terminal images), or in describe mode swaps it for a text description.
 """
 
 import re
@@ -19,7 +19,7 @@ from open_webui.models.files import Files
 from open_webui.models.chats import Chats
 from open_webui.storage.provider import Storage
 from open_webui.socket.main import get_event_emitter
-from open_webui.utils.misc import get_message_list, add_or_update_system_message
+from open_webui.utils.misc import get_message_list
 from open_webui.utils.chat_id import is_saved_chat_id
 from open_webui.utils.chat import generate_chat_completion
 from open_webui.utils.files import get_image_base64_from_file_id
@@ -75,27 +75,6 @@ def _strip_images(content: list, strip_only: bool) -> str:
     return "\n\n".join([*(t for t in texts if t), *markers]).strip()
 
 
-_TOOL_POLICY = """[VISION BRIDGE TOOL POLICY]
-You are a text-only model with access to a separate vision model through Vision Bridge.
-1. IMAGES ATTACHED TO THE CONVERSATION
-An attached image is represented by a marker such as [Image attached — file_id: ...] or [Image attached. Call analyze_image(...) ...].
-Use analyze_image to inspect it, passing the exact file_id when the marker has one. Do not attempt to inspect such images yourself.
-2. VISUAL VERIFICATION
-When a task requires understanding, describing, evaluating, comparing or verifying the actual appearance of an image, you MUST use the vision tool before completing the task.
-Do not infer what an image looks like from the code that generated it, the prompt used to create it, file metadata, filenames, image dimensions or successful command execution.
-A message such as "Image file read successfully" is NOT visual analysis."""
-
-_TERMINAL_POLICY = """
-3. IMAGES STORED IN THE OPEN TERMINAL
-For an image file inside the connected Open Terminal (PNG, JPG, JPEG, WebP created by Python, Pillow, ImageMagick, ffmpeg, rendering scripts or other commands), call analyze_terminal_image(path="...", query="...").
-Do NOT call read_file on image files; analyze_terminal_image reads the file itself and sends it to the vision model. Use read_file for text, source code, JSON, logs and other non-image content.
-4. GENERATED IMAGES
-When you generate or modify an image in the terminal and its appearance matters, call analyze_terminal_image on the result, evaluate the answer, adjust the image if needed and re-analyze until the requested visual result is achieved.
-Do not stop after merely generating the file if the task requires checking its appearance.
-5. ANIMATIONS AND GIFS
-When an animation or GIF needs visual inspection, extract one or more representative frames as PNG files in the terminal and inspect those with analyze_terminal_image."""
-
-
 class Filter:
     class Valves(BaseModel):
         strip_only: bool = Field(
@@ -124,14 +103,9 @@ class Filter:
         __request__: Any = None,
         __user__: Optional[dict] = None,
         __chat_id__: Optional[str] = None,
-        __metadata__: Optional[dict] = None,
         __event_emitter__: Optional[Callable[[dict], Any]] = None,
     ) -> dict:
         messages = body.get("messages") or []
-
-        if self.valves.strip_only:
-            policy = _TOOL_POLICY + (_TERMINAL_POLICY if (__metadata__ or {}).get("terminal_id") else "")
-            body["messages"] = messages = add_or_update_system_message(policy, messages, append=True)
 
         # Describe mode covers the newest image message; the strip below catches every other image.
         if not self.valves.strip_only and self.valves.vision_model_id and (__user__ or {}).get("id"):
@@ -150,14 +124,9 @@ class Filter:
         return body
 
     async def request(self, body: dict, __metadata__: Optional[dict] = None) -> dict:
-        """Hide analyze_terminal_image from the model unless a terminal is attached to the chat."""
-        metadata = __metadata__ or {}
-        if metadata.get("terminal_id") or not body.get("tools"):
-            return body
-        body["tools"] = [
-            tool for tool in body["tools"] if (tool.get("function") or {}).get("name") != "analyze_terminal_image"
-        ]
-        (metadata.get("tools") or {}).pop("analyze_terminal_image", None)
+        """Runs after core resolved the tools: hide the terminal tool when no terminal is attached."""
+        if body.get("tools") and not (__metadata__ or {}).get("terminal_id"):
+            body["tools"] = [tool for tool in body["tools"] if (tool.get("function") or {}).get("name") != "analyze_terminal_image"]
         return body
 
     async def _describe(self, target, user, request, chat_id, event_emitter):

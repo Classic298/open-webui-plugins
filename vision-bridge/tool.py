@@ -4,7 +4,7 @@ author: Classic298
 author_url: https://github.com/Classic298
 funding_url: https://github.com/Classic298
 version: 1.1.0
-description: Let a text-only model inspect images on demand via analyze_image(file_id, query), sending them to a configured vision model; pair with the Vision Bridge filter so the image never reaches the text-only model.
+description: Let a text-only model inspect chat attachments (analyze_image) and Open Terminal files (analyze_terminal_image) on demand through a configured vision model; pair with the Vision Bridge filter so the image never reaches the text-only model.
 """
 
 import re
@@ -90,21 +90,8 @@ class Tools:
             return "No matching image found (it may have been deleted, or the file id is wrong)."
 
         await status(f"Looking at the image with {self.valves.vision_model_id}…")
-        prompt = query.strip() or self.valves.default_query
         try:
-            response = await generate_chat_completion(
-                __request__,
-                {
-                    "model": self.valves.vision_model_id,
-                    "messages": [{"role": "user", "content": [
-                        {"type": "text", "text": prompt},
-                        {"type": "image_url", "image_url": {"url": data_url}},
-                    ]}],
-                    "stream": False,
-                },
-                user=user, bypass_filter=True,
-            )
-            answer = response["choices"][0]["message"]["content"]
+            answer = await self._ask_vision(__request__, user, data_url, query)
         except Exception as e:
             log.exception("Vision Bridge analysis failed")
             return f"Vision analysis failed: {e}"
@@ -119,125 +106,76 @@ class Tools:
         __request__: Any = None,
         __user__: Optional[dict] = None,
         __metadata__: Optional[dict] = None,
+        __oauth_token__: Optional[dict] = None,
         __event_emitter__: Optional[Callable[[dict], Any]] = None,
     ) -> str:
         """
-        Inspect an image file located in the Open Terminal attached to this chat.
-        Use this for images created or stored in the terminal instead of read_file.
-        :param path: Full path to the image in the terminal, e.g. /home/user/output.png
-        :param query: The specific visual question to ask about the image.
-        :return: The vision model's analysis as text.
+        Inspect an image file in the Open Terminal attached to this chat and answer a question about it.
+
+        Use this, never read_file, for any image file in the terminal (PNG, JPEG, WebP, ...): it reads the
+        file itself and sends it to a vision model. After generating or modifying an image, call this on the
+        result to check how it actually looks before reporting; for animations, extract frames and inspect those.
+
+        :param path: Full path of the image in the terminal, e.g. /home/user/output.png
+        :param query: The specific question to answer about the image. Leave empty for a full description.
+        :return: The vision model's answer as text.
         """
 
-        async def status(description, done=False):
+        async def status(d, done=False):
             if __event_emitter__:
-                await __event_emitter__(
-                    {
-                        "type": "status",
-                        "data": {
-                            "description": description,
-                            "done": done,
-                        },
-                    }
-                )
+                await __event_emitter__({"type": "status", "data": {"description": d, "done": done}})
 
         if not self.valves.vision_model_id:
             return "Vision Bridge is not configured: set a vision_model_id in the tool valves."
 
         if not __user__ or not __user__.get("id"):
             return "No user context available."
-
-        if not __request__:
-            return "No request context available."
-
-        terminal_id = (__metadata__ or {}).get("terminal_id")
-        if not terminal_id:
-            return "No active terminal is attached to this chat."
-
         user = await Users.get_user_by_id(__user__["id"])
         if not user:
             return "User not found."
 
-        await status(f"Reading image from terminal: {path}")
+        terminal_id = (__metadata__ or {}).get("terminal_id")
+        if not terminal_id:
+            return "No terminal is attached to this chat."
 
+        await status(f"Reading {path} from the terminal…")
         try:
-            terminal_result = await get_terminal_tools(
-                __request__,
-                terminal_id,
-                user,
-                {
-                    "__user__": __user__,
-                    "__metadata__": __metadata__ or {},
-                    "__request__": __request__,
-                },
+            terminal_tools, _ = await get_terminal_tools(
+                __request__, terminal_id, user,
+                {"__user__": __user__, "__metadata__": __metadata__, "__request__": __request__, "__oauth_token__": __oauth_token__},
             )
-
-            if isinstance(terminal_result, tuple):
-                terminal_tools = terminal_result[0]
-            else:
-                terminal_tools = terminal_result
-
-            read_file_tool = terminal_tools.get("read_file")
-            if not read_file_tool:
-                return "The active terminal does not provide a read_file tool."
-
-            result = await read_file_tool["callable"](path=path)
-
-            if isinstance(result, tuple):
-                image_data = result[0]
-            else:
-                image_data = result
-
-            if isinstance(image_data, dict) and image_data.get("error"):
-                return f"Terminal read_file failed: {image_data['error']}"
-
-            if not isinstance(image_data, str) or not image_data.startswith(
-                "data:image/"
-            ):
-                return (
-                    "Terminal read_file did not return image data. "
-                    f"Received: {str(image_data)[:300]}"
-                )
-
+            data_url, _ = await terminal_tools["read_file"]["callable"](path=path)
         except Exception as e:
-            log.exception("Vision Bridge terminal image read failed")
-            return f"Could not read image from terminal: {e}"
+            log.exception("Vision Bridge terminal read failed")
+            return f"Could not read the image from the terminal: {e}"
+        if not isinstance(data_url, str) or not data_url.startswith("data:image/"):
+            return f"The terminal did not return an image for {path}: {str(data_url)[:300]}"
 
-        prompt = query.strip() or self.valves.default_query
-
-        await status(f"Looking at terminal image with {self.valves.vision_model_id}…")
-
+        await status(f"Looking at the image with {self.valves.vision_model_id}…")
         try:
-            response = await generate_chat_completion(
-                __request__,
-                {
-                    "model": self.valves.vision_model_id,
-                    "messages": [
-                        {
-                            "role": "user",
-                            "content": [
-                                {"type": "text", "text": prompt},
-                                {
-                                    "type": "image_url",
-                                    "image_url": {"url": image_data},
-                                },
-                            ],
-                        }
-                    ],
-                    "stream": False,
-                },
-                user=user,
-                bypass_filter=True,
-            )
-
-            answer = response["choices"][0]["message"]["content"]
-
+            answer = await self._ask_vision(__request__, user, data_url, query)
         except Exception as e:
-            log.exception("Vision Bridge terminal image analysis failed")
+            log.exception("Vision Bridge analysis failed")
             return f"Vision analysis failed: {e}"
 
         await status("Done", done=True)
         return answer
+
+    async def _ask_vision(self, request, user, data_url: str, query: str) -> str:
+        prompt = query.strip() or self.valves.default_query
+        response = await generate_chat_completion(
+            request,
+            {
+                "model": self.valves.vision_model_id,
+                "messages": [{"role": "user", "content": [
+                    {"type": "text", "text": prompt},
+                    {"type": "image_url", "image_url": {"url": data_url}},
+                ]}],
+                "stream": False,
+            },
+            user=user, bypass_filter=True,
+        )
+        return response["choices"][0]["message"]["content"]
 
     async def _resolve(self, file_id, user, chat_id, messages):
         if file_id:

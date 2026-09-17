@@ -5,7 +5,7 @@
 Give a **text-only model the ability to work with images**, with no core changes. A filter takes the image out of the request (so the text-only model never breaks on an image it cannot accept) and leaves a marker in its place. The tools then let the model send either a chat attachment or an image file in the connected Open Terminal to a separate vision model on demand. Chat attachments stay untouched and can be inspected as many times as needed.
 
 > [!IMPORTANT]
-> **Requires Open WebUI `0.11.0` or newer.** Both parts resolve chat ids through the core helper added in that release. They will not load on older versions.
+> **Requires Open WebUI `0.11.0` or newer.** Both parts resolve chat ids through the core helper added in that release. They will not load on older versions. Hiding the terminal tool uses the filter `request` hook added in `0.11.2`; on `0.11.0` and `0.11.1` the model always sees `analyze_terminal_image`.
 
 > [!TIP]
 > **🚀 [Jump to Setup](#setup)** — five steps, about a minute. Do them **all**, in order. Skipping one is the cause of almost every "it doesn't work" report.
@@ -48,14 +48,14 @@ Vision Bridge keeps the image and defers the looking. The text-only model drives
 1. **Filter** runs on the request to the text-only model. Each image part is replaced with a text marker: `[Image attached — file_id: <id>. Call analyze_image(...) to inspect it.]`, or `[Image attached. Call analyze_image(query="…") to inspect the most recent image.]` when the id is not in the request (Open WebUI inlines uploaded images before filters run). The model receives the marker, never the image. The image stays in the chat and in storage.
 2. **For chat attachments, the model calls `analyze_image(file_id, query)`.** The tool resolves the file id to the stored image, sends it plus the question to the configured vision model, and returns the answer as text.
 3. **For files in Open Terminal, the model calls `analyze_terminal_image(path, query)`.** The tool reads the image from the currently connected terminal and sends it directly to the configured vision model.
-4. **The filter adds tool-selection instructions.** They tell the model which vision tool to use and require real visual verification after generating or modifying an image. The terminal instructions, and the `analyze_terminal_image` tool itself, are only offered to the model when an Open Terminal is attached to the chat (native function calling only; legacy function calling always exposes the tool).
+4. **The terminal tool is only offered when a terminal is attached.** Once core has resolved the request's tools, the filter removes `analyze_terminal_image` from the list when the chat has no Open Terminal (native function calling only; legacy function calling always exposes the tool).
 5. **Re-query any time.** Because an image is not consumed by analysis, the model can call the appropriate tool again with a new question.
 
 ### Images generated in Open Terminal
 
 The additional `analyze_terminal_image` tool is required for the **Open WebUI → Open Terminal** workflow. A terminal-generated image exists at a terminal path, not as a chat attachment with a file id, so `analyze_image` could not find it. Previously this made the workflow stall: the bridge returned a missing-image error and the model could not continue with visual verification.
 
-Use `analyze_image` for images attached to the conversation and `analyze_terminal_image(path="...", query="...")` for PNG, JPEG, WebP, or other image files created or stored in the connected terminal. Do not call `read_file` first for a terminal image—the new tool performs that read internally and forwards the image to the vision model. For animations or GIFs, extract representative frames and inspect them with `analyze_terminal_image` when reliable visual verification is needed.
+`analyze_terminal_image(path="...", query="...")` reads the file through the terminal's own `read_file` and forwards it to the vision model, so the text-only model never needs `read_file` for an image. The tool description tells the model to use it instead of `read_file` and to check generated images by looking at them.
 
 ```
 ┌──────────────┐   image stripped    ┌──────────────┐
@@ -156,7 +156,7 @@ Both files have a valve called `vision_model_id`. They are **not** the same thin
 | Valve | Default | Purpose |
 |-------|---------|---------|
 | `vision_model_id` | `""` | **Required.** The vision-capable model that actually looks at images. Must match the model id in Admin Panel → Settings → Models exactly. |
-| `default_query` | "Describe this image…" | Question used when the model calls `analyze_image` without one. |
+| `default_query` | "Describe this image…" | Question used when the model calls either tool without one. |
 
 ## Two modes
 
@@ -232,6 +232,7 @@ Verified end-to-end against OpenRouter. A text-only `deepseek-v4-flash` received
 
 ## Changelog
 
+- **1.1.0** — Added `analyze_terminal_image` for images created or stored in the Open Terminal attached to the chat (contributed by [d3cker](https://github.com/d3cker)). The filter hides the terminal tool from the model when no terminal is attached (needs Open WebUI `0.11.2`).
 - **1.0.2** — Removed the `skip_if_vision_capable` valve. It was a trap: a text-only model has to be marked vision-capable for Open WebUI to accept an image upload at all, so the valve turned the filter off in precisely the setup it exists for — the image then went straight to the text-only model and came back as an upstream 500. Enable the filter per model instead of globally. README rewritten around the configuration mistakes people actually hit: which of the two `vision_model_id` valves to fill in, exact model ids including connection prefixes, vision model access for non-admin users, and an error-message-to-fix table.
 - **1.0.1** — Fixed images reaching the text-only model. Describe mode only replaced the newest image message, so images from earlier turns were sent as-is (Ollama `500 image input is not supported`, or a confident description of an image the model cannot see); anything the vision pass does not cover is now replaced by a marker in both modes. Describe mode also purges the analyzed image from the chat again: Open WebUI inlines uploaded images as data URIs before filters run, so the file id is now taken from the stored chat instead of the request url, which also restores a usable `analyze_image` hint in `strip_only` mode. The tool now recognises the `temporary:` chat id prefix added in 0.11.0, so it no longer looks a temporary chat up in the database.
 - **1.0.0** — Initial release. `strip_only` tool-driven mode: the image is kept in the chat and inspected on demand via `analyze_image`, so it can be re-queried with new questions. Describe-and-replace mode is available for models that cannot tool-call.
