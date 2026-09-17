@@ -2107,7 +2107,7 @@ STREAMING_OBSERVER_SCRIPT = """
   // @@@VIZ-START with no content yet doesn't match an empty capture
   // and trip finalize("") via the idle timer.
   var BLOCK_RE = /@@@VIZ-START\\n?([\\s\\S]+?)(?:\\n?@@@VIZ-END|$)/g;
-  // The hide walker scans reasoning only when the block itself lives there (lax match).
+  // Reasoning is left alone unless the block itself lives there (lax match).
   var _ivHideScansReasoning = false;
 
   // The DOM walker only skips tool/code (and reasoning, strict) detail
@@ -2258,6 +2258,16 @@ STREAMING_OBSERVER_SCRIPT = """
   // skipReasoning=false (lax): scans reasoning. Used as fallback for
   // providers that wrap the actual visible response inside
   // <details type="reasoning"> (Bedrock-hosted Haiku 4.5).
+  // Mirrors the reasoning rejects of getSearchableText's strict pass.
+  function _ivIsReasoningNode(el) {
+    if (el.tagName === 'DETAILS' && el.getAttribute &&
+        el.getAttribute('type') === 'reasoning') return true;
+    var id = el.id || '';
+    if (id.indexOf('-detail-') !== -1 &&
+        id.indexOf('tool') === -1 && id.indexOf('code') === -1) return true;
+    return /-\\d+-d(-|$)/.test(id);
+  }
+
   function getSearchableText(msg, skipReasoning) {
     var out = '';
     try {
@@ -2506,24 +2516,20 @@ STREAMING_OBSERVER_SCRIPT = """
                       detailsType === 'code_execution' || detailsType === 'code_interpreter') {
                     return NodeFilter.FILTER_REJECT;
                   }
-                  if (!_ivHideScansReasoning && detailsType === 'reasoning') {
-                    return NodeFilter.FILTER_REJECT;
-                  }
+                }
+                if (!_ivHideScansReasoning && _ivIsReasoningNode(ancestor)) {
+                  return NodeFilter.FILTER_REJECT;
                 }
                 // '-detail-' + tool/code covers both detail-id families
                 // (grouped markdown path and output-items path).
                 var ancestorId = ancestor.id || '';
                 if (ancestorId && ancestorId.indexOf('-detail-') !== -1 &&
-                    (!_ivHideScansReasoning ||
-                     ancestorId.indexOf('tool') !== -1 ||
+                    (ancestorId.indexOf('tool') !== -1 ||
                      ancestorId.indexOf('code') !== -1)) {
                   return NodeFilter.FILTER_REJECT;
                 }
                 // Content-path tool-call roots ('-N-tc') carry no 'tool' substring.
                 if (ancestorId && /-\\d+-tc$/.test(ancestorId)) {
-                  return NodeFilter.FILTER_REJECT;
-                }
-                if (!_ivHideScansReasoning && ancestorId && /-\\d+-d(-|$)/.test(ancestorId)) {
                   return NodeFilter.FILTER_REJECT;
                 }
               }
@@ -3210,6 +3216,9 @@ STREAMING_OBSERVER_SCRIPT = """
           }
           if (ancestor.getAttribute &&
               ancestor.getAttribute('data-iv-chat-hidden') === '1') {
+            isProtected = true; break;
+          }
+          if (!_ivHideScansReasoning && _ivIsReasoningNode(ancestor)) {
             isProtected = true; break;
           }
         }
