@@ -9,6 +9,7 @@ description: Renders interactive HTML/SVG visualizations inline in chat. Require
 """
 
 import re
+import asyncio
 from typing import Literal
 
 # Build marker embedded into the rendered iframe so the running
@@ -2106,6 +2107,8 @@ STREAMING_OBSERVER_SCRIPT = """
   // @@@VIZ-START with no content yet doesn't match an empty capture
   // and trip finalize("") via the idle timer.
   var BLOCK_RE = /@@@VIZ-START\\n?([\\s\\S]+?)(?:\\n?@@@VIZ-END|$)/g;
+  // The hide walker scans reasoning only when the block itself lives there (lax match).
+  var _ivHideScansReasoning = false;
 
   // The DOM walker only skips tool/code (and reasoning, strict) detail
   // blocks once Open WebUI has tokenised them, which needs the closing
@@ -2342,8 +2345,10 @@ STREAMING_OBSERVER_SCRIPT = """
     var msg = findMyMessage();
     if (!msg) return null;
     var strict = _ivMatchBlock(getSearchableText(msg, true), idx);
-    if (strict !== null) return strict;
-    return _ivMatchBlock(getSearchableText(msg, false), idx);
+    if (strict !== null) { _ivHideScansReasoning = false; return strict; }
+    var lax = _ivMatchBlock(getSearchableText(msg, false), idx);
+    if (lax !== null) _ivHideScansReasoning = true;
+    return lax;
   }
 
   function readSource() {
@@ -2501,17 +2506,24 @@ STREAMING_OBSERVER_SCRIPT = """
                       detailsType === 'code_execution' || detailsType === 'code_interpreter') {
                     return NodeFilter.FILTER_REJECT;
                   }
+                  if (!_ivHideScansReasoning && detailsType === 'reasoning') {
+                    return NodeFilter.FILTER_REJECT;
+                  }
                 }
                 // '-detail-' + tool/code covers both detail-id families
                 // (grouped markdown path and output-items path).
                 var ancestorId = ancestor.id || '';
                 if (ancestorId && ancestorId.indexOf('-detail-') !== -1 &&
-                    (ancestorId.indexOf('tool') !== -1 ||
+                    (!_ivHideScansReasoning ||
+                     ancestorId.indexOf('tool') !== -1 ||
                      ancestorId.indexOf('code') !== -1)) {
                   return NodeFilter.FILTER_REJECT;
                 }
                 // Content-path tool-call roots ('-N-tc') carry no 'tool' substring.
                 if (ancestorId && /-\\d+-tc$/.test(ancestorId)) {
+                  return NodeFilter.FILTER_REJECT;
+                }
+                if (!_ivHideScansReasoning && ancestorId && /-\\d+-d(-|$)/.test(ancestorId)) {
                   return NodeFilter.FILTER_REJECT;
                 }
               }
@@ -3731,7 +3743,6 @@ STREAMING_OBSERVER_SCRIPT = """
 """
 
 
-
 # ---------------------------------------------------------------------------
 # srcdoc safety guard
 #
@@ -4089,7 +4100,7 @@ class Tools:
         lang = "en"
         if __event_call__:
             try:
-                lang_result = await __event_call__(
+                lang_result = await asyncio.wait_for(__event_call__(
                     {
                         "type": "execute",
                         "data": {"code": """
@@ -4110,7 +4121,7 @@ return (() => {
 })();
 """},
                     }
-                )
+                ), timeout=5)
                 if isinstance(lang_result, str) and lang_result.strip():
                     lang = lang_result.strip()
             except Exception:
