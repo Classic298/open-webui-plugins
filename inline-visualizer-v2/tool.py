@@ -3,19 +3,19 @@ title: Inline Visualizer
 author: Classic298
 author_url: https://github.com/Classic298
 funding_url: https://github.com/Classic298
-version: 2.2.2
+version: 2.2.3
 required_open_webui_version: 0.10.2
 description: Renders interactive HTML/SVG visualizations inline in chat. Requires "iframe Sandbox Allow Same Origin" to be enabled in Open WebUI Settings -> Interface. For design instructions, the model should call view_skill("visualize").
 """
 
 import re
+import asyncio
 from typing import Literal
 
 # Build marker embedded into the rendered iframe so the running
 # version can be verified at runtime (search DevTools for
-# `data-iv-build` on <html>).  Bump on every protocol-level change
-# so stale cached iframes can be spotted immediately.
-_IV_BUILD = "2.2.2"
+# `data-iv-build` on <html>).  Keep in sync with the frontmatter version.
+_IV_BUILD = "2.2.3"
 
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field
@@ -1508,7 +1508,7 @@ function _ivDlMenu(ev) {
 }
 
 function _ivBaseName() {
-  var name = (document.title || 'visualization').replace(/[<>:"\\/|?*]+/g, '-').replace(/\s+/g, ' ').trim();
+  var name = (document.title || 'visualization').replace(/[<>:"\\/|?*]+/g, '-').replace(/\\s+/g, ' ').trim();
   if (!name) name = 'visualization';
   if (name.length > 200) name = name.substring(0, 200).trim();
   return name;
@@ -1809,7 +1809,7 @@ function _ivDownload() {
   if (dlWrap) document.body.appendChild(dlWrap);
   html = html.replace('html, body { overflow: hidden; }', '');
 
-  var fileName = (document.title || 'visualization').replace(/[<>:"\\/|?*]+/g, '-').replace(/\s+/g, ' ').trim();
+  var fileName = (document.title || 'visualization').replace(/[<>:"\\/|?*]+/g, '-').replace(/\\s+/g, ' ').trim();
   if (!fileName) fileName = 'visualization';
   // Cap at 200 chars to stay under the Windows 255-char filename limit.
   if (fileName.length > 200) fileName = fileName.substring(0, 200).trim();
@@ -2107,6 +2107,8 @@ STREAMING_OBSERVER_SCRIPT = """
   // @@@VIZ-START with no content yet doesn't match an empty capture
   // and trip finalize("") via the idle timer.
   var BLOCK_RE = /@@@VIZ-START\\n?([\\s\\S]+?)(?:\\n?@@@VIZ-END|$)/g;
+  // Reasoning is left alone unless the block itself lives there (lax match).
+  var _ivHideScansReasoning = false;
 
   // The DOM walker only skips tool/code (and reasoning, strict) detail
   // blocks once Open WebUI has tokenised them, which needs the closing
@@ -2256,6 +2258,16 @@ STREAMING_OBSERVER_SCRIPT = """
   // skipReasoning=false (lax): scans reasoning. Used as fallback for
   // providers that wrap the actual visible response inside
   // <details type="reasoning"> (Bedrock-hosted Haiku 4.5).
+  // Mirrors the reasoning rejects of getSearchableText's strict pass.
+  function _ivIsReasoningNode(el) {
+    if (el.tagName === 'DETAILS' && el.getAttribute &&
+        el.getAttribute('type') === 'reasoning') return true;
+    var id = el.id || '';
+    if (id.indexOf('-detail-') !== -1 &&
+        id.indexOf('tool') === -1 && id.indexOf('code') === -1) return true;
+    return /-\\d+-d(-|$)/.test(id);
+  }
+
   function getSearchableText(msg, skipReasoning) {
     var out = '';
     try {
@@ -2343,8 +2355,10 @@ STREAMING_OBSERVER_SCRIPT = """
     var msg = findMyMessage();
     if (!msg) return null;
     var strict = _ivMatchBlock(getSearchableText(msg, true), idx);
-    if (strict !== null) return strict;
-    return _ivMatchBlock(getSearchableText(msg, false), idx);
+    if (strict !== null) { _ivHideScansReasoning = false; return strict; }
+    var lax = _ivMatchBlock(getSearchableText(msg, false), idx);
+    if (lax !== null) _ivHideScansReasoning = true;
+    return lax;
   }
 
   function readSource() {
@@ -2502,6 +2516,9 @@ STREAMING_OBSERVER_SCRIPT = """
                       detailsType === 'code_execution' || detailsType === 'code_interpreter') {
                     return NodeFilter.FILTER_REJECT;
                   }
+                }
+                if (!_ivHideScansReasoning && _ivIsReasoningNode(ancestor)) {
+                  return NodeFilter.FILTER_REJECT;
                 }
                 // '-detail-' + tool/code covers both detail-id families
                 // (grouped markdown path and output-items path).
@@ -3088,7 +3105,7 @@ STREAMING_OBSERVER_SCRIPT = """
   // as text. Re-inflate consecutive bare CSS rules so the iframe can
   // apply them. Strict pattern + ≥2 adjacent rules guards against
   // accidental matches on JSON / object literals.
-  var _ivCssRule = /[A-Za-z@.#:*\[\]>+\-,\s_~()='"&]+\{\s*(?:[A-Za-z-]+\s*:\s*[^;{}<>]+;\s*)+\}/g;
+  var _ivCssRule = /[A-Za-z@.#:*\\[\\]>+\\-,\\s_~()='"&]+\\{\\s*(?:[A-Za-z-]+\\s*:\\s*[^;{}<>]+;\\s*)+\\}/g;
   function reinflateBareCSS(text) {
     if (/<style[\\s>]/i.test(text)) return text;
     _ivCssRule.lastIndex = 0;
@@ -3110,7 +3127,7 @@ STREAMING_OBSERVER_SCRIPT = """
       var group = groups[g];
       var slice = text.substring(group.start, group.end);
       // Require multiple rules in the group
-      var braces = slice.match(/\{/g);
+      var braces = slice.match(/\\{/g);
       if (!braces || braces.length < 2) continue;
       text = text.substring(0, group.start) + '<style>' + slice + '</style>' + text.substring(group.end);
     }
@@ -3201,6 +3218,9 @@ STREAMING_OBSERVER_SCRIPT = """
               ancestor.getAttribute('data-iv-chat-hidden') === '1') {
             isProtected = true; break;
           }
+          if (!_ivHideScansReasoning && _ivIsReasoningNode(ancestor)) {
+            isProtected = true; break;
+          }
         }
         ancestor = ancestor.parentNode;
       }
@@ -3208,8 +3228,8 @@ STREAMING_OBSERVER_SCRIPT = """
       var cleaned = value
         .split(START_MARK).join('')
         .split(END_MARK).join('')
-        .replace(/<\/[a-z][a-z0-9]*\s*>/gi, '');
-      try { textNode.nodeValue = cleaned.replace(/^\s+|\s+$/g, '') ? cleaned : ''; }
+        .replace(/<\\/[a-z][a-z0-9]*\\s*>/gi, '');
+      try { textNode.nodeValue = cleaned.replace(/^\\s+|\\s+$/g, '') ? cleaned : ''; }
       catch(e) {}
     }
   }
@@ -3732,10 +3752,6 @@ STREAMING_OBSERVER_SCRIPT = """
 """
 
 
-# Kept for backwards compatibility in case anything references the old name
-INJECTED_SCRIPTS = BODY_SCRIPTS
-
-
 # ---------------------------------------------------------------------------
 # srcdoc safety guard
 #
@@ -4078,7 +4094,7 @@ class Tools:
 
         Hard output rules:
         - Use the delimiters exactly: @@@VIZ-START and @@@VIZ-END.
-        - Put each delimiter on its own line.
+        - Put each delimiter on its own line, and leave one empty line after @@@VIZ-END before any follow-up text.
         - Emit exactly one @@@VIZ-START / @@@VIZ-END pair per tool call.
         - Do not wrap the visualization in Markdown code fences.
         - Do not use ```html, ```svg, ~~~, :::, or any other fenced block.
@@ -4093,7 +4109,7 @@ class Tools:
         lang = "en"
         if __event_call__:
             try:
-                lang_result = await __event_call__(
+                lang_result = await asyncio.wait_for(__event_call__(
                     {
                         "type": "execute",
                         "data": {"code": """
@@ -4114,7 +4130,7 @@ return (() => {
 })();
 """},
                     }
-                )
+                ), timeout=5)
                 if isinstance(lang_result, str) and lang_result.strip():
                     lang = lang_result.strip()
             except Exception:
@@ -4133,7 +4149,9 @@ return (() => {
         result_context = (
             f'Visualization wrapper "{title}" is mounted and waiting for content. '
             f"Now emit the HTML/SVG in your NEXT text response wrapped in the "
-            f"TEXT delimiters @@@VIZ-START and @@@VIZ-END, each on their own line. "
+            f"TEXT delimiters @@@VIZ-START and @@@VIZ-END, each on their own line, "
+            f"with ONE EMPTY LINE after @@@VIZ-END before any follow-up text "
+            f"(otherwise markdown in that text will not render). "
             f"The wrapper will tail your stream and render live. These are PLAIN "
             f"TEXT markers — NOT a ``` code fence, NOT HTML tags, NOT a ::: fence. "
             f"Example:\n\n"

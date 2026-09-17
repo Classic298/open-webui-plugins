@@ -18,7 +18,7 @@ This tutorial/handbook shows you how to actually use the tool and build beautifu
 2. Calling the tool, an iFrame wrapper sandbox will immediately appear inside the chat (visible only to the user). This iFrame sandbox will AUTOMATICALLY paint/render everything you output within the tags after you called the tool.
 3. After calling the tool, start with the opening tag @@@VIZ-START on its own line
 4. Next, after the opening tag, emit the HTML/SVG content (no <!DOCTYPE>, <html>, <head>, <body>)
-5. Once you are done writing the code for the visualization, immediately close with @@@VIZ-END on its own line
+5. Once you are done writing the code for the visualization, immediately close with @@@VIZ-END on its own line, followed by ONE EMPTY LINE. Without the empty line, markdown in your follow-up text (bold, lists, links) is not rendered.
 6. Done! The visualization is complete. Continue with any follow-up text to the user.
 
 The raw markers + SVG source are auto-hidden from the chat — users see only the rendered iframe filling in live.
@@ -38,7 +38,7 @@ As you can see, each query token attends to all key tokens simultaneously.
 """
 
 **Streaming rules:**
-- Use the delimiters EXACTLY @@@VIZ-START and @@@VIZ-END — case-sensitive, on their own lines. Do NOT put the content inside  ```, ~~~, or ::: fences or any codeblock or other markdown.
+- Use the delimiters EXACTLY @@@VIZ-START and @@@VIZ-END — case-sensitive, on their own lines, with an empty line after @@@VIZ-END before any follow-up text. Do NOT put the content inside  ```, ~~~, or ::: fences or any codeblock or other markdown.
 - Do NOT wrap in HTML tags like <viz> or <svg data-iv> — only the text markers are detected.
 - Emit **exactly ONE** @@@VIZ-START … @@@VIZ-END pair per tool call. For multiple visualizations, call the tool multiple times.
 - Structure the content as always: <style> first → visible content → <script> last.
@@ -220,7 +220,7 @@ font-size. They track the theme automatically.
 | .node | Cursor-pointer + hover opacity on a <g> | Mark a <g> as clickable. Pair with onclick="sendPrompt(...)" so a user can drill into the topic. |
 | .arr | 1.5px stroke matching theme borders | Arrow lines and connectors. Combine with marker-end="url(#arrow)". |
 | .leader | 0.5px dashed guide line | Pulling a label to a part of an illustration when the label can't sit on top of it. |
-| .c-{ramp} | Sets fill/stroke + text colors on a whole <g> from one of the 9 color ramps | Color a node by category — apply .c-teal (etc.) to a <g> and every shape and text inside picks up the matching ramp. Un-classed, un-filled <path>/<polygon> children (pie wedges, areas) take the ramp's series color; on a classed or filled mark, fill="currentColor" opts back in. |
+| .c-{ramp} | Sets fill/stroke + text colors on a whole <g> from one of the 9 color ramps | Color a node by category — apply .c-teal (etc.) to a <g> and its direct children pick up the matching ramp (not deeper descendants). Un-classed, un-filled <path>/<polygon> children (pie wedges, areas) take the ramp's series color; on a classed or filled mark, fill="currentColor" opts back in. |
 
 ### Sizing text inside boxes
 
@@ -607,7 +607,7 @@ Visualizations should feel alive and polished — not static images dumped into 
 - **Expandable sections** — use collapsible <details> elements or JS-toggled sections so users can explore at their own pace without overwhelming them upfront
 - **Hover effects** — nodes, buttons, and cards should respond to hover (the .node class adds this for SVG elements; for HTML, use :hover styles)
 - **Smooth transitions** — add transition: all 0.2s ease to interactive elements for a polished feel
-- **Active states** — when a user selects an option or clicks a tab, make the selection visually clear with the .active class or distinct styling
+- **Active states** — when a user selects an option or clicks a tab, make the selection visually clear with your own .active class or distinct styling
 - **Progressive disclosure** — show a clean overview first, let the user click to reveal detail (tabs, accordions, or sendPrompt for model-powered drill-down)
 
 **The goal is to build something that feels like a real app component embedded in chat with reactivity, sections and extra elements** — not a screenshot. If the visualization has multiple facets, give the user controls to explore them. If it has hierarchical information, let them expand and collapse. If it has data, let them sort or filter.
@@ -671,8 +671,8 @@ Values are JSON-serialized. If localStorage is blocked (private browsing, sandbo
 
 ## CDN libraries
 
-Strict-mode CSP allowlists three CDN hosts. Anything served from them
-loads — no plugin tweaking needed, even in strict security mode.
+The CSP allowlists three CDN hosts for scripts only: any script served from them
+loads, CDN stylesheets and fonts are blocked, so inline any CSS a library needs.
 
 Allowed hosts:
 - cdnjs.cloudflare.com — widest coverage

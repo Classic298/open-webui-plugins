@@ -3,8 +3,8 @@ title: Vision Bridge
 author: Classic298
 author_url: https://github.com/Classic298
 funding_url: https://github.com/Classic298
-version: 1.0.2
-description: Let a text-only model handle images without core changes: strips each image in the request to a file-id marker (pair with the analyze_image tool), or in describe mode swaps it for a text description.
+version: 1.1.0
+description: Let a text-only model handle images without core changes: strips each image in the request to a file-id marker (pair with the Vision Bridge tool for chat and Open Terminal images), or in describe mode swaps it for a text description.
 """
 
 import re
@@ -36,6 +36,10 @@ def _file_id_of(url: str) -> Optional[str]:
 
 def _has_image(content: Any) -> bool:
     return isinstance(content, list) and any(isinstance(part, dict) and part.get("type") == "image_url" for part in content)
+
+
+def _has_terminal(metadata: Optional[dict]) -> bool:
+    return any(tool.get("type") == "terminal" for tool in ((metadata or {}).get("tools") or {}).values())
 
 
 def _is_image(file: dict) -> bool:
@@ -121,6 +125,14 @@ class Filter:
         for msg in messages:
             if _has_image(msg.get("content")):
                 msg["content"] = _strip_images(msg["content"], self.valves.strip_only)
+        return body
+
+    async def request(self, body: dict, __metadata__: Optional[dict] = None) -> dict:
+        """Runs after core resolved the tools: hide the terminal tool when core resolved no terminal."""
+        if body.get("tools") and not _has_terminal(__metadata__):
+            body["tools"] = [
+                tool for tool in body["tools"] if (tool.get("function") or {}).get("name") != "analyze_terminal_image"
+            ]
         return body
 
     async def _describe(self, target, user, request, chat_id, event_emitter):

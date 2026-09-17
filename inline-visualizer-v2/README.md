@@ -28,7 +28,7 @@ Legend: 🚫 feature not in that version · ⚡ present, v2 expands it · ✅ pr
 | **Pre-styled bare HTML** | 🚫 N/A — model styles every primitive from scratch. | ✅ Drop a vanilla `<button>`, `<input>` (every common type), `<textarea>`, `<select>`, `<label>`, `<fieldset>`, `<table>`, `<details>` / `<summary>`, `<blockquote>`, `<kbd>`, `<hr>`, `<mark>`, `<dl>` (in `data-layout="grid"` and `inline` modes too) and they come out theme-matched. Adding `class` or `style` opts out — model can still go fully custom. **Smaller payloads, faster generation, consistent look across visualizations.** |
 | **Accent palette** | 🚫 N/A | ✅ `data-accent="teal"` (or `coral`, `pink`, `gray`, `blue`, `green`, `amber`, `red`) on any element recolors focus rings, checkboxes, radios, and `var(--accent)` consumers. 9 named values matching the chart ramps. Light/dark handled per-theme. |
 | **Accessibility defaults** | 🚫 N/A | ✅ `aria-invalid="true"` paints a red border on inputs/textareas/selects; `:focus-visible` draws a clear accent outline on keyboard focus only (mouse focus stays subtle). |
-| **CDN library catalog in skill** | ⚡ Chart.js, D3.js examples | ✅ Chart.js, D3.js, Vega-Lite, **ECharts**, **Plotly**, **vis-network** (standalone bundle), **Tone.js / Wavesurfer** — each with a vetted CDN URL and "when to reach for it" guidance. Allowlisted in strict CSP out of the box. |
+| **CDN library catalog in skill** | ⚡ Chart.js, D3.js examples | ✅ Chart.js, D3.js, Vega-Lite, **ECharts**, **Plotly**, **vis-network** (standalone bundle), **Tone.js / Wavesurfer** — each with a vetted CDN URL and "when to reach for it" guidance. Allowlisted in strict CSP out of the box (scripts only: CDN stylesheets and fonts stay blocked at every level except None). |
 | **Chart-type coverage in skill** | ⚡ Bar / line / doughnut / scatter | ✅ Adds stacked bars/areas, radar, KPI cards with sparklines, progress bars, ranking strips, KPI donuts, custom-shape charts (thermometers, batteries, fuel gauges), plus comparison cards, slider-driven explainers, tabs (with hidden-panel init guidance), step-through walkthroughs. |
 | **Stream-completion feedback** | 🚫 N/A — no stream. | ✅ Localized "Visualization ready" toast in the top-right + an optional soft chime. Fires only when a real stream was seen — reopening a finished chat stays quiet. The chime is off-switchable via the `chime` valve (off → chime code isn't shipped at all). |
 | **i18n surface** | ⚡ 1 string × 47 languages = 47 translations (download tooltip) | ✅ 8 strings × 48 languages = **384 translations** — download tooltip, loader label, "unavailable" notice (title + body), "Copied" toast, "Visualization ready" toast, "Export failed" toast, "Visualization script error" toast. Auto-detected from `<html data-iv-lang>`, `localStorage.locale`, and `navigator.language`. |
@@ -91,7 +91,7 @@ Auto-detects the user's language from `<html data-iv-lang>` (injected server-sid
 | **None** | ✅ | ✅ | ✅ any | Live API data pulls from inside the iframe. |
 
 ### 🎉 Done toast + chime
-When a live stream finalizes, a localized "Visualization ready" toast slides in top-right and a soft three-note C-major arpeggio plays on Web Audio sine oscillators. Refreshes of completed messages are silent — the observer only celebrates when it actually witnessed the stream. Mute via `saveState('iv-sound', false)` per viz, or `localStorage['iv-sound-off']='1'` globally.
+When a live stream finalizes, a localized "Visualization ready" toast slides in top-right and a soft three-note C-major arpeggio plays on Web Audio sine oscillators. Refreshes of completed messages are silent — the observer only celebrates when it actually witnessed the stream. The `chime` valve on the tool turns it off.
 
 ### 🧼 Efficient tick loop
 - `msg.textContent` cached between ticks; unchanged → full pipeline short-circuits to a string compare
@@ -130,7 +130,7 @@ The **tool** mounts the iframe wrapper, injects the design-system CSS/JS, and ta
 
 1. Copy the contents of `SKILL.md`
 2. In Open WebUI: **Workspace → Knowledge → Create Skill**
-3. Name it **`Visualize`** (the tool calls `view_skill("visualize")` by this name)
+3. Name it **`visualize`** (the tool calls `view_skill("visualize")` by this name)
 4. Paste. **Save**.
 
 > [!TIP]
@@ -139,8 +139,8 @@ The **tool** mounts the iframe wrapper, injects the design-system CSS/JS, and ta
 ### 3. Attach to your model
 
 1. **Admin Panel → Settings → Models** → edit the model you want
-2. Under **Tools**, enable **Visualizer**
-3. Under **Skills**, attach **Visualizer**
+2. Under **Tools**, enable **Inline Visualizer**
+3. Under **Skills**, attach **visualize**
 4. Check **Function Calling** is **not** set to `Legacy` (Advanced Params). `Default` and `Native` both work, and `Default` has been native since Open WebUI `0.10.0`
 5. Save.
 
@@ -153,7 +153,7 @@ Steps:
 
 1. **User Settings → Interface**
 2. Scroll down
-3. Enable **Allow iframe same origin**
+3. Enable **iframe Sandbox Allow Same Origin**
 
 > [!NOTE]
 > Enabling same-origin means JavaScript inside a visualization can reach the parent Open WebUI page. That is a platform-level permission the tool cannot narrow — it's the cost of this streaming architecture. If your threat model can't accept that, use the original v1 inline-visualizer instead (static mode doesn't need same-origin).
@@ -206,6 +206,7 @@ Opens URLs in a new tab — safer than anchor tags inside sandboxed iframes.
 
 ```html
 <button onclick="openLink('https://arxiv.org/abs/1706.03762')">View paper ↗</button>
+<!-- at the strict and offline levels the query string of opened URLs is stripped -->
 ```
 
 ### `copyText(text)` — fires a localized toast automatically
@@ -263,12 +264,12 @@ Apply via CSS class on any `<g>` — child `<rect>`, `<circle>`, `<ellipse>` get
 
 | Class | Purpose |
 |---|---|
-| `.t` `.ts` `.th` | 14 px primary text / 12 px secondary / 14 px bold |
+| `.t` `.ts` `.th` | 14 px primary text / 12 px secondary / 14 px weight 500 |
 | `.box` | Neutral rect (secondary bg, tertiary border) |
 | `.node` | Clickable element (cursor, hover opacity) |
 | `.arr` | Arrow line (1.5 px, border-secondary) |
 | `.leader` | Dashed guide line (0.5 px, tertiary) |
-| `.c-{ramp}` | Apply a color ramp to all descendants |
+| `.c-{ramp}` | Apply a color ramp to the element's direct children |
 
 ### Themed HTML elements
 
@@ -285,8 +286,9 @@ polished output — no class or inline style needed.
 | **Definition lists** | `<dl>` in three layouts — bare (stacked glossary), `data-layout="grid"` (two-column card), `data-layout="inline"` (pill row) |
 
 Adding a `class` or `style` attribute to any of these opts out of the
-default styling — the model can still go fully custom when the design
-calls for it.
+default styling, so the model can still go fully custom when the design
+calls for it. Exceptions: `<code>`, `<dl data-layout>` and the form control
+accent color always apply, and `<textarea>` only opts out via `class`.
 
 ---
 
@@ -338,7 +340,7 @@ When DevTools is open, the browser attempts to fetch `.map` files for loaded lib
 
 ## 🔌 Offline mode — self-hosting the CDN libraries
 
-*(new in v2.2.0)* The **Offline** security level guarantees **nothing leaves your Open WebUI host**: no CDNs, no external images, fonts, or media. The only request the tool itself ever makes is the same-origin chats-API read described under [Security](#-security). It exists for air-gapped networks and privacy-hardened deployments.
+*(new in v2.2.0)* The **Offline** security level guarantees **nothing leaves your Open WebUI host**: no CDNs and no external images (fonts and media are host-only at every level except None). The only request the tool itself ever makes is the same-origin chats-API read described under [Security](#-security). It exists for air-gapped networks and privacy-hardened deployments.
 
 Two ways to use it:
 
@@ -471,19 +473,13 @@ Set CSP to **None** AND the remote server must allow cross-origin requests. If i
 <details>
 <summary><b>The done chime is annoying</b></summary>
 
-Open **Workspace → Tools → Inline Visualizer (Streaming) → gear icon**, flip the **`chime`** valve to off, save. Chime disabled globally — the function definition is stripped from the iframe entirely (not shipped as a silent no-op), saving ~1 KB per visualization.
+Open **Workspace → Tools → Inline Visualizer → gear icon**, flip the **`chime`** valve to off, save. Chime disabled globally — the function definition is stripped from the iframe entirely (not shipped as a silent no-op), saving ~1 KB per visualization.
 </details>
 
 <details>
 <summary><b>I updated <code>tool.py</code> and nothing changed</b></summary>
 
-**BEFORE Open WebUI 0.9.5**, Open WebUI didn't hot-reload tool source codes if the tool changed. You have to paste the new contents into **Workspace → Tools → Inline Visualizer (Streaming) → Save** again and then restart your Open WebUI.
-
-Additionally, existing chats keep their old iframe baked into `message.embeds[]` — only newly-triggered tool calls pick up the update.
-
-On **multi-worker deployments** (`UVICORN_WORKERS > 1`), each worker process has its own in-memory tool module cache. A save updates the worker that handled the save request; every other worker keeps its old compiled module until the backend restarts. If you're on a multi-worker setup and you see stale behavior even from fresh chats, restart the backend.
-
-**Open WebUI 0.9.5 and newer is no longer affected by this. Changing the tool's source code will update it across all workers instantly now**
+Existing chats keep their old iframe baked into `message.embeds[]` — only newly-triggered tool calls pick up the update.
 </details>
 
 ---
