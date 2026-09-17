@@ -3,7 +3,7 @@ title: Vision Bridge
 author: Classic298
 author_url: https://github.com/Classic298
 funding_url: https://github.com/Classic298
-version: 1.0.2
+version: 1.1.0
 description: Let a text-only model inspect images on demand via analyze_image(file_id, query), sending them to a configured vision model; pair with the Vision Bridge filter so the image never reaches the text-only model.
 """
 
@@ -122,9 +122,8 @@ class Tools:
         __event_emitter__: Optional[Callable[[dict], Any]] = None,
     ) -> str:
         """
-        Inspect an image file located in the currently connected Open Terminal.
-        Use this tool for images created or stored in the terminal instead of
-        calling read_file followed by analyze_image.
+        Inspect an image file located in the Open Terminal attached to this chat.
+        Use this for images created or stored in the terminal instead of read_file.
         :param path: Full path to the image in the terminal, e.g. /home/user/output.png
         :param query: The specific visual question to ask about the image.
         :return: The vision model's analysis as text.
