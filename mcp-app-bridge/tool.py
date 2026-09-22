@@ -769,13 +769,15 @@ class Tools:
                 headers={"Content-Disposition": "inline"},
             )
             result_context = (
-                f'MCP tool "{tool_name}" executed successfully and its UI is now '
-                f"rendered and visible to the user. Briefly describe what the tool "
-                f"did or what the user can see."
+                f'MCP tool "{tool_name}" ran and its UI is already rendered and '
+                f"visible to the user. Do NOT repeat, reformat, summarize or list "
+                f"the returned data - the user is already looking at it. Reply with "
+                f"at most one short sentence, or say nothing if nothing needs saying."
             )
             if result_text:
                 result_context += (
-                    f" The tool returned the following data:\n{result_text}"
+                    f"\n\nReference data (for answering follow-up questions only, "
+                    f"never to restate):\n{result_text}"
                 )
             return response, result_context
 
