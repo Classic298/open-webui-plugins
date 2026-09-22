@@ -101,6 +101,42 @@ def _extract_tool_result_text(call_result) -> str:
     return "\n".join(parts)
 
 
+def _js_json(value) -> str:
+    """JSON for embedding in an inline <script>: no text can close the tag."""
+    return json.dumps(value, ensure_ascii=True).replace("</", "<\\/")
+
+
+def _build_tool_result_params(call_result) -> dict:
+    """ui/notifications/tool-result params: separate blocks, real structuredContent."""
+    content = [
+        {"type": "text", "text": t}
+        for t in (
+            getattr(i, "text", None)
+            for i in (getattr(call_result, "content", None) or [])
+        )
+        if t
+    ]
+    params = {"content": content}
+    sc = getattr(call_result, "structuredContent", None) or getattr(
+        call_result, "structured_content", None
+    )
+    if isinstance(sc, dict):
+        params["structuredContent"] = sc
+    else:
+        for block in reversed(content):
+            stripped = block["text"].strip()
+            if not stripped.startswith("{"):
+                continue
+            try:
+                parsed = json.loads(stripped)
+            except ValueError:
+                continue
+            if isinstance(parsed, dict):
+                params["structuredContent"] = parsed
+                break
+    return params
+
+
 def _build_csp_meta_tag(csp: dict) -> str:
     """Build a <meta> CSP tag from a server-declared _meta.ui.csp object.
 
@@ -647,36 +683,37 @@ class Tools:
             # Globals for custom apps that read __MCP_TOOL_RESULT__ directly
             data_script = (
                 "<script>\n"
-                f"  window.__MCP_TOOL_RESULT__ = {json.dumps(result_text)};\n"
-                f"  window.__MCP_TOOL_ARGS__   = {json.dumps(args, ensure_ascii=False)};\n"
-                f"  window.__MCP_TOOL_NAME__   = {json.dumps(tool_name)};\n"
+                f"  window.__MCP_TOOL_RESULT__ = {_js_json(result_text)};\n"
+                f"  window.__MCP_TOOL_ARGS__   = {_js_json(args)};\n"
+                f"  window.__MCP_TOOL_NAME__   = {_js_json(tool_name)};\n"
                 "</script>\n"
             )
 
             # Spec-compliant AppBridge shim: dispatches ui/notifications/tool-result
             # as a synthetic MessageEvent so apps using the official AppBridge SDK
-            # receive the tool result via the standard protocol.
-            # Works without iframe same-origin — no parent access needed.
+            # receive the tool result via the standard protocol. No parent access
+            # is needed. `source: window.parent` is attempted first, since the
+            # SDK's PostMessageTransport drops events from any other source, but
+            # Firefox rejects a cross-origin WindowProxy there when the iframe is
+            # sandboxed without allow-same-origin - hence the sourceless fallback,
+            # which beats delivering nothing at all.
+            notification_params = _js_json(_build_tool_result_params(call_result))
             appbridge_shim = (
                 "<script>\n"
                 "(function(){\n"
-                f"  var _result = {json.dumps(result_text)};\n"
                 "  var _notification = {\n"
                 "    jsonrpc: '2.0',\n"
                 "    method: 'ui/notifications/tool-result',\n"
-                "    params: { content: [{ type: 'text', text: _result }] }\n"
+                f"    params: {notification_params}\n"
                 "  };\n"
-                "  try {\n"
-                "    var _parsed = JSON.parse(_result);\n"
-                "    if (_parsed && typeof _parsed === 'object')\n"
-                "      _notification.params.structuredContent = _parsed;\n"
-                "  } catch(e) {}\n"
                 "  function _dispatch() {\n"
-                "    window.dispatchEvent(new MessageEvent('message', {\n"
-                "      data: _notification,\n"
-                "      origin: window.location.origin,\n"
-                "      source: window.parent\n"
-                "    }));\n"
+                "    var _init = {data: _notification, origin: window.location.origin};\n"
+                "    try {\n"
+                "      window.dispatchEvent(new MessageEvent('message',\n"
+                "        Object.assign({source: window.parent}, _init)));\n"
+                "    } catch (e) {\n"
+                "      window.dispatchEvent(new MessageEvent('message', _init));\n"
+                "    }\n"
                 "  }\n"
                 "  if (document.readyState === 'complete' || document.readyState === 'interactive')\n"
                 "    setTimeout(_dispatch, 50);\n"
@@ -698,7 +735,11 @@ class Tools:
                 "  window.parent.postMessage({type:'iframe:height',height:h},'*');\n"
                 "}\n"
                 "window.addEventListener('load',function(){reportHeight();setTimeout(reportHeight,200)});\n"
-                "new MutationObserver(reportHeight).observe(document.body,{childList:true,subtree:true});\n"
+                "function _observe(){if(!document.body)return;\n"
+                "  new MutationObserver(reportHeight)\n"
+                "    .observe(document.body,{childList:true,subtree:true});}\n"
+                "if(document.body)_observe();\n"
+                "else window.addEventListener('DOMContentLoaded',_observe);\n"
                 "window.addEventListener('resize',reportHeight);\n"
                 "</script>\n"
             )
