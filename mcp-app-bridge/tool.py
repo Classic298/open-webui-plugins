@@ -3,7 +3,7 @@ title: MCP App Bridge
 author: Classic298
 author_url: https://github.com/Classic298
 funding_url: https://github.com/Classic298
-version: 0.8.0
+version: 1.0.0
 required_open_webui_version: 0.11.4
 description: Wraps MCP server tools and renders MCP App UI resources (ui://) as Rich UI embeds using Open WebUI's existing embed system. Context-efficient discovery: paginated summary listing plus keyword search, so full schemas are only loaded for the top matching tools. Acts as an MCP Apps (2026-01-26) host: each app runs isolated in a nested sandbox with its server-declared CSP, gets the ui/initialize handshake, tool input and tool result, and can call its server's tools, read its resources, open links and send chat messages. Authenticates with a static bearer token or with per-user OAuth 2.1 (dynamic client registration or static credentials), reusing Open WebUI's own MCP OAuth machinery. No middleware changes needed.
 """
