@@ -3,7 +3,7 @@ title: MCP App Bridge
 author: Classic298
 author_url: https://github.com/Classic298
 funding_url: https://github.com/Classic298
-version: 0.7.0
+version: 0.7.1
 description: Wraps MCP server tools and renders MCP App UI resources (ui://) as Rich UI embeds using Open WebUI's existing embed system. Context-efficient discovery: paginated summary listing plus keyword search, so full schemas are only loaded for the top matching tools. Spec-compliant: honors server-declared CSP, dispatches ui/notifications/tool-result for AppBridge SDK compatibility. Authenticates with a static bearer token or with per-user OAuth 2.1 (dynamic client registration or static credentials), reusing Open WebUI's own MCP OAuth machinery. No middleware changes needed.
 """
 
@@ -101,39 +101,25 @@ def _extract_tool_result_text(call_result) -> str:
     return "\n".join(parts)
 
 
-def _js_json(value) -> str:
+def _js_json(value: object) -> str:
     """JSON for embedding in an inline <script>: no text can close the tag."""
-    return json.dumps(value, ensure_ascii=True).replace("</", "<\\/")
+    return json.dumps(value).replace("<", "\\u003c")
 
 
 def _build_tool_result_params(call_result) -> dict:
-    """ui/notifications/tool-result params: separate blocks, real structuredContent."""
-    content = [
-        {"type": "text", "text": t}
-        for t in (
-            getattr(i, "text", None)
-            for i in (getattr(call_result, "content", None) or [])
-        )
-        if t
-    ]
-    params = {"content": content}
-    sc = getattr(call_result, "structuredContent", None) or getattr(
-        call_result, "structured_content", None
-    )
-    if isinstance(sc, dict):
-        params["structuredContent"] = sc
-    else:
-        for block in reversed(content):
-            stripped = block["text"].strip()
-            if not stripped.startswith("{"):
-                continue
+    """Build tool-result notification params; fill structuredContent if absent."""
+    params = call_result.model_dump(mode="json", by_alias=True, exclude_none=True)
+    if "structuredContent" not in params:
+        json_objects = []
+        for block in params["content"]:
             try:
-                parsed = json.loads(stripped)
-            except ValueError:
+                parsed = json.loads(block.get("text", ""))
+            except (ValueError, RecursionError):
                 continue
             if isinstance(parsed, dict):
-                params["structuredContent"] = parsed
-                break
+                json_objects.append(parsed)
+        if len(json_objects) == 1:
+            params["structuredContent"] = json_objects[0]
     return params
 
 
@@ -691,29 +677,24 @@ class Tools:
 
             # Spec-compliant AppBridge shim: dispatches ui/notifications/tool-result
             # as a synthetic MessageEvent so apps using the official AppBridge SDK
-            # receive the tool result via the standard protocol. No parent access
-            # is needed. `source: window.parent` is attempted first, since the
-            # SDK's PostMessageTransport drops events from any other source, but
-            # Firefox rejects a cross-origin WindowProxy there when the iframe is
-            # sandboxed without allow-same-origin - hence the sourceless fallback,
-            # which beats delivering nothing at all.
-            notification_params = _js_json(_build_tool_result_params(call_result))
+            # receive the tool result via the standard protocol.
+            # Works without iframe same-origin — no parent access needed.
+            # Firefox rejects a cross-origin MessageEventInit source; set it afterwards.
             appbridge_shim = (
                 "<script>\n"
                 "(function(){\n"
                 "  var _notification = {\n"
                 "    jsonrpc: '2.0',\n"
                 "    method: 'ui/notifications/tool-result',\n"
-                f"    params: {notification_params}\n"
+                f"    params: {_js_json(_build_tool_result_params(call_result))}\n"
                 "  };\n"
                 "  function _dispatch() {\n"
-                "    var _init = {data: _notification, origin: window.location.origin};\n"
-                "    try {\n"
-                "      window.dispatchEvent(new MessageEvent('message',\n"
-                "        Object.assign({source: window.parent}, _init)));\n"
-                "    } catch (e) {\n"
-                "      window.dispatchEvent(new MessageEvent('message', _init));\n"
-                "    }\n"
+                "    var _event = new MessageEvent('message', {\n"
+                "      data: _notification,\n"
+                "      origin: window.location.origin\n"
+                "    });\n"
+                "    Object.defineProperty(_event, 'source', {value: window.parent});\n"
+                "    window.dispatchEvent(_event);\n"
                 "  }\n"
                 "  if (document.readyState === 'complete' || document.readyState === 'interactive')\n"
                 "    setTimeout(_dispatch, 50);\n"
@@ -726,21 +707,49 @@ class Tools:
             # Use maxHeight from tool metadata as a floor for apps that use
             # height:100% / flex layouts (their scrollHeight is tiny without it).
             max_h_js = f"var maxH={int(max_height)};" if max_height else "var maxH=0;"
+            # Overflow that survives two of our resizes is vh-sized; stop chasing it.
             height_script = (
                 "<script>\n"
+                "(function(){\n"
                 f"{max_h_js}\n"
-                "function reportHeight(){\n"
+                "function measureHeight(){\n"
                 "  var h=document.documentElement.scrollHeight;\n"
                 "  if(maxH && h<maxH) h=maxH;\n"
+                "  return h;\n"
+                "}\n"
+                "var settledOverflow=0,overflowedAfterResize=false,postedHeight=0;\n"
+                "var lastWidth=window.innerWidth;\n"
+                "function reportHeight(){\n"
+                "  var h=measureHeight();\n"
+                "  if(h-window.innerHeight===settledOverflow) return;\n"
+                "  postedHeight=h;\n"
                 "  window.parent.postMessage({type:'iframe:height',height:h},'*');\n"
                 "}\n"
                 "window.addEventListener('load',function(){reportHeight();setTimeout(reportHeight,200)});\n"
-                "function _observe(){if(!document.body)return;\n"
-                "  new MutationObserver(reportHeight)\n"
-                "    .observe(document.body,{childList:true,subtree:true});}\n"
-                "if(document.body)_observe();\n"
-                "else window.addEventListener('DOMContentLoaded',_observe);\n"
-                "window.addEventListener('resize',reportHeight);\n"
+                "window.addEventListener('DOMContentLoaded',function(){\n"
+                "new MutationObserver(reportHeight).observe(document.body,{childList:true,subtree:true});\n"
+                "});\n"
+                "window.addEventListener('resize',function(){\n"
+                "  if(window.innerWidth!==lastWidth){\n"
+                "    lastWidth=window.innerWidth;\n"
+                "    reportHeight();\n"
+                "    return;\n"
+                "  }\n"
+                "  var h=measureHeight(),overflow=h-window.innerHeight;\n"
+                "  if(!overflow){\n"
+                "    settledOverflow=0;\n"
+                "    overflowedAfterResize=false;\n"
+                "    return;\n"
+                "  }\n"
+                "  if(h===postedHeight) return;\n"
+                "  if(overflowedAfterResize){\n"
+                "    settledOverflow=overflow;\n"
+                "    return;\n"
+                "  }\n"
+                "  overflowedAfterResize=true;\n"
+                "  reportHeight();\n"
+                "});\n"
+                "})();\n"
                 "</script>\n"
             )
 
