@@ -3,23 +3,39 @@ title: MCP App Bridge
 author: Classic298
 author_url: https://github.com/Classic298
 funding_url: https://github.com/Classic298
-version: 0.7.0
-description: Wraps MCP server tools and renders MCP App UI resources (ui://) as Rich UI embeds using Open WebUI's existing embed system. Context-efficient discovery: paginated summary listing plus keyword search, so full schemas are only loaded for the top matching tools. Spec-compliant: honors server-declared CSP, dispatches ui/notifications/tool-result for AppBridge SDK compatibility. Authenticates with a static bearer token or with per-user OAuth 2.1 (dynamic client registration or static credentials), reusing Open WebUI's own MCP OAuth machinery. No middleware changes needed.
+version: 1.0.0
+required_open_webui_version: 0.11.4
+description: Wraps MCP server tools and renders MCP App UI resources (ui://) as Rich UI embeds using Open WebUI's existing embed system. Context-efficient discovery: paginated summary listing plus keyword search, so full schemas are only loaded for the top matching tools. Acts as an MCP Apps (2026-01-26) host: each app runs isolated in a nested sandbox with its server-declared CSP, gets the ui/initialize handshake, tool input and tool result, and can call its server's tools, read its resources, open links and send chat messages. Authenticates with a static bearer token or with per-user OAuth 2.1 (dynamic client registration or static credentials), reusing Open WebUI's own MCP OAuth machinery. No middleware changes needed.
 """
 
+import base64
+import hashlib
 import json
 import logging
+import secrets
+import time
 from typing import Literal
 from contextlib import AsyncExitStack
 
+import jwt
 from pydantic import BaseModel, Field
-from starlette.responses import HTMLResponse
+from starlette.responses import HTMLResponse, JSONResponse
+from starlette.routing import Route
 
+from mcp import types
 from mcp.client.session import ClientSession
 from mcp.client.streamable_http import streamablehttp_client
+from mcp.shared.exceptions import McpError
 
 LIST_PAGE_SIZE = 25
 SEARCH_RESULT_LIMIT = 5
+
+MCP_APPS_EXTENSION = "io.modelcontextprotocol/ui"
+MCP_APPS_MIME_TYPE = "text/html;profile=mcp-app"
+MCP_APPS_PROTOCOL_VERSION = "2026-01-26"
+
+APP_RPC_PATH = "/api/v1/mcp-app-bridge/rpc"
+RPC_TOKEN_TTL_SECONDS = 900
 
 # Prefix for the OAuth client this tool registers with Open WebUI's client
 # manager. Kept distinct from the "mcp:<server_id>" keys used by admin-configured
@@ -77,6 +93,14 @@ def _extract_ui_resource_uri(tool) -> str | None:
     return None
 
 
+def _tool_visibility(tool: types.Tool) -> list:
+    """Who may call the tool, per _meta.ui.visibility (default: model and app)."""
+    visibility = _extract_ui_meta(tool).get("visibility")
+    if visibility is None:
+        return ["model", "app"]
+    return visibility if isinstance(visibility, list) else []
+
+
 def _tool_summary(tool) -> dict:
     """Compact listing entry: name, first description line, UI flag."""
     first_line = (tool.description or "").strip().split("\n", 1)[0].rstrip()
@@ -99,6 +123,28 @@ def _extract_tool_result_text(call_result) -> str:
         if text:
             parts.append(text)
     return "\n".join(parts)
+
+
+def _js_json(value: object) -> str:
+    """JSON for embedding in an inline <script>: no text can close the tag."""
+    return json.dumps(value).replace("<", "\\u003c")
+
+
+def _build_tool_result_params(call_result) -> dict:
+    """Build tool-result notification params; fill structuredContent if absent."""
+    params = call_result.model_dump(mode="json", by_alias=True, exclude_none=True)
+    if "structuredContent" not in params:
+        json_objects = []
+        for block in params["content"]:
+            try:
+                parsed = json.loads(block.get("text", ""))
+            except (ValueError, RecursionError):
+                continue
+            if isinstance(parsed, dict):
+                json_objects.append(parsed)
+        if len(json_objects) == 1:
+            params["structuredContent"] = json_objects[0]
+    return params
 
 
 def _build_csp_meta_tag(csp: dict) -> str:
@@ -163,6 +209,41 @@ def _get_resource_ui_meta(resources_list, uri: str) -> dict:
     return {}
 
 
+def _extract_ui_html(resource_result: types.ReadResourceResult) -> tuple[str, dict]:
+    """HTML of a resources/read result (text or base64 blob) and its item's _meta.ui."""
+    for item in resource_result.contents:
+        html = getattr(item, "text", None)
+        if html is None and getattr(item, "blob", None):
+            html = base64.b64decode(item.blob).decode("utf-8")
+        if html:
+            return html, _extract_ui_meta(item)
+    return "", {}
+
+
+async def _list_all_tools(session: ClientSession) -> list:
+    """Every tool on the server, following nextCursor across pages."""
+    tools, cursor = [], None
+    while True:
+        result = await session.list_tools(
+            params=types.PaginatedRequestParams(cursor=cursor)
+        )
+        tools.extend(result.tools)
+        cursor = result.nextCursor
+        if not cursor:
+            return tools
+
+
+class _AppsClientSession(ClientSession):
+    """ClientSession that advertises MCP Apps support when it initializes."""
+
+    async def send_request(self, request, *args, **kwargs):
+        if isinstance(request.root, types.InitializeRequest):
+            request.root.params.capabilities.extensions = {
+                MCP_APPS_EXTENSION: {"mimeTypes": [MCP_APPS_MIME_TYPE]}
+            }
+        return await super().send_request(request, *args, **kwargs)
+
+
 async def _connect_mcp(url: str, headers: dict | None) -> tuple[AsyncExitStack, ClientSession]:
     """Open a streamable-HTTP MCP connection. Caller owns the returned stack."""
     stack = AsyncExitStack()
@@ -172,7 +253,7 @@ async def _connect_mcp(url: str, headers: dict | None) -> tuple[AsyncExitStack, 
         )
         read_stream, write_stream, _ = transport
         session = await stack.enter_async_context(
-            ClientSession(read_stream, write_stream)
+            _AppsClientSession(read_stream, write_stream)
         )
         await session.initialize()
         return stack, session
@@ -201,6 +282,329 @@ def _is_unauthorized(exc: Exception) -> bool:
         return True
     message = str(exc).lower()
     return "401" in message or "unauthorized" in message
+
+
+# ---------------------------------------------------------------------------
+# MCP App host
+# ---------------------------------------------------------------------------
+
+
+APP_HOST_HTML = r"""<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+html,body{margin:0;padding:0;background:transparent}
+iframe{display:block;width:100%;height:150px;border:0}
+iframe.bordered{width:calc(100% - 2px);border:1px solid rgba(128,128,128,.35);border-radius:12px}
+</style>
+</head>
+<body>
+<script>
+(function () {
+  var config = __CONFIG__;
+  var openWebui = window.parent;
+  var frame = document.createElement('iframe');
+  frame.setAttribute('sandbox', 'allow-scripts allow-forms allow-popups allow-downloads');
+  if (config.prefersBorder) frame.className = 'bordered';
+  frame.srcdoc = config.appHtml;
+  document.body.appendChild(frame);
+
+  var darkScheme = window.matchMedia('(prefers-color-scheme: dark)');
+  var handshakeStarted = false;
+  var initialized = false;
+  var appReportsSize = false;
+  var appGone = false;
+  var lastWidth = frame.clientWidth;
+
+  function send(message) {
+    if (appGone) return;
+    message.jsonrpc = '2.0';
+    frame.contentWindow.postMessage(message, '*');
+  }
+  function respond(id, result) { send({id: id, result: result}); }
+  function fail(id, code, errorMessage) { send({id: id, error: {code: code, message: errorMessage}}); }
+  function notify(method, params) { send({method: method, params: params}); }
+
+  function hostContext() {
+    return Object.assign({}, config.hostContext, {
+      theme: darkScheme.matches ? 'dark' : 'light',
+      containerDimensions: {width: frame.clientWidth},
+      locale: navigator.language,
+      timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+      deviceCapabilities: {
+        touch: window.matchMedia('(pointer: coarse)').matches,
+        hover: window.matchMedia('(hover: hover)').matches
+      }
+    });
+  }
+
+  function sendToolData() {
+    notify('ui/notifications/tool-input', config.toolInput);
+    notify('ui/notifications/tool-result', config.toolResult);
+  }
+
+  function resize(height) {
+    frame.style.height = Math.ceil(height) + 'px';
+    openWebui.postMessage({type: 'iframe:height', height: frame.offsetHeight}, '*');
+  }
+  resize(frame.clientHeight);
+
+  function viewerToken() {
+    try { return localStorage.getItem('token'); } catch (error) { return null; }
+  }
+
+  function forwardToServer(message) {
+    var token = viewerToken();
+    fetch(config.rpc.url, {
+      method: 'POST',
+      headers: token ? {Authorization: 'Bearer ' + token} : {},
+      body: JSON.stringify({
+        token: config.rpc.token,
+        tool_id: config.rpc.toolId,
+        method: message.method,
+        params: message.params || {}
+      })
+    })
+      .then(function (response) {
+        if (!response.ok) throw new Error('HTTP ' + response.status);
+        return response.json();
+      })
+      .then(function (reply) {
+        if (reply.error) fail(message.id, reply.error.code, reply.error.message);
+        else respond(message.id, reply.result);
+      })
+      .catch(function (error) { fail(message.id, -32603, String(error)); });
+  }
+
+  function sameOrigin() {
+    try { return !!openWebui.document; } catch (error) { return false; }
+  }
+
+  function messageText(content) {
+    return [].concat(content || [])
+      .filter(function (block) { return block && block.type === 'text'; })
+      .map(function (block) { return block.text; })
+      .join('\n');
+  }
+
+  var requestHandlers = {
+    'ui/initialize': function (message) {
+      handshakeStarted = true;
+      respond(message.id, {
+        protocolVersion: config.protocolVersion,
+        hostInfo: config.hostInfo,
+        hostCapabilities: config.hostCapabilities,
+        hostContext: hostContext()
+      });
+    },
+    'ping': function (message) { respond(message.id, {}); },
+    'ui/open-link': function (message) {
+      var url = String((message.params || {}).url || '');
+      if (!/^https?:/i.test(url)) return fail(message.id, -32000, 'Invalid URL');
+      window.open(url, '_blank', 'noopener,noreferrer');
+      respond(message.id, {});
+    },
+    'ui/message': function (message) {
+      var text = messageText((message.params || {}).content);
+      if (!text) return fail(message.id, -32000, 'Invalid message format');
+      // Same-origin prompts skip Open WebUI's confirm dialog, so only fill the input then.
+      openWebui.postMessage({type: sameOrigin() ? 'input:prompt' : 'input:prompt:submit', text: text}, '*');
+      respond(message.id, {});
+    },
+    'ui/request-display-mode': function (message) { respond(message.id, {mode: 'inline'}); },
+    'tools/call': forwardToServer,
+    'resources/read': forwardToServer,
+    'resources/list': forwardToServer
+  };
+
+  var notificationHandlers = {
+    'ui/notifications/initialized': function () {
+      initialized = true;
+      sendToolData();
+    },
+    'ui/notifications/size-changed': function (message) {
+      var height = (message.params || {}).height;
+      if (typeof height !== 'number') return;
+      appReportsSize = true;
+      resize(height);
+    },
+    'notifications/message': function (message) {
+      console.log('[MCP App]', message.params);
+    }
+  };
+
+  window.addEventListener('message', function (event) {
+    var message = event.data || {};
+    // Later pages in the frame are not the app; Chromium sends this from a detached source.
+    if (message.type === 'mcp-app:unload' && message.key === config.unloadKey) {
+      appGone = true;
+      return;
+    }
+    if (event.source !== frame.contentWindow || appGone) return;
+    if (message.type === 'iframe:height') {
+      if (!appReportsSize && typeof message.height === 'number') resize(message.height);
+      return;
+    }
+    if (message.jsonrpc !== '2.0' || typeof message.method !== 'string') return;
+    var isRequest = message.id !== undefined && message.id !== null;
+    var handlers = isRequest ? requestHandlers : notificationHandlers;
+    if (Object.prototype.hasOwnProperty.call(handlers, message.method)) handlers[message.method](message);
+    else if (isRequest) fail(message.id, -32601, 'Method not found');
+  });
+
+  frame.addEventListener('load', function () {
+    setTimeout(function () { if (!handshakeStarted) sendToolData(); }, 1000);
+  });
+
+  darkScheme.addEventListener('change', function () {
+    if (initialized) notify('ui/notifications/host-context-changed', {theme: darkScheme.matches ? 'dark' : 'light'});
+  });
+  window.addEventListener('resize', function () {
+    if (window.innerHeight !== frame.offsetHeight) resize(frame.clientHeight);
+    if (!initialized || frame.clientWidth === lastWidth) return;
+    lastWidth = frame.clientWidth;
+    notify('ui/notifications/host-context-changed', {containerDimensions: {width: lastWidth}});
+  });
+})();
+</script>
+</body>
+</html>
+"""
+
+
+def _rpc_error(code: int, message: str) -> dict:
+    """JSON-RPC error body for a rendered app."""
+    return {"error": {"code": code, "message": message}}
+
+
+def _rpc_response(reply: dict) -> JSONResponse:
+    # The sandboxed host frame fetches with Origin: null, which CORS may not allow.
+    return JSONResponse(reply, headers={"Access-Control-Allow-Origin": "*"})
+
+
+def _rpc_token_key() -> bytes:
+    """Signing key for app tokens, kept apart from Open WebUI's own."""
+    from open_webui.env import WEBUI_SECRET_KEY
+
+    return hashlib.sha256(f"mcp-app-bridge:{WEBUI_SECRET_KEY}".encode()).digest()
+
+
+def _mint_rpc_token(user_id: str, tool_id: str, chat_id: str | None) -> str:
+    """Token an app's host frame sends when it cannot send the viewer's login."""
+    claims = {
+        "sub": user_id,
+        "tool_id": tool_id,
+        "chat_id": chat_id,
+        "exp": int(time.time()) + RPC_TOKEN_TTL_SECONDS,
+    }
+    return jwt.encode(claims, _rpc_token_key(), algorithm="HS256")
+
+
+async def _can_use_tool(user, tool_id: str) -> bool:
+    """The access check Open WebUI applies before it runs a tool for a user."""
+    from open_webui.config import BYPASS_ADMIN_ACCESS_CONTROL
+    from open_webui.models.access_grants import AccessGrants
+    from open_webui.models.tools import Tools as ToolsTable
+
+    tool = await ToolsTable.get_tool_by_id(tool_id)
+    if tool is None:
+        return False
+    return (
+        (user.role == "admin" and BYPASS_ADMIN_ACCESS_CONTROL)
+        or tool.user_id == user.id
+        or await AccessGrants.has_access(
+            user_id=user.id, resource_type="tool", resource_id=tool_id
+        )
+    )
+
+
+async def _is_private_chat(chat_id: str, user_id: str) -> bool:
+    """Whether only this user (and admins) can open the chat."""
+    from open_webui.models.access_grants import AccessGrants
+    from open_webui.models.chats import Chats
+    from open_webui.models.folders import Folders
+    from open_webui.utils.chat_id import is_temporary_chat_id
+
+    if not chat_id or is_temporary_chat_id(chat_id):
+        return True
+    chat = await Chats.get_chat_by_id(chat_id)
+    if chat is None or chat.user_id != user_id or chat.share_id:
+        return False
+    if await AccessGrants.get_grants_by_resource("shared_chat", chat_id):
+        return False
+    folder_id, seen_ids = chat.folder_id, set()
+    while folder_id and folder_id not in seen_ids:
+        seen_ids.add(folder_id)
+        folder = await Folders.get_folder_by_id(folder_id)
+        if folder is None or folder.user_id != user_id:
+            return False
+        if await AccessGrants.get_grants_by_resource("folder", folder_id):
+            return False
+        folder_id = folder.parent_id
+    return True
+
+
+async def _app_rpc_endpoint(request) -> JSONResponse:
+    """Run a rendered app's server request as the viewer or the tool's user."""
+    from open_webui.models.tools import Tools as ToolsTable
+    from open_webui.utils.auth import (
+        get_http_authorization_cred,
+        get_verified_user_by_id,
+        get_verified_user_by_token,
+    )
+    from open_webui.utils.plugin import get_tool_module_from_cache
+
+    body = await request.json()
+    # Only the explicit header: the login cookie would let other sites trigger calls.
+    if request.headers.get("Authorization"):
+        credentials = get_http_authorization_cred(request.headers["Authorization"])
+        redis = getattr(request.app.state, "redis", None)
+        user = credentials and await get_verified_user_by_token(
+            credentials.credentials, redis
+        )
+        tool_id = body.get("tool_id", "")
+    else:
+        try:
+            claims = jwt.decode(
+                body.get("token", ""), _rpc_token_key(), algorithms=["HS256"]
+            )
+        except jwt.InvalidTokenError:
+            return _rpc_response(_rpc_error(-32000, "App expired. Run the tool again."))
+
+        # Anyone who can open the chat can read the embed's token.
+        private = await _is_private_chat(claims["chat_id"] or "", claims["sub"])
+        user = await get_verified_user_by_id(claims["sub"]) if private else None
+        tool_id = claims["tool_id"]
+    if not user or not await _can_use_tool(user, tool_id):
+        return _rpc_response(
+            _rpc_error(-32000, "This app cannot reach its server here.")
+        )
+
+    tool_module, _ = await get_tool_module_from_cache(request, tool_id)
+    tool_module.valves = tool_module.Valves(
+        **(await ToolsTable.get_tool_valves_by_id(tool_id) or {})
+    )
+    reply = await tool_module._handle_app_request(
+        body.get("method"),
+        body.get("params") or {},
+        request,
+        user.model_dump(),
+        tool_id,
+    )
+    return _rpc_response(reply)
+
+
+def _mount_app_rpc_route(app) -> None:
+    """(Re)register the app RPC route ahead of the SPA catch-all mounted at "/"."""
+    app.router.routes[:] = [
+        route
+        for route in app.router.routes
+        if getattr(route, "path", None) != APP_RPC_PATH
+    ]
+    app.router.routes.insert(
+        0, Route(APP_RPC_PATH, _app_rpc_endpoint, methods=["POST"])
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -458,10 +862,46 @@ class Tools:
         names = (name.strip() for name in self.valves.tool_blocklist.split(","))
         return {name for name in names if name}
 
-    async def _list_allowed_tools(self, session) -> list:
-        result = await session.list_tools()
+    async def _list_allowed_tools(self, session, caller: str = "model") -> list:
+        tools = await _list_all_tools(session)
         blocked = self._blocked_tools()
-        return [tool for tool in result.tools if tool.name not in blocked]
+        return [
+            tool
+            for tool in tools
+            if tool.name not in blocked and caller in _tool_visibility(tool)
+        ]
+
+    async def _handle_app_request(
+        self, method: str, params: dict, request, user: dict, tool_id: str
+    ) -> dict:
+        """Proxy a rendered app's request to its MCP server as a JSON-RPC reply."""
+        target = params.get("name") or params.get("uri") or "-"
+        log.info("MCP App request %s %s from user %s", method, target, user.get("id"))
+
+        async def operation(session):
+            if method == "tools/call":
+                name = params.get("name")
+                tools = await self._list_allowed_tools(session, caller="app")
+                if not any(tool.name == name for tool in tools):
+                    return _rpc_error(-32602, f'Tool "{name}" is not available.')
+                result = await session.call_tool(name, params.get("arguments") or {})
+            elif method == "resources/read":
+                result = await session.read_resource(params.get("uri"))
+            elif method == "resources/list":
+                result = await session.list_resources(
+                    params=types.PaginatedRequestParams(cursor=params.get("cursor"))
+                )
+            else:
+                return _rpc_error(-32601, "Method not found")
+            payload = result.model_dump(mode="json", by_alias=True, exclude_none=True)
+            return {"result": payload}
+
+        try:
+            return await self._run_with_session(operation, request, user, tool_id)
+        except AuthorizationRequired:
+            return _rpc_error(-32000, "Sign in to the MCP server to continue.")
+        except McpError as e:
+            return _rpc_error(e.error.code, e.error.message)
 
     async def list_mcp_tools(
         self,
@@ -575,6 +1015,7 @@ class Tools:
         __request__=None,
         __user__=None,
         __id__=None,
+        __chat_id__=None,
         __event_emitter__=None,
     ) -> str | tuple:
         """
@@ -599,15 +1040,18 @@ class Tools:
 
         async def operation(session):
             # --- Find the tool and check for UI resource ---
-            tools_result = await session.list_tools()
             ui_resource_uri = None
+            called_tool = None
 
             max_height = None
-            for tool in tools_result.tools:
+            for tool in await _list_all_tools(session):
                 if tool.name == tool_name:
+                    if "model" not in _tool_visibility(tool):
+                        return f'Tool "{tool_name}" is not available.'
                     ui_resource_uri = _extract_ui_resource_uri(tool)
                     ui_meta = _extract_ui_meta(tool)
                     max_height = ui_meta.get("maxHeight")
+                    called_tool = tool
                     break
 
             # --- Call the tool ---
@@ -618,88 +1062,78 @@ class Tools:
             if not ui_resource_uri:
                 return result_text or "Tool executed (no output)."
 
-            # --- Fetch resource listing for CSP/permissions metadata ---
-            resources_result = await session.list_resources()
-            resources_list = (
-                resources_result.resources
-                if resources_result and hasattr(resources_result, "resources")
-                else []
-            )
-            ui_meta = _get_resource_ui_meta(resources_list, ui_resource_uri)
-            csp_data = ui_meta.get("csp") if isinstance(ui_meta, dict) else None
-
             # --- Fetch the UI resource content ---
-            resource_result = await session.read_resource(ui_resource_uri)
-            html_content = ""
-            if resource_result and getattr(resource_result, "contents", None):
-                for item in resource_result.contents:
-                    text = getattr(item, "text", None)
-                    if text:
-                        html_content = text
-                        break
-
+            html_content, ui_meta = _extract_ui_html(
+                await session.read_resource(ui_resource_uri)
+            )
             if not html_content:
                 return result_text or "Tool executed (UI resource was empty)."
 
-            # --- Build injection: CSP + data + AppBridge shim + auto-height ---
-            csp_tag = _build_csp_meta_tag(csp_data)
+            if not ui_meta:
+                resources_result = await session.list_resources()
+                ui_meta = _get_resource_ui_meta(
+                    resources_result.resources, ui_resource_uri
+                )
+            if not isinstance(ui_meta, dict):
+                ui_meta = {}
+            csp_data = ui_meta.get("csp")
 
+            # --- Build injection: CSP + data + auto-height ---
             # Globals for custom apps that read __MCP_TOOL_RESULT__ directly
             data_script = (
                 "<script>\n"
-                f"  window.__MCP_TOOL_RESULT__ = {json.dumps(result_text)};\n"
-                f"  window.__MCP_TOOL_ARGS__   = {json.dumps(args, ensure_ascii=False)};\n"
-                f"  window.__MCP_TOOL_NAME__   = {json.dumps(tool_name)};\n"
-                "</script>\n"
-            )
-
-            # Spec-compliant AppBridge shim: dispatches ui/notifications/tool-result
-            # as a synthetic MessageEvent so apps using the official AppBridge SDK
-            # receive the tool result via the standard protocol.
-            # Works without iframe same-origin — no parent access needed.
-            appbridge_shim = (
-                "<script>\n"
-                "(function(){\n"
-                f"  var _result = {json.dumps(result_text)};\n"
-                "  var _notification = {\n"
-                "    jsonrpc: '2.0',\n"
-                "    method: 'ui/notifications/tool-result',\n"
-                "    params: { content: [{ type: 'text', text: _result }] }\n"
-                "  };\n"
-                "  try {\n"
-                "    var _parsed = JSON.parse(_result);\n"
-                "    if (_parsed && typeof _parsed === 'object')\n"
-                "      _notification.params.structuredContent = _parsed;\n"
-                "  } catch(e) {}\n"
-                "  function _dispatch() {\n"
-                "    window.dispatchEvent(new MessageEvent('message', {\n"
-                "      data: _notification,\n"
-                "      origin: window.location.origin,\n"
-                "      source: window.parent\n"
-                "    }));\n"
-                "  }\n"
-                "  if (document.readyState === 'complete' || document.readyState === 'interactive')\n"
-                "    setTimeout(_dispatch, 50);\n"
-                "  else\n"
-                "    window.addEventListener('DOMContentLoaded', function(){ setTimeout(_dispatch, 50); });\n"
-                "})();\n"
+                f"  window.__MCP_TOOL_RESULT__ = {_js_json(result_text)};\n"
+                f"  window.__MCP_TOOL_ARGS__   = {_js_json(args)};\n"
+                f"  window.__MCP_TOOL_NAME__   = {_js_json(tool_name)};\n"
                 "</script>\n"
             )
 
             # Use maxHeight from tool metadata as a floor for apps that use
             # height:100% / flex layouts (their scrollHeight is tiny without it).
             max_h_js = f"var maxH={int(max_height)};" if max_height else "var maxH=0;"
+            # Overflow that survives two of our resizes is vh-sized; stop chasing it.
             height_script = (
                 "<script>\n"
+                "(function(){\n"
                 f"{max_h_js}\n"
-                "function reportHeight(){\n"
+                "function measureHeight(){\n"
                 "  var h=document.documentElement.scrollHeight;\n"
                 "  if(maxH && h<maxH) h=maxH;\n"
+                "  return h;\n"
+                "}\n"
+                "var settledOverflow=0,overflowedAfterResize=false,postedHeight=0;\n"
+                "var lastWidth=window.innerWidth;\n"
+                "function reportHeight(){\n"
+                "  var h=measureHeight();\n"
+                "  if(h-window.innerHeight===settledOverflow) return;\n"
+                "  postedHeight=h;\n"
                 "  window.parent.postMessage({type:'iframe:height',height:h},'*');\n"
                 "}\n"
                 "window.addEventListener('load',function(){reportHeight();setTimeout(reportHeight,200)});\n"
+                "window.addEventListener('DOMContentLoaded',function(){\n"
                 "new MutationObserver(reportHeight).observe(document.body,{childList:true,subtree:true});\n"
-                "window.addEventListener('resize',reportHeight);\n"
+                "});\n"
+                "window.addEventListener('resize',function(){\n"
+                "  if(window.innerWidth!==lastWidth){\n"
+                "    lastWidth=window.innerWidth;\n"
+                "    reportHeight();\n"
+                "    return;\n"
+                "  }\n"
+                "  var h=measureHeight(),overflow=h-window.innerHeight;\n"
+                "  if(!overflow){\n"
+                "    settledOverflow=0;\n"
+                "    overflowedAfterResize=false;\n"
+                "    return;\n"
+                "  }\n"
+                "  if(h===postedHeight) return;\n"
+                "  if(overflowedAfterResize){\n"
+                "    settledOverflow=overflow;\n"
+                "    return;\n"
+                "  }\n"
+                "  overflowedAfterResize=true;\n"
+                "  reportHeight();\n"
+                "});\n"
+                "})();\n"
                 "</script>\n"
             )
 
@@ -711,30 +1145,73 @@ class Tools:
                     f"<style>html,body{{min-height:{int(max_height)}px}}</style>\n"
                 )
 
-            injection = csp_tag + min_height_style + data_script + appbridge_shim + height_script
+            unload_key = secrets.token_urlsafe(16)
+            unload_message = _js_json({"type": "mcp-app:unload", "key": unload_key})
+            unload_script = (
+                "<script>addEventListener('pagehide',function(){"
+                f"parent.postMessage({unload_message},'*')"
+                "})</script>\n"
+            )
+            # Prepended, so the CSP applies before any of the server's markup parses.
+            app_html = (
+                "<!DOCTYPE html>\n"
+                + _build_csp_meta_tag(csp_data)
+                + min_height_style
+                + data_script
+                + height_script
+                + unload_script
+                + html_content
+            )
 
-            if "<head>" in html_content:
-                html_content = html_content.replace("<head>", "<head>\n" + injection, 1)
-            elif "<html>" in html_content:
-                html_content = html_content.replace(
-                    "<html>", "<html>\n<head>" + injection + "</head>", 1
-                )
-            else:
-                html_content = "<head>" + injection + "</head>\n" + html_content
+            from open_webui.env import VERSION
+
+            _mount_app_rpc_route(__request__.app)
+            rpc_token = _mint_rpc_token(__user__["id"], __id__, __chat_id__)
+            host_config = {
+                "appHtml": app_html,
+                "toolInput": {"arguments": args},
+                "toolResult": _build_tool_result_params(call_result),
+                "protocolVersion": MCP_APPS_PROTOCOL_VERSION,
+                "hostInfo": {"name": "Open WebUI", "version": VERSION},
+                "hostCapabilities": {
+                    "openLinks": {},
+                    "message": {"text": {}},
+                    "logging": {},
+                    "serverTools": {},
+                    "serverResources": {},
+                    "sandbox": {"permissions": {}, "csp": csp_data or {}},
+                },
+                "hostContext": {
+                    "toolInfo": {
+                        "tool": called_tool.model_dump(
+                            mode="json", by_alias=True, exclude_none=True
+                        )
+                    },
+                    "displayMode": "inline",
+                    "availableDisplayModes": ["inline"],
+                    "platform": "web",
+                    "userAgent": "Open WebUI MCP App Bridge",
+                },
+                "rpc": {"url": APP_RPC_PATH, "token": rpc_token, "toolId": __id__},
+                "unloadKey": unload_key,
+                "prefersBorder": ui_meta.get("prefersBorder") is True,
+            }
 
             # --- Return as Rich UI embed with LLM context ---
             response = HTMLResponse(
-                content=html_content,
+                content=APP_HOST_HTML.replace("__CONFIG__", _js_json(host_config)),
                 headers={"Content-Disposition": "inline"},
             )
             result_context = (
-                f'MCP tool "{tool_name}" executed successfully and its UI is now '
-                f"rendered and visible to the user. Briefly describe what the tool "
-                f"did or what the user can see."
+                f'MCP tool "{tool_name}" ran and its UI is already rendered and '
+                f"visible to the user. Do NOT repeat, reformat, summarize or list "
+                f"the returned data - the user is already looking at it. Reply with "
+                f"at most one short sentence, or say nothing if nothing needs saying."
             )
             if result_text:
                 result_context += (
-                    f" The tool returned the following data:\n{result_text}"
+                    f"\n\nReference data (for answering follow-up questions only, "
+                    f"never to restate):\n{result_text}"
                 )
             return response, result_context
 

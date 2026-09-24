@@ -13,7 +13,7 @@ Renders [MCP Apps](https://github.com/modelcontextprotocol/ext-apps) (SEP-1865) 
 > [!NOTE]
 > This tool follows the MCP protocol's [dynamic tool discovery pattern](#mcp-dynamic-tool-discovery) — and aligns with Anthropic's [Tool Search Tool](https://docs.anthropic.com/en/docs/agents-and-tools/tool-use/tool-search-tool) concept, where tools are discovered and loaded on demand rather than pre-registered in the model's context.
 
-When an MCP server declares a `ui://` resource on a tool, this bridge fetches the HTML, injects the tool result data, applies the server-declared Content Security Policy, and renders it inline in the chat.
+When an MCP server declares a `ui://` resource on a tool, this bridge fetches the HTML and renders it inline in the chat, acting as the MCP Apps host: the app gets the standard handshake, its tool input and result, and can call back into its own server. See [MCP Apps Spec Support](#mcp-apps-spec-support) for what is covered.
 
 ### Demo
 
@@ -25,8 +25,8 @@ When an MCP server declares a `ui://` resource on a tool, this bridge fetches th
 
 1. **Model calls `search_mcp_tools` or `list_mcp_tools`** → discovers tools on the MCP server, including which ones have UI resources. Listing is paginated and returns only names and short descriptions; search returns full parameter schemas for the top matches. Full schemas only enter context for tools that match the model's search.
 2. **Model calls `call_mcp_tool`** → executes the tool, checks for `_meta.ui.resourceUri`
-3. **If a UI resource exists** → fetches the HTML, injects CSP + tool result data + auto-height script, returns it as a Rich UI embed via `HTMLResponse`
-4. **Open WebUI renders it** in a sandboxed iframe — same as the [Inline Visualizer](../inline-visualizer/)
+3. **If a UI resource exists** → fetches the HTML and returns a Rich UI embed via `HTMLResponse`: a small host frame that loads the app in a nested sandboxed iframe with the server's CSP
+4. **Open WebUI renders it** in a sandboxed iframe, same as the [Inline Visualizer](../inline-visualizer/). The app talks to the host frame over `postMessage` (JSON-RPC), and the host frame forwards the app's server calls through Open WebUI
 
 ```
 ┌─────────────┐     ┌─────────────┐     ┌─────────────┐
@@ -36,8 +36,9 @@ When an MCP server declares a `ui://` resource on a tool, this bridge fetches th
 └─────────────┘     └─────────────┘     └─────────────┘
        │                   │
        │            ┌──────┴──────┐
-       │            │ Injects:    │
-       │            │ • CSP tag   │
+       │            │ Wraps app:  │
+       │            │ • Host page │
+       │            │ • CSP       │
        │            │ • Tool data │
        │            │ • Auto-size │
        │            └──────┬──────┘
@@ -54,18 +55,60 @@ The bridge honors the MCP Apps spec security model:
 
 | Spec Feature | Implementation |
 |---|---|
-| Server-declared CSP (`_meta.ui.csp`) | Injected as `<meta http-equiv="Content-Security-Policy">` tag |
+| Server-declared CSP (`_meta.ui.csp`) | Read from the `resources/read` content item, falling back to the `resources/list` entry. Placed at the very top of the app's document, so it applies before any of the server's markup |
 | `connectDomains` | Maps to `connect-src` directive |
 | `resourceDomains` | Maps to `script-src`, `style-src`, `img-src`, `font-src`, `media-src` |
 | `frameDomains` | Maps to `frame-src` directive |
 | `baseUriDomains` | Maps to `base-uri` directive |
 | No CSP declared | Restrictive default: blocks all outbound, allows only inline scripts/styles |
-| Iframe sandboxing | Uses Open WebUI's existing sandbox with configurable same-origin toggle |
+| Iframe sandboxing | The app runs in its own nested iframe without `allow-same-origin`, so it never shares an origin with Open WebUI, whatever the same-origin toggle says |
+| Tool visibility (`_meta.ui.visibility`) | App-only tools are hidden from the model and cannot be called by it. Model-only tools cannot be called by the app |
+| App calls to its server | Sent through an Open WebUI route, checked against the user's access to the tool, and logged on the server. See the note below for which user they run as |
 
-> [!WARNING]
-> **Same-origin access and MCP Apps:** If "iframe Sandbox Allow Same Origin" is enabled in Open WebUI settings, the MCP App's HTML gains full access to the parent page — including session tokens, cookies, localStorage, and the ability to make authenticated API requests as the user. CSP cannot prevent this; it only controls network requests, not parent DOM access. Since MCP App HTML originates from an **external** server (unlike locally installed tools where you control the HTML), enabling same-origin carries higher risk. **Leave same-origin disabled unless you fully trust the MCP server.**
+> [!NOTE]
+> **Same-origin toggle:** the app stays isolated even when "iframe Sandbox Allow Same Origin" is enabled. It always runs in its own nested frame, so it cannot read Open WebUI's cookies, local storage or page, and it gets no cookies or local storage of its own either. Before 1.0.0, with the toggle on, the app ran on Open WebUI's origin and could read its cookies and local storage. Now only the bridge's own host frame runs there.
+
+> [!NOTE]
+> **Who an app's server calls run as:** with the same-origin toggle on, the logged-in user looking at the app, using their own login and their own access to the tool (Open WebUI only shows apps in chats the user owns, including their own copies of shared chats). With it off, the user who ran the tool, through a token stored in the embed that expires 15 minutes after the tool ran. Anyone who can open the chat can read that token, so it only works in chats that are not shared (share link, shared with users, or in a shared folder). Admins can read any chat, so they can use it too. After sharing stops, anyone who opened or cloned the shared chat can still use it until it expires, and copies of the chat (clone, export and import) keep the token, so sharing a copy within those 15 minutes lets its viewers use it.
+
+## MCP Apps Spec Support
+
+The bridge implements the host side of the MCP Apps specification, version 2026-01-26.
+
+| Feature | Support |
+|---|---|
+| MCP Apps extension (`io.modelcontextprotocol/ui`) advertised on `initialize` | ✅ Servers that check for MCP Apps support register their UI tools |
+| `ui/initialize` handshake | ✅ With host capabilities and host context (theme, locale, time zone, container width, platform, the tool definition) |
+| `ui/notifications/tool-input` and `tool-result` | ✅ Sent after the handshake. The result is the server's `CallToolResult`; if it has no `structuredContent` and exactly one text block parses as a JSON object, that object is sent as `structuredContent` |
+| App calls to its server: `tools/call`, `resources/read`, `resources/list` | ✅ See the note on who they run as. In shared chats only with the same-origin toggle on |
+| `ui/message` | ✅ Submitted to the chat once the user confirms Open WebUI's "Confirm Prompt from Embed" dialog. With the same-origin toggle on, Open WebUI would skip that dialog, so the text is only placed in the chat input |
+| `ui/open-link` | ✅ Opens a new tab (see below) |
+| `ui/notifications/size-changed` | ✅ The embed follows the app's height |
+| `ui/request-display-mode` | ✅ Answers `inline`, the only mode offered |
+| Logging (`notifications/message`) | ✅ Written to the browser console |
+| `prefersBorder` | ✅ Border only, no background |
+| Base64 (`blob`) HTML resources | ✅ |
+
+Servers that split their tool list into pages are fully listed. Apps that never start the handshake still get their tool input and result about one second after loading, and the older `window.__MCP_TOOL_RESULT__`, `__MCP_TOOL_ARGS__` and `__MCP_TOOL_NAME__` globals are still set.
+
+Not supported, or only partly, in Open WebUI:
+
+| Feature | Why |
+|---|---|
+| `ui/resource-teardown` | Open WebUI removes the embed without notice, and a message sent while the frame is being removed never reaches the app |
+| `permissions` (camera, microphone, geolocation, clipboard) | Browsers refuse them in the app's sandboxed frame, which has no origin of its own, and Open WebUI's embed frame does not pass them on |
+| `ui/update-model-context` | Open WebUI builds the next turn from each tool call's stored output, which the bridge cannot update after the call. The request returns "Method not found" |
+| Dedicated app origin (`domain`) | Embeds are `srcdoc` frames with no origin of their own |
+| Fullscreen and picture-in-picture | Not offered; apps are told `inline` is the only mode |
+| Theme | Follows the browser or OS color preference. Open WebUI's own theme setting is not used |
+| Links | Open WebUI's sandbox does not let popups leave it, so a linked page opens in a sandboxed tab. With the same-origin toggle off (the default), sites that need cookies or local storage (logins, for example) do not work there |
+
+> [!NOTE]
+> With the same-origin toggle off, an app can call its server for 15 minutes after the tool ran; after that its calls fail with "App expired. Run the tool again." App calls go through a route the bridge registers in the worker process that ran the tool. After a restart, or on a multi-worker or multi-node deployment without sticky sessions, such a call can land on a worker that has not run the tool yet and fail. With a single worker, running the tool again resolves it. With the same-origin toggle off, the app's calls carry no cookies, so cookie-based sticky sessions do not help and a cookie-based auth proxy in front of Open WebUI (oauth2-proxy, Cloudflare Access, Authelia) rejects them.
 
 ## Setup
+
+Requires Open WebUI 0.11.4 or newer.
 
 ### 1. Install the Tool
 
@@ -160,10 +203,10 @@ Open WebUI already has a native Rich UI system: tools that return `HTMLResponse`
 | Render interactive HTML inline | ✅ | ✅ |
 | Sandboxed iframe isolation | ✅ Always | ✅ Always |
 | Content Security Policy | ✅ Server-declared CSP | ✅ Via Tool declared CSP (e.g. Inline Visualizer's strict/balanced/none) |
-| Auto-height resize | ✅ Injected via the tool | ✅ Built into HTML or injected by tool |
-| Theme awareness | ❌ Not in spec | ✅ Via auto-injected CSS variables |
+| Auto-height resize | ✅ From the app's size reports, or measured by the bridge | ✅ Built into HTML or injected by tool |
+| Theme awareness | ℹ️ Light or dark, from the browser or OS | ✅ Via auto-injected CSS variables |
 | Dynamic content per call | ℹ️ Static resource + data injection | ✅ Fully dynamic HTML per invocation |
-| Bidirectional communication | ℹ️ JSON-RPC via SDK | ✅ Via native postMessage bridge (sendPrompt, openLink) |
+| Bidirectional communication | ✅ JSON-RPC: server tool calls, resource reads, chat messages, links | ✅ Via native postMessage bridge (sendPrompt, openLink) |
 | External dependencies | ⚠️ Requires MCP server with ext-apps | ✅ None — tool generates HTML directly |
 | Ecosystem portability | ✅ Works across MCP-Apps compatible hosts | ❌ Open WebUI only |
 
