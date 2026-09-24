@@ -3,7 +3,7 @@ title: Email Composer
 author: Classic298
 author_url: https://github.com/Classic298
 funding_url: https://github.com/Classic298
-version: 1.0.2
+version: 1.1.0
 description: Renders composed emails as interactive Rich UI cards with rich text editing, markdown auto-conversion, To/CC/BCC chips, priority badges, copy, download .eml, mailto, autosave, and word count. Requires 'Allow Iframe Same-Origin Access' in Settings > Interface for autosave (all other features work without it). Note: mailto is plain text only and may truncate long emails; use Download .eml for formatted or long emails.
 """
 
@@ -48,6 +48,7 @@ class Tools:
             await __event_emitter__({"type": "status", "data": {"description": "Composing email...", "done": False}})
 
         storage_key = "email-composer-" + str(uuid.uuid4())
+        # Escaped so "</script>" in the email text cannot end the inline script.
         args_json = json.dumps({
             "to": to,
             "subject": subject,
@@ -55,7 +56,7 @@ class Tools:
             "cc": cc,
             "bcc": bcc,
             "priority": priority,
-        })
+        }).replace("<", "\\u003c")
         inject = "var ARGS = " + args_json + ";\nvar STORAGE_KEY = " + json.dumps(storage_key) + ";"
         html = EMAIL_CARD_HTML.replace("/*__ARGS__*/", inject)
 
@@ -443,7 +444,10 @@ body{background:var(--bg);font-family:-apple-system,BlinkMacSystemFont,'Segoe UI
       t=t.replace(/\*(.+?)\*/g,'<em>$1</em>');
       t=t.replace(/~~(.+?)~~/g,'<del>$1</del>');
       t=t.replace(/`(.+?)`/g,'<code>$1</code>');
-      t=t.replace(/\[([^\]]+)\]\(([^)]+)\)/g,'<a href="$2">$1</a>');
+      t=t.replace(/\[([^\]]+)\]\(([^)]+)\)/g,function(match,text,url){
+        if(!/^(https?|mailto):/i.test(url))return match;
+        return '<a href="'+url.replace(/"/g,'&quot;')+'">'+text+'</a>';
+      });
       return t;
     }
     for(var i=0;i<lines.length;i++){
