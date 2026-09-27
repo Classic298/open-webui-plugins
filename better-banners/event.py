@@ -264,17 +264,17 @@ html.dark #owui-better-banners{--obb-surface:rgba(23,23,23,.72);--obb-text:#f3f4
 .obb-pill.obb-release{animation:obb-release .3s cubic-bezier(.34,1.56,.64,1)}
 .obb-banner.obb-enter{animation:obb-in .26s cubic-bezier(.22,1,.36,1) backwards;animation-delay:var(--obb-delay,0ms)}
 .obb-pill.obb-enter{animation:obb-pop .28s cubic-bezier(.34,1.56,.64,1)}
-.obb-banner.obb-leave,.obb-pill.obb-leave{animation:obb-out .16s ease-in forwards}
+.obb-banner.obb-leave{animation:obb-out .16s ease-in forwards}
 .obb-collapsing{overflow:hidden;transition:height .24s cubic-bezier(.4,0,.2,1),padding .24s cubic-bezier(.4,0,.2,1),margin .24s cubic-bezier(.4,0,.2,1),border-width .24s,opacity .18s ease,transform .24s cubic-bezier(.4,0,.2,1);transition-delay:var(--obb-delay,0ms)}
-.obb-collapsed{height:0!important;padding-top:0;padding-bottom:0;border-width:0;opacity:0;transform:translateY(calc(-1 * var(--obb-into,14px))) scale(.88)}
-.obb-collapsed:not(:first-child){margin-top:-6px}
-#owui-better-banners[data-position="bottom"] .obb-collapsed{transform:translateY(var(--obb-into)) scale(.88)}
+.obb-collapsed{height:0!important;padding-top:0;padding-bottom:0;border-width:0;opacity:0;transform:translateY(var(--obb-into,-14px)) scale(.88)}
+#owui-better-banners[data-position="top"] .obb-collapsed{margin-top:-6px}
+#owui-better-banners[data-position="bottom"] .obb-collapsed{margin-bottom:-6px}
 @keyframes obb-in{from{opacity:0;transform:translateY(var(--obb-from,-10px)) scale(.94)}to{opacity:1;transform:none}}
 @keyframes obb-out{to{opacity:0;transform:scale(.92)}}
 @keyframes obb-pop{from{opacity:0;transform:scale(.8)}to{opacity:1;transform:none}}
 @keyframes obb-absorb{0%{transform:scale(1)}30%{transform:scale(1.16)}60%{transform:scale(.94)}100%{transform:scale(1)}}
 @keyframes obb-release{0%{transform:scale(1)}35%{transform:scale(.9)}100%{transform:scale(1)}}
-@media (prefers-reduced-motion:reduce){.obb-banner.obb-enter,.obb-pill.obb-enter,.obb-banner.obb-leave,.obb-pill.obb-leave,.obb-pill.obb-absorb,.obb-pill.obb-release{animation-duration:.01ms;animation-delay:0s}.obb-collapsing,.obb-pill svg:last-child{transition-duration:.01ms;transition-delay:0s}}
+@media (prefers-reduced-motion:reduce){.obb-banner.obb-enter,.obb-pill.obb-enter,.obb-banner.obb-leave,.obb-pill.obb-absorb,.obb-pill.obb-release{animation-duration:.01ms;animation-delay:0s}.obb-collapsing,.obb-pill svg:last-child{transition-duration:.01ms;transition-delay:0s}}
 """
 
 LOADER_SCRIPT = r"""
@@ -308,6 +308,7 @@ LOADER_SCRIPT = r"""
   var root = null;
   var placeQueued = false;
   var lastRenderKey = '';
+  var collapseTimer = null;
   var anchored = false;
   var inflight = false;
   var syncAgain = false;
@@ -509,7 +510,6 @@ LOADER_SCRIPT = r"""
     });
   }
 
-  // Delays run outward from the pill, so the nearest banner moves first.
   function staggerFromPill(elements) {
     elements.forEach(function (element, index) {
       var distance = CFG.position === 'top' ? index : elements.length - 1 - index;
@@ -517,20 +517,22 @@ LOADER_SCRIPT = r"""
     });
   }
 
-  function playOnce(element, className) {
+  function replayAnimation(element, className) {
     element.classList.remove(className);
-    void element.offsetWidth;
+    void element.offsetHeight;
     element.classList.add(className);
     element.addEventListener('animationend', function () { element.classList.remove(className); }, { once: true });
   }
 
-  function collapseAll(pill) {
+  function collapseAll() {
+    var pill = root.querySelector('.obb-pill');
     var visible = visibleBanners();
     var map = {};
     visible.forEach(function (banner) { map[banner.id] = fingerprint(banner); });
     writeJson(COLLAPSED_KEY, map);
     lastRenderKey = renderKey(visible, true);
-    var elements = Array.prototype.slice.call(root.querySelectorAll('.obb-banner'));
+    updatePill(pill, visible, true);
+    var elements = root.querySelectorAll('.obb-banner');
     staggerFromPill(elements);
     elements.forEach(function (element) {
       element.classList.remove('obb-enter');
@@ -539,22 +541,27 @@ LOADER_SCRIPT = r"""
     });
     void root.offsetHeight;
     elements.forEach(function (element) { element.classList.add('obb-collapsed'); });
-    setTimeout(function () {
+    collapseTimer = setTimeout(function () {
+      collapseTimer = null;
       elements.forEach(function (element) { element.remove(); });
-      updatePill(pill, visible, true);
-      playOnce(pill, 'obb-absorb');
+      replayAnimation(pill, 'obb-absorb');
     }, COLLAPSE_MS + (elements.length - 1) * STAGGER_MS);
   }
 
-  function expandAll(pill) {
+  function expandAll() {
+    var pill = root.querySelector('.obb-pill');
+    // A click during the collapse turns it around instead of queueing behind it.
+    clearTimeout(collapseTimer);
+    collapseTimer = null;
+    root.querySelectorAll('.obb-banner').forEach(function (element) { element.remove(); });
     var visible = visibleBanners();
     writeJson(COLLAPSED_KEY, {});
     lastRenderKey = renderKey(visible, false);
     updatePill(pill, visible, false);
-    playOnce(pill, 'obb-release');
+    replayAnimation(pill, 'obb-release');
     var elements = visible.map(bannerElement);
     staggerFromPill(elements);
-    elements.forEach(function (element) { playOnce(element, 'obb-enter'); });
+    elements.forEach(function (element) { replayAnimation(element, 'obb-enter'); });
     if (CFG.position === 'top') pill.after.apply(pill, elements);
     else pill.before.apply(pill, elements);
   }
@@ -572,8 +579,9 @@ LOADER_SCRIPT = r"""
     setTimeout(function () {
       element.remove();
       var visible = visibleBanners();
-      lastRenderKey = renderKey(visible, false);
-      if (visible.length) updatePill(root.querySelector('.obb-pill'), visible, false);
+      var collapsed = isCollapsed(visible);
+      lastRenderKey = renderKey(visible, collapsed);
+      if (visible.length) updatePill(root.querySelector('.obb-pill'), visible, collapsed);
       else root.replaceChildren();
       schedulePlace();
     }, LEAVE_MS);
@@ -635,11 +643,13 @@ LOADER_SCRIPT = r"""
       return LEVEL_ORDER.indexOf(level) > LEVEL_ORDER.indexOf(highest) ? level : highest;
     });
     var label = (collapsed ? 'Expand all (' : 'Collapse all (') + visible.length + ')';
-    pill.className = 'obb-pill obb-' + pillLevel + (collapsed ? '' : ' obb-open');
+    LEVEL_ORDER.forEach(function (level) { pill.classList.remove('obb-' + level); });
+    pill.classList.add('obb-pill', 'obb-' + pillLevel);
+    pill.classList.toggle('obb-open', !collapsed);
     pill.setAttribute('aria-label', label);
-    pill.setAttribute('aria-expanded', String(!collapsed));
+    pill.setAttribute('aria-expanded', !collapsed);
     pill.title = label;
-    pill.querySelector('.obb-count').textContent = String(visible.length);
+    pill.querySelector('.obb-count').textContent = visible.length;
   }
 
   function pillElement(visible, collapsed) {
@@ -648,8 +658,8 @@ LOADER_SCRIPT = r"""
     pill.innerHTML = '<span class="obb-dot"></span>' + svg(MEGAPHONE) + '<span class="obb-count"></span>' + svg(CHEVRON);
     updatePill(pill, visible, collapsed);
     pill.addEventListener('click', function () {
-      if (pill.getAttribute('aria-expanded') === 'true') collapseAll(pill);
-      else expandAll(pill);
+      if (pill.getAttribute('aria-expanded') === 'true') collapseAll();
+      else expandAll();
     });
     return pill;
   }
@@ -668,16 +678,14 @@ LOADER_SCRIPT = r"""
     lastRenderKey = key;
     // Forget an old collapse once the stack is open, or dismissing the banner that reopened it re-collapses it.
     if (visible.length && !collapsed) writeJson(COLLAPSED_KEY, {});
-    if (!visible.length) {
-      root.replaceChildren();
-      schedulePlace();
-      return;
+    var elements = [];
+    if (visible.length) {
+      var bannerElements = collapsed ? [] : visible.map(bannerElement);
+      staggerFromPill(bannerElements);
+      var pill = pillElement(visible, collapsed);
+      elements = CFG.position === 'top' ? [pill].concat(bannerElements) : bannerElements.concat([pill]);
+      elements.forEach(function (element) { replayAnimation(element, 'obb-enter'); });
     }
-    var cards = collapsed ? [] : visible.map(bannerElement);
-    staggerFromPill(cards);
-    var pill = pillElement(visible, collapsed);
-    var elements = CFG.position === 'top' ? [pill].concat(cards) : cards.concat([pill]);
-    elements.forEach(function (element) { playOnce(element, 'obb-enter'); });
     root.replaceChildren.apply(root, elements);
     schedulePlace();
   }

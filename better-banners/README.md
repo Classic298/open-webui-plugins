@@ -12,7 +12,7 @@ Makes the banners you already manage in **Admin Panel → Settings → General �
 |---|---|
 | 📍 **Two positions** | Show banners at the top of the chat or right above the message input. |
 | 💬 **In every chat** | Open WebUI shows banners only on the new chat screen. Better Banners keeps them visible inside every chat. |
-| 🔽 **Collapsible** | One small pill sits at the edge of the banners and shows how many there are. Clicking it collapses all banners into it, clicking again brings them back. The choice is remembered, and a new or edited banner expands them again for everyone. |
+| 🔽 **Collapsible** | One small pill sits at the edge of the banners and shows how many there are. Clicking it collapses all banners into it. Clicking it again brings them back. The choice is remembered, and a new or edited banner expands them again for everyone. |
 | ✖️ **Dismissible** | Banners with **Dismissible** turned on get a close button and stay gone for that user. Inside chats, banners without it cannot be closed, only collapsed. |
 | ⚡ **Live updates** | Add, edit or remove a banner and every open tab updates within about 2 seconds, without a reload. |
 | 🌍 **Translations** | Banner translations you set in the admin panel are shown in each user's language. |
