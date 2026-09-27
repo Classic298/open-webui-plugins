@@ -84,7 +84,7 @@ Any change to the protocol code has to bump `ASSET_IMPL_VERSION` by one, and the
 
 Using the protocol in your plugin? Open a pull request and add yourself here.
 
-| Author | Plugins |
+| Author | Repository |
 |---|---|
-| [Classic298](https://github.com/Classic298) | [Better Banners](../better-banners/) |
-| [G30](https://openwebui.com/u/g30) | Broadcast Toasts, Theme Designer Pro, Loaded Models Sidebar |
+| [Classic298](https://github.com/Classic298) | [Classic298/open-webui-plugins](https://github.com/Classic298/open-webui-plugins) |
+| [G30 (silentoplayz)](https://github.com/silentoplayz) | [silentoplayz/theme-designer-pro-presets](https://github.com/silentoplayz/theme-designer-pro-presets) |
