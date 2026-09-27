@@ -16,6 +16,13 @@ Each plugin lives in its own folder with a README explaining what it does, what 
 | <a href="email-composer/"><img width="1600" height="1600" alt="square-email-composer" src="https://github.com/user-attachments/assets/1c064281-0918-4253-a90a-8e11d37ea66c" /></a> | [Email Composer](email-composer/) | Draft emails with your model and get a **real email card in the chat**: edit the rich text, adjust To/CC/BCC and priority, then download it as .eml or hand it to your mail app with one click. | Tool |
 | <a href="mcp-app-bridge/"><img width="1600" height="1600" alt="square-mcp-app-bridge" src="https://github.com/user-attachments/assets/5aaa2720-5ba4-4c06-b8b3-b8b861182b55" /></a> | [MCP App Bridge](mcp-app-bridge/) | Use **MCP Apps** (SEP-1865) inside your chat: connect an MCP server and its tools **bring their own interactive interface**, rendered as an embedded panel right where the model called them. No middleware and no core changes needed. | Tool |
 | <a href="vision-bridge/"><img width="1600" height="1600" alt="square-vision-bridge" src="https://github.com/user-attachments/assets/ea2c1b67-15ca-4568-9e96-1daa9605bba2" /></a> | [Vision Bridge](vision-bridge/) | Lets a **text-only model work with images**: attach a picture, or let the model create one in Open Terminal, and it asks a separate vision model to look at it on demand, then comes back with new questions about the same image any time. No core changes. | Filter + Tool |
+| | [Better Banners](better-banners/) | ⭐ **NEW** ⭐ Your admin **banners, in every chat**: at the top of the page or right above the message input, collapsible, dismissible, **updated live** and shown in each user's language. | Event |
+
+---
+
+## Shared Assets Protocol
+
+Plugins that add JavaScript or CSS to every Open WebUI page can use the [Shared Assets Protocol](shared-assets-protocol/), a community standard that lets them all run side by side without overwriting each other.
 
 ---
 

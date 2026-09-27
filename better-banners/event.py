@@ -1,0 +1,849 @@
+"""
+title: Better Banners
+author: Classic298
+author_url: https://github.com/Classic298
+funding_url: https://github.com/Classic298
+version: 1.0.0
+required_open_webui_version: 0.11.4
+description: Shows the banners from Admin Panel → Settings → General → Banners in every chat, at the top of the page or right above the message input. Users can collapse any banner and dismiss the dismissible ones, and both choices are remembered. Banner edits reach open tabs live, in each user's language. Inspired by Broadcast Toasts by G30.
+"""
+
+import hashlib
+import json
+import time
+from pathlib import Path
+from typing import Any, Literal, Optional
+
+from pydantic import BaseModel, Field
+
+# ===========================================================================
+# Shared static-asset registry
+# --- KEEP BYTE-IDENTICAL IN EVERY PLUGIN THAT USES IT ----------------------
+# ---------------------------------------------------------------------------
+# app.html loads /static/loader.js and /static/custom.css on every page, and
+# loader.js is the only hook running before the SvelteKit bundle hydrates. Two
+# URLs, many plugins - so none may own either. Each publishes a fragment into
+# one app.state registry and the route composes them PER REQUEST, so load order
+# is irrelevant, a late plugin needs no cooperation, and a re-exec'd one
+# replaces its own key. Per-process: each container serves what it has loaded.
+#
+# Fragments are inlined, never <script src> / @import - a second request would
+# land after hydration, defeating the point.
+#
+# Contract:
+#   * ASSET_REGISTRY_ATTR, ASSET_ROUTE_ATTR, the entry shape and the paths are
+#     the interop surface. Everything else is implementation owned by whichever
+#     plugin created the route - a stale copy silently serves everyone, hence
+#     ASSET_IMPL_VERSION and byte-identity.
+#   * `key` must be a module-level constant. Derive it from a build id or a
+#     function id and a re-exec registers a SECOND entry - duplicated output,
+#     not just a leaked closure.
+#   * `order` breaks ties: lower composes first, so on custom.css it loses the
+#     cascade and on loader.js it wraps innermost. Default 0. Use it instead of
+#     encoding priority in the key, which would only work if every plugin
+#     renamed at once.
+#   * Producers run SYNCHRONOUSLY on the event loop, on every request, and
+#     BEFORE the ETag is compared - so a 304 costs exactly what a 200 costs.
+#     "Cheap" is per-call work, not payload size: memoise anything that
+#     parses, formats or regexes and return a prebuilt string. No I/O, no
+#     locks, no sleeps. Budget tens of microseconds, not milliseconds.
+#   * To withdraw, return "" - there is no unregister. A disabled plugin still
+#     gets function.disable_started (it fires before is_active flips), but a
+#     DELETED one never sees its own deletion, so disable before deleting or
+#     the fragment serves until that process restarts.
+#   * Reach is the SPA only. A plugin serving its own HTML page loads neither
+#     asset and must inject its own.
+# ===========================================================================
+LOADER_PATH = "/static/loader.js"
+CUSTOM_CSS_PATH = "/static/custom.css"
+SHARED_ASSET_TYPES = {
+    LOADER_PATH: "application/javascript; charset=utf-8",
+    CUSTOM_CSS_PATH: "text/css; charset=utf-8",
+}
+ASSET_REGISTRY_ATTR = "_owui_static_fragments"  # {path: {key: entry}}
+ASSET_ROUTE_ATTR = "_owui_shared_asset"  # set to the path the route serves
+ASSET_IMPL_ATTR = "_owui_shared_asset_impl"  # implementation version of the route
+# Bump when this block changes behaviour: newer evicts older, so the fleet
+# converges on one implementation instead of whichever plugin booted first.
+ASSET_IMPL_VERSION = 4
+
+# Producer failures are reported once per (path, key, exception type) - compose
+# runs on every page load, so an unconditional warning would be a firehose.
+_ASSET_WARNED: set = set()
+
+
+def asset_fragments(app: Any, path: str) -> dict:
+    registry = getattr(app.state, ASSET_REGISTRY_ATTR, None)
+    if not isinstance(registry, dict):
+        registry = {}
+        app.state.__setattr__(ASSET_REGISTRY_ATTR, registry)
+    bucket = registry.get(path)
+    if not isinstance(bucket, dict):
+        bucket = {}
+        registry[path] = bucket
+    return bucket
+
+
+def asset_sort_key(item):
+    """(order, key). Coerced defensively: a non-int order from a third-party
+    plugin would raise inside sorted(), outside the per-fragment guard, and
+    take down the whole asset."""
+    key, entry = item
+    try:
+        order = int(entry.get("order", 0))
+    except (TypeError, ValueError):
+        order = 0
+    return (order, key)
+
+
+def asset_strip_block(content: str, start_marker: str, end_marker: str) -> str:
+    """Remove every marker-wrapped block, leaving other content untouched."""
+    while start_marker in content:
+        start = content.find(start_marker)
+        end = content.find(end_marker, start)
+        if end == -1:
+            # No end marker: the block was appended last, so drop to EOF.
+            content = content[:start]
+            break
+        end += len(end_marker)
+        if content[end : end + 1] == "\n":
+            end += 1
+        content = content[:start] + content[end:]
+    return content
+
+
+def asset_compose(app: Any, path: str) -> str:
+    """Disk file plus every registered fragment, in (order, key) order."""
+    import logging
+
+    try:
+        from open_webui.env import STATIC_DIR
+
+        target = Path(STATIC_DIR) / path.rsplit("/", 1)[-1]
+        body = (
+            ""
+            if (target.is_symlink() or not target.is_file())
+            else target.read_text(encoding="utf-8")
+        )
+    except Exception:
+        body = ""
+
+    ordered = sorted(asset_fragments(app, path).items(), key=asset_sort_key)
+    # Strip first: an older file-writing build may have left a block on disk.
+    for _key, entry in ordered:
+        body = asset_strip_block(body, entry["start"], entry["end"])
+    body = body.rstrip()
+
+    for key, entry in ordered:
+        try:
+            block = (entry["js"]() or "").strip()
+        except Exception as exc:
+            mark = (path, key, type(exc).__name__)
+            if mark not in _ASSET_WARNED:
+                if len(_ASSET_WARNED) > 256:
+                    _ASSET_WARNED.clear()
+                _ASSET_WARNED.add(mark)
+                logging.getLogger("owui-shared-assets").warning(
+                    "fragment %r failed for %s - it will be omitted",
+                    key,
+                    path,
+                    exc_info=True,
+                )
+            continue
+        if block:
+            body = (body + "\n\n" if body else "") + block
+    return body + "\n" if body else ""
+
+
+def asset_register(
+    app: Any, path: str, key: str, start: str, end: str, producer, order: int = 0
+) -> None:
+    """Publish a fragment and ensure the route exists. Idempotent, and safe
+    from any plugin in any order."""
+    from starlette.responses import Response
+    from starlette.routing import Mount, Route
+
+    asset_fragments(app, path)[key] = {
+        "start": start,
+        "end": end,
+        "js": producer,
+        "order": order,
+    }
+
+    for existing in app.routes:
+        if getattr(existing, ASSET_ROUTE_ATTR, None) != path:
+            continue
+        if getattr(existing, ASSET_IMPL_ATTR, 0) >= ASSET_IMPL_VERSION:
+            return  # an equal or newer implementation already owns the route
+        break  # ours is newer - fall through and replace it
+
+    # Replaces a single-owner route from an older build, or an older impl of
+    # this block. Fragments live on app.state, so nothing is lost.
+    app.routes[:] = [r for r in app.routes if getattr(r, "path", "") != path]
+    media_type = SHARED_ASSET_TYPES.get(path, "text/plain; charset=utf-8")
+
+    async def serve_asset(request):
+        content = asset_compose(app, path)
+        etag = (
+            '"owui-'
+            # usedforsecurity=False: this is a cache validator, not a security
+            # primitive, and a bare md5() raises ValueError on a FIPS host -
+            # which would 500 the asset for every visitor.
+            + hashlib.md5(
+                (path + "\x00" + content).encode("utf-8"), usedforsecurity=False
+            ).hexdigest()
+            + '"'
+        )
+        # no-cache, NOT no-store: a response the browser may not store has no
+        # validator, so If-None-Match is never sent and the 304 below is dead
+        # code. no-cache still forbids reuse without revalidation, so a stale
+        # body is impossible either way. Note a proxy may re-add no-store for
+        # these paths, which puts the 304 back to sleep - that is deployment
+        # policy, not this block's business.
+        headers = {
+            "Cache-Control": "no-cache, must-revalidate, private",
+            "ETag": etag,
+        }
+        if request.headers.get("if-none-match") == etag:
+            return Response(status_code=304, headers=headers)
+        # Starlette only auto-appends charset for text/*, so JS would ship
+        # undeclared and readers guessing latin-1 get mojibake.
+        return Response(content, media_type=media_type, headers=headers)
+
+    insert_at = len(app.routes)
+    for position, existing in enumerate(app.routes):
+        if isinstance(existing, Mount) and getattr(existing, "name", "") == "static":
+            insert_at = position
+            break
+    shared = Route(path, serve_asset, methods=["GET"])
+    setattr(shared, ASSET_ROUTE_ATTR, path)
+    setattr(shared, ASSET_IMPL_ATTR, ASSET_IMPL_VERSION)
+    app.routes.insert(insert_at, shared)
+
+
+# =========================== end shared asset block ========================
+
+
+SOCKET_EVENT = "owui:better-banners"
+BANNERS_UPDATED_EVENT = "config.banners.updated"
+DISABLED_CHECK_SECONDS = 1.0
+LOADER_BLOCK_START = "// owui-better-banners:start"
+LOADER_BLOCK_END = "// owui-better-banners:end"
+ASSET_KEY = "better-banners"
+
+BANNER_CSS = r"""
+#owui-better-banners{--obb-surface:rgba(255,255,255,.78);--obb-text:#1f2937;--obb-muted:#6b7280;--obb-hover:rgba(0,0,0,.06);display:flex;flex-direction:column;gap:6px;box-sizing:border-box;overflow-y:auto;overscroll-behavior:contain;scrollbar-width:thin}
+html.dark #owui-better-banners{--obb-surface:rgba(23,23,23,.72);--obb-text:#f3f4f6;--obb-muted:#9ca3af;--obb-hover:rgba(255,255,255,.08)}
+#owui-better-banners[data-position="top"]{flex:none;width:100%;max-width:58rem;max-height:40vh;margin:3rem auto 0;padding:0 8px}
+#owui-better-banners[data-position="bottom"]{width:100%;max-height:40vh;margin:0 0 8px}
+.obb-banner{pointer-events:auto;position:relative;display:flex;align-items:flex-start;gap:10px;padding:8px 6px 8px 12px;border-radius:16px;border:1px solid color-mix(in srgb,var(--obb-accent) 24%,transparent);background:linear-gradient(color-mix(in srgb,var(--obb-accent) 10%,transparent),color-mix(in srgb,var(--obb-accent) 10%,transparent)),var(--obb-surface);-webkit-backdrop-filter:blur(18px) saturate(1.4);backdrop-filter:blur(18px) saturate(1.4);box-shadow:0 6px 20px -12px rgba(0,0,0,.25);color:var(--obb-text);font-size:.8125rem;line-height:1.5;text-align:left;animation:obb-in .22s cubic-bezier(.22,1,.36,1)}
+.obb-info{--obb-accent:#3b82f6}.obb-success{--obb-accent:#22c55e}.obb-warning{--obb-accent:#f59e0b}.obb-error{--obb-accent:#ef4444}
+.obb-icon{flex:none;width:16px;height:16px;margin-top:2px;color:var(--obb-accent)}
+.obb-body{flex:1;min-width:0;cursor:default}
+.obb-title{font-weight:600}
+.obb-content{max-height:var(--obb-max-height,160px);overflow-y:auto;overflow-wrap:anywhere;scrollbar-width:thin}
+.obb-content ul,.obb-content ol{margin:2px 0;padding-left:20px}
+.obb-content ul{list-style:disc}.obb-content ol{list-style:decimal}
+.obb-content a{color:inherit;text-decoration:underline;text-underline-offset:2px}
+.obb-content code{font-size:.75rem;padding:1px 5px;border-radius:6px;background:var(--obb-hover)}
+.obb-preview{display:none;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}
+.obb-collapsed .obb-body{cursor:pointer}
+.obb-collapsed .obb-title,.obb-collapsed .obb-content{display:none}
+.obb-collapsed .obb-preview{display:block}
+.obb-actions{flex:none;display:flex;gap:2px;margin:-2px 0}
+.obb-button{display:flex;align-items:center;justify-content:center;width:24px;height:24px;padding:0;border:0;border-radius:8px;background:transparent;color:var(--obb-muted);cursor:pointer}
+.obb-button:hover{background:var(--obb-hover);color:var(--obb-text)}
+.obb-button:focus-visible{outline:2px solid var(--obb-accent);outline-offset:1px}
+.obb-button svg{width:14px;height:14px}
+.obb-chevron svg{transition:transform .18s}
+.obb-collapsed .obb-chevron svg{transform:rotate(-90deg)}
+.obb-leave{animation:obb-out .16s ease-in forwards}
+@keyframes obb-in{from{opacity:0;transform:translateY(-4px)}to{opacity:1;transform:none}}
+@keyframes obb-out{to{opacity:0;transform:scale(.98)}}
+@media (prefers-reduced-motion:reduce){.obb-banner,.obb-leave{animation-duration:.01ms}.obb-chevron svg{transition:none}}
+#new-chat-button~nav>.absolute.top-\[100\%\]{display:none!important}
+"""
+
+LOADER_SCRIPT = r"""
+(function () {
+  'use strict';
+  if (window.__owuiBetterBanners) return;
+  window.__owuiBetterBanners = true;
+
+  var CFG = __CONFIG__;
+  var CSS = __CSS__;
+  var COLLAPSED_KEY = 'owui-better-banners:collapsed';
+  // Open WebUI's own key, so dismissals carry over in both directions.
+  var DISMISSED_KEY = 'dismissedBannerIds';
+  var FRAME = '42["' + CFG.event + '"';
+  var SYNC_SPREAD_MS = 2000;
+  var ICONS = {
+    info: '<circle cx="12" cy="12" r="9"/><path d="M12 11v5"/><path d="M12 8h.01"/>',
+    success: '<circle cx="12" cy="12" r="9"/><path d="m8.5 12.5 2.5 2.5 4.5-5"/>',
+    warning: '<path d="M10.3 4.2 2.6 17.6a2 2 0 0 0 1.7 3h15.4a2 2 0 0 0 1.7-3L13.7 4.2a2 2 0 0 0-3.4 0Z"/><path d="M12 10v4"/><path d="M12 17h.01"/>',
+    error: '<circle cx="12" cy="12" r="9"/><path d="m9.5 9.5 5 5"/><path d="m14.5 9.5-5 5"/>'
+  };
+  var CHEVRON = '<path d="m6 9 6 6 6-6"/>';
+  var CLOSE = '<path d="M6 6l12 12"/><path d="M18 6 6 18"/>';
+
+  var banners = [];
+  var root = null;
+  var placeQueued = false;
+  var inflight = false;
+  var syncAgain = false;
+  var syncTimer = null;
+  var lastToken = null;
+
+  function token() {
+    try { return localStorage.getItem('token') || ''; } catch (e) { return ''; }
+  }
+
+  function readJson(key, fallback) {
+    try {
+      var value = JSON.parse(localStorage.getItem(key) || 'null');
+      return value && typeof value === 'object' ? value : fallback;
+    } catch (e) {
+      return fallback;
+    }
+  }
+
+  function writeJson(key, value) {
+    try { localStorage.setItem(key, JSON.stringify(value)); } catch (e) {}
+  }
+
+  function svg(paths) {
+    return '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' + paths + '</svg>';
+  }
+
+  // Same lookup as Open WebUI's resolveLocalizedString: exact locale, then its base language.
+  function localized(banner, field) {
+    var lang = (document.documentElement.getAttribute('lang') || '').trim();
+    var base = lang.split('-')[0];
+    var candidates = base && base !== lang ? [lang, base] : lang ? [lang] : [];
+    for (var i = 0; i < candidates.length; i++) {
+      var entry = banner.i18n && banner.i18n[candidates[i]];
+      var value = entry && entry[field];
+      if (typeof value === 'string' && value.trim()) return value;
+    }
+    return typeof banner[field] === 'string' ? banner[field] : '';
+  }
+
+  function fingerprint(banner) {
+    var text = JSON.stringify([banner.type, banner.title || '', banner.content, banner.i18n || null]);
+    var hash = 5381;
+    for (var i = 0; i < text.length; i++) hash = ((hash << 5) + hash + text.charCodeAt(i)) | 0;
+    return (hash >>> 0).toString(36);
+  }
+
+  function isSafeUrl(url) {
+    return /^(https?:\/\/|mailto:|\/(?!\/))/i.test(url);
+  }
+
+  function appendLink(target, href, label) {
+    var link = document.createElement('a');
+    link.href = href;
+    link.target = '_blank';
+    link.rel = 'noopener noreferrer';
+    link.textContent = label;
+    target.appendChild(link);
+  }
+
+  function appendInline(target, text) {
+    var pattern = /\*\*([^*]+)\*\*|__([^_]+)__|\*([^*\s][^*]*)\*|`([^`]+)`|\[([^\]]+)\]\(((?:[^()\s]|\([^()\s]*\))+)\)|https?:\/\/[^\s<>"']+/g;
+    var last = 0;
+    var match;
+    while ((match = pattern.exec(text))) {
+      var raw = match[0];
+      var isBareUrl = /^https?:/.test(raw);
+      if (isBareUrl) {
+        raw = raw.replace(/[.,;:!?]+$/, '');
+        while (raw.slice(-1) === ')' && raw.split('(').length < raw.split(')').length) raw = raw.slice(0, -1);
+        pattern.lastIndex = match.index + raw.length;
+      }
+      if (match.index > last) target.appendChild(document.createTextNode(text.slice(last, match.index)));
+      var bold = match[1] || match[2];
+      var italic = match[3];
+      if (bold || italic) {
+        var emphasis = document.createElement(bold ? 'strong' : 'em');
+        appendInline(emphasis, bold || italic);
+        target.appendChild(emphasis);
+      } else if (match[4]) {
+        var code = document.createElement('code');
+        code.textContent = match[4];
+        target.appendChild(code);
+      } else if (match[5]) {
+        if (isSafeUrl(match[6])) appendLink(target, match[6], match[5]);
+        else target.appendChild(document.createTextNode(match[5]));
+      } else {
+        appendLink(target, raw, raw);
+      }
+      last = match.index + raw.length;
+    }
+    if (last < text.length) target.appendChild(document.createTextNode(text.slice(last)));
+  }
+
+  function renderMarkdown(target, text) {
+    var list = null;
+    var needsBreak = false;
+    String(text).replace(/\r\n/g, '\n').split('\n').forEach(function (line) {
+      var item = /^\s*(?:[-*+]|(\d+)[.)])\s+(.*)$/.exec(line);
+      if (item) {
+        var listTag = item[1] ? 'OL' : 'UL';
+        if (!list || list.tagName !== listTag) {
+          list = document.createElement(listTag);
+          target.appendChild(list);
+        }
+        var li = document.createElement('li');
+        appendInline(li, item[2]);
+        list.appendChild(li);
+        needsBreak = false;
+        return;
+      }
+      list = null;
+      if (needsBreak) target.appendChild(document.createElement('br'));
+      var heading = /^\s*#{1,6}\s+(.*)$/.exec(line);
+      if (heading) {
+        var strong = document.createElement('strong');
+        appendInline(strong, heading[1]);
+        target.appendChild(strong);
+      } else {
+        appendInline(target, line);
+      }
+      needsBreak = true;
+    });
+  }
+
+  function plainPreview(banner) {
+    var title = localized(banner, 'title').trim();
+    var content = localized(banner, 'content')
+      .replace(/^\s*(?:[-*+]|\d+[.)])\s+/gm, '')
+      .replace(/\[([^\]]+)\]\((?:[^()]|\([^()]*\))*\)/g, '$1')
+      .replace(/[*`#]|__/g, '')
+      .replace(/\s+/g, ' ')
+      .trim();
+    return title ? title + (content ? ' · ' + content : '') : content;
+  }
+
+  function dismissedIds() {
+    var ids = readJson(DISMISSED_KEY, []);
+    return Array.isArray(ids) ? ids : [];
+  }
+
+  function collapsedMap() {
+    var map = readJson(COLLAPSED_KEY, {});
+    return Array.isArray(map) ? {} : map;
+  }
+
+  function visibleBanners() {
+    var dismissed = dismissedIds();
+    return banners.filter(function (banner) {
+      return !(banner.dismissible && dismissed.indexOf(banner.id) !== -1);
+    });
+  }
+
+  function isNewChat() {
+    return location.pathname === '/' || location.pathname === '';
+  }
+
+  function anchor() {
+    var chatNav = document.querySelector('#new-chat-button ~ nav');
+    if (!chatNav) return null;
+    if (CFG.newChatOnly && !isNewChat()) return null;
+    if (CFG.position === 'top') {
+      // In the page flow, so the chat moves down instead of hiding under the banners.
+      var pane = document.getElementById('chat-pane');
+      if (!pane) return null;
+      return { parent: pane, before: pane.firstChild === root ? root.nextSibling : pane.firstChild };
+    }
+    var input = document.getElementById('message-input-container');
+    var form = input && input.closest('form');
+    return form && form.parentNode ? { parent: form.parentNode, before: form } : null;
+  }
+
+  function ensureStyle() {
+    if (document.getElementById('owui-better-banners-style')) return;
+    var style = document.createElement('style');
+    style.id = 'owui-better-banners-style';
+    style.textContent = CSS;
+    (document.head || document.documentElement).appendChild(style);
+  }
+
+  function ensureRoot() {
+    if (root) return root;
+    root = document.createElement('div');
+    root.id = 'owui-better-banners';
+    root.setAttribute('role', 'region');
+    root.setAttribute('aria-label', 'Announcements');
+    root.dataset.position = CFG.position;
+    root.style.setProperty('--obb-max-height', CFG.maxHeight + 'px');
+    return root;
+  }
+
+  function place() {
+    placeQueued = false;
+    var current = token();
+    if (current !== lastToken) {
+      lastToken = current;
+      sync();
+    }
+    var target = root && root.childNodes.length ? anchor() : null;
+    if (!target) {
+      if (root && root.parentNode) root.parentNode.removeChild(root);
+      return;
+    }
+    var misplaced = root.parentNode !== target.parent || (target.before && root.nextSibling !== target.before);
+    if (misplaced) target.parent.insertBefore(root, target.before);
+  }
+
+  function schedulePlace() {
+    if (placeQueued) return;
+    placeQueued = true;
+    requestAnimationFrame(place);
+  }
+
+  function setCollapsed(banner, element, collapsed) {
+    var map = collapsedMap();
+    if (collapsed) map[banner.id] = fingerprint(banner);
+    else delete map[banner.id];
+    writeJson(COLLAPSED_KEY, map);
+    element.classList.toggle('obb-collapsed', collapsed);
+    var toggle = element.querySelector('.obb-chevron');
+    toggle.setAttribute('aria-expanded', String(!collapsed));
+    toggle.setAttribute('aria-label', collapsed ? 'Expand' : 'Collapse');
+    toggle.title = collapsed ? 'Expand' : 'Collapse';
+  }
+
+  function dismiss(banner, element) {
+    var remaining = banners.map(function (b) { return b.id; });
+    var ids = [banner.id].concat(dismissedIds()).filter(function (id) {
+      return remaining.indexOf(id) !== -1;
+    });
+    writeJson(DISMISSED_KEY, ids);
+    element.classList.add('obb-leave');
+    setTimeout(function () {
+      element.remove();
+      schedulePlace();
+    }, 200);
+  }
+
+  function button(className, paths, label) {
+    var el = document.createElement('button');
+    el.type = 'button';
+    el.className = 'obb-button ' + className;
+    el.setAttribute('aria-label', label);
+    el.title = label;
+    el.innerHTML = svg(paths);
+    return el;
+  }
+
+  function bannerElement(banner, collapsed) {
+    var level = ICONS[banner.type] ? banner.type : 'info';
+    var element = document.createElement('div');
+    element.className = 'obb-banner obb-' + level + (collapsed ? ' obb-collapsed' : '');
+    element.dataset.id = banner.id;
+
+    var icon = document.createElement('span');
+    icon.className = 'obb-icon';
+    icon.innerHTML = svg(ICONS[level]);
+    element.appendChild(icon);
+
+    var body = document.createElement('div');
+    body.className = 'obb-body';
+    var title = localized(banner, 'title').trim();
+    if (title) {
+      var heading = document.createElement('div');
+      heading.className = 'obb-title';
+      heading.textContent = title;
+      body.appendChild(heading);
+    }
+    var content = document.createElement('div');
+    content.className = 'obb-content';
+    renderMarkdown(content, localized(banner, 'content'));
+    body.appendChild(content);
+    var preview = document.createElement('div');
+    preview.className = 'obb-preview';
+    preview.textContent = plainPreview(banner);
+    body.appendChild(preview);
+    body.addEventListener('click', function () {
+      if (element.classList.contains('obb-collapsed')) setCollapsed(banner, element, false);
+    });
+    element.appendChild(body);
+
+    var actions = document.createElement('div');
+    actions.className = 'obb-actions';
+    var toggle = button('obb-chevron', CHEVRON, collapsed ? 'Expand' : 'Collapse');
+    toggle.setAttribute('aria-expanded', String(!collapsed));
+    toggle.addEventListener('click', function () {
+      setCollapsed(banner, element, !element.classList.contains('obb-collapsed'));
+    });
+    actions.appendChild(toggle);
+    if (banner.dismissible) {
+      var close = button('obb-close', CLOSE, 'Dismiss');
+      close.addEventListener('click', function () { dismiss(banner, element); });
+      actions.appendChild(close);
+    }
+    element.appendChild(actions);
+    return element;
+  }
+
+  function render() {
+    ensureRoot();
+    var collapsed = collapsedMap();
+    var elements = visibleBanners().map(function (banner) {
+      return bannerElement(banner, collapsed[banner.id] === fingerprint(banner));
+    });
+    root.replaceChildren.apply(root, elements);
+    schedulePlace();
+  }
+
+  function pruneCollapsed() {
+    var map = collapsedMap();
+    var kept = {};
+    banners.forEach(function (banner) {
+      if (map[banner.id]) kept[banner.id] = map[banner.id];
+    });
+    writeJson(COLLAPSED_KEY, kept);
+  }
+
+  function sync() {
+    if (syncTimer) {
+      clearTimeout(syncTimer);
+      syncTimer = null;
+    }
+    var auth = token();
+    if (!auth) {
+      banners = [];
+      render();
+      return;
+    }
+    if (inflight) {
+      syncAgain = true;
+      return;
+    }
+    inflight = true;
+    fetch('/api/v1/configs/banners', {
+      headers: { Authorization: 'Bearer ' + auth },
+      credentials: 'same-origin',
+      cache: 'no-store'
+    })
+      .then(function (res) { return res.ok ? res.json() : null; })
+      .then(function (data) {
+        if (!Array.isArray(data)) return;
+        banners = data;
+        pruneCollapsed();
+        render();
+      })
+      .catch(function () {})
+      .then(function () {
+        inflight = false;
+        if (syncAgain) {
+          syncAgain = false;
+          sync();
+        }
+      });
+  }
+
+  // Spread over a short window so an edit does not hit the server with every tab at once.
+  function scheduleSync() {
+    if (syncTimer) return;
+    syncTimer = setTimeout(function () {
+      syncTimer = null;
+      sync();
+    }, Math.floor(Math.random() * SYNC_SPREAD_MS));
+  }
+
+  function onFrame(evt) {
+    var raw = evt.data;
+    if (typeof raw === 'string' && raw.lastIndexOf(FRAME, 0) === 0) scheduleSync();
+  }
+
+  // Plugins get no handle on the app's socket, so hook WebSocket to hear the change signal.
+  function hookSocket() {
+    var proto = window.WebSocket.prototype;
+    var listen = proto.addEventListener;
+    var watched = new WeakSet();
+    var connectedBefore = false;
+
+    function watch(ws) {
+      if (watched.has(ws)) return;
+      watched.add(ws);
+      if (String(ws.url).indexOf('socket.io') === -1) return;
+      listen.call(ws, 'message', onFrame);
+      // The first connection comes with the page load, which already fetched.
+      listen.call(ws, 'open', function () {
+        if (connectedBefore) scheduleSync();
+        connectedBefore = true;
+      });
+    }
+
+    ['onmessage', 'onopen'].forEach(function (name) {
+      var desc = Object.getOwnPropertyDescriptor(proto, name);
+      if (!desc || !desc.set || !desc.configurable) return;
+      Object.defineProperty(proto, name, {
+        configurable: true,
+        enumerable: desc.enumerable,
+        get: desc.get,
+        set: function (fn) {
+          watch(this);
+          desc.set.call(this, fn);
+        }
+      });
+    });
+
+    proto.addEventListener = function (type, fn, options) {
+      if (type === 'message' || type === 'open') watch(this);
+      return listen.call(this, type, fn, options);
+    };
+  }
+
+  function start() {
+    lastToken = token();
+    sync();
+    new MutationObserver(schedulePlace).observe(document.body, { childList: true, subtree: true });
+    new MutationObserver(function () { if (banners.length) render(); })
+      .observe(document.documentElement, { attributes: true, attributeFilter: ['lang'] });
+    document.addEventListener('visibilitychange', function () {
+      if (!document.hidden) scheduleSync();
+    });
+    window.addEventListener('storage', function (evt) {
+      if (evt.key === DISMISSED_KEY || evt.key === COLLAPSED_KEY) render();
+      if (evt.key === 'token') sync();
+    });
+    if (CFG.resync > 0) {
+      setInterval(function () { if (!document.hidden) sync(); }, CFG.resync * 1000);
+    }
+  }
+
+  ensureStyle();
+  hookSocket();
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', start, { once: true });
+  } else {
+    start();
+  }
+})();
+"""
+
+
+class Event:
+    class Valves(BaseModel):
+        position: Literal["top", "bottom"] = Field(
+            default="top",
+            description="Where banners appear: at the top of the chat, or right above the message input.",
+        )
+        new_chat_only: bool = Field(
+            default=False,
+            description="Show banners only on the new chat screen, like Open WebUI does. Off shows them in every chat.",
+        )
+        max_height_px: int = Field(
+            default=160,
+            ge=60,
+            le=600,
+            description="Tallest a single expanded banner gets before its text scrolls.",
+        )
+        resync_interval_seconds: int = Field(
+            default=300,
+            ge=0,
+            le=3600,
+            description="How often each open tab re-reads the banners on its own, as a backstop for a live update it missed. 0 turns it off.",
+        )
+
+    _fragment_cache: Optional[tuple] = None
+    _disabled_cache: Optional[tuple] = None
+
+    def __init__(self):
+        self.valves = self.Valves()
+
+    def _loader_fragment(self) -> str:
+        valves = self.valves
+        is_disabled = Event._is_disabled()
+        cache_key = (
+            is_disabled,
+            valves.position,
+            valves.new_chat_only,
+            valves.max_height_px,
+            valves.resync_interval_seconds,
+        )
+        if Event._fragment_cache and Event._fragment_cache[0] == cache_key:
+            return Event._fragment_cache[1]
+        if is_disabled:
+            fragment = ""
+        else:
+            config = json.dumps(
+                {
+                    "event": SOCKET_EVENT,
+                    "position": valves.position,
+                    "newChatOnly": valves.new_chat_only,
+                    "maxHeight": valves.max_height_px,
+                    "resync": valves.resync_interval_seconds,
+                }
+            )
+            script = (
+                LOADER_SCRIPT.strip()
+                .replace("__CONFIG__", config)
+                .replace("__CSS__", json.dumps(BANNER_CSS.strip()))
+            )
+            fragment = f"{LOADER_BLOCK_START}\n{script}\n{LOADER_BLOCK_END}"
+        Event._fragment_cache = (cache_key, fragment)
+        return fragment
+
+    # Other workers never get this function's disable event, so the state lives on disk.
+    @staticmethod
+    def _disabled_marker() -> Path:
+        from open_webui.config import CACHE_DIR
+
+        return Path(CACHE_DIR) / "better_banners" / "disabled"
+
+    @classmethod
+    def _set_disabled(cls, disabled: bool) -> None:
+        cls._disabled_cache = (time.monotonic(), disabled)
+        marker = cls._disabled_marker()
+        if disabled:
+            marker.parent.mkdir(parents=True, exist_ok=True)
+            marker.touch()
+        else:
+            marker.unlink(missing_ok=True)
+
+    @classmethod
+    def _is_disabled(cls) -> bool:
+        now = time.monotonic()
+        if (
+            cls._disabled_cache
+            and now - cls._disabled_cache[0] < DISABLED_CHECK_SECONDS
+        ):
+            return cls._disabled_cache[1]
+        disabled = cls._disabled_marker().exists()
+        cls._disabled_cache = (now, disabled)
+        return disabled
+
+    async def event(
+        self,
+        event: Optional[dict] = None,
+        __event_name__: str = "",
+        __id__: str = "",
+        __app__: Any = None,
+        **kwargs,
+    ) -> None:
+        is_own = ((event or {}).get("subject") or {}).get("id") == __id__
+        if is_own and __event_name__ == "function.disable_started":
+            Event._set_disabled(True)
+            return
+
+        if is_own and __event_name__ == "function.enable_started":
+            Event._set_disabled(False)
+        elif Event._is_disabled():
+            return
+
+        asset_register(
+            __app__,
+            LOADER_PATH,
+            ASSET_KEY,
+            LOADER_BLOCK_START,
+            LOADER_BLOCK_END,
+            self._loader_fragment,
+        )
+
+        if __event_name__ == BANNERS_UPDATED_EVENT:
+            from open_webui.socket.main import sio
+
+            await sio.emit(SOCKET_EVENT, {})
