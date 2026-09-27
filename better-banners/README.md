@@ -1,5 +1,3 @@
-<img width="2800" height="1800" alt="better-banners-pill-bottom-dark" src="https://github.com/user-attachments/assets/9083ff5c-2aa3-4e87-8917-7bfd9dbceed7" />
-<img width="2800" height="1800" alt="better-banners-pill-top-light" src="https://github.com/user-attachments/assets/63d7aa03-8c1b-4dae-9ccc-2be9ad9a40ce" />
 # 📣 Better Banners
 
 <img width="6400" height="1600" alt="banner-better-banners" src="https://github.com/user-attachments/assets/6296f5ce-2ec9-4df4-aab4-628585ca7124" />
@@ -14,7 +12,7 @@ Makes the banners you already manage in **Admin Panel → Settings → General �
 |---|---|
 | 📍 **Two positions** | Show banners at the top of the chat or right above the message input. |
 | 💬 **In every chat** | Open WebUI only shows banners on the new chat screen. Here they stay visible in every chat (or only on new chats, if you prefer). |
-| 🔽 **Collapsible** | Every banner can be folded into a single line. The choice is remembered per banner, and a banner you edit opens up again for everyone. |
+| 🔽 **Collapsible** | One click collapses all banners into a small pill that shows how many there are. Clicking the pill brings them back. The choice is remembered, and a new or edited banner expands them again for everyone. |
 | ✖️ **Dismissible** | Banners with **Dismissible** turned on get a close button and stay gone for that user. Banners without it cannot be closed, only collapsed. |
 | ⚡ **Live updates** | Add, edit or remove a banner and every open tab updates within about 2 seconds, without a reload. |
 | 🌍 **Translations** | Banner translations you set in the admin panel are shown in each user's language. |
@@ -29,8 +27,10 @@ Makes the banners you already manage in **Admin Panel → Settings → General �
 | At the top of the chat | Right above the message input |
 |---|---|
 | <img width="2800" height="1800" alt="better-banners-top-light" src="https://github.com/user-attachments/assets/74f21bbc-26ef-4d30-93db-8f50db00c9ad" /> | <img width="2800" height="1800" alt="better-banners-bottom-dark" src="https://github.com/user-attachments/assets/a9ca576d-fe5b-408a-9812-6afb4c5e41bd" /> |
-| **Collapsed to one line** | **In each user's language** |
-| <img width="2800" height="1800" alt="better-banners-collapsed-dark" src="https://github.com/user-attachments/assets/458b7f14-de0e-494c-85e2-d4462fd8dcd7" /> | <img width="2800" height="1800" alt="better-banners-i18n-de" src="https://github.com/user-attachments/assets/e529aaf1-62f3-4b1e-9544-616c87efa6c7" /> |
+| **Collapsed into the pill, at the top** | **Collapsed into the pill, above the input** |
+| <img width="2800" height="1800" alt="better-banners-pill-top-light" src="https://github.com/user-attachments/assets/63d7aa03-8c1b-4dae-9ccc-2be9ad9a40ce" /> | <img width="2800" height="1800" alt="better-banners-pill-bottom-dark" src="https://github.com/user-attachments/assets/9083ff5c-2aa3-4e87-8917-7bfd9dbceed7" /> |
+| **In each user's language** | |
+| <img width="2800" height="1800" alt="better-banners-i18n-de" src="https://github.com/user-attachments/assets/e529aaf1-62f3-4b1e-9544-616c87efa6c7" /> | |
 
 ---
 
@@ -70,7 +70,7 @@ Changed settings reach users on their next page load. With several workers, each
 
 ## 🧭 How it behaves
 
-- **New and edited banners** always open expanded. A user can collapse them, and they stay collapsed until you change the banner.
+- **New and edited banners** always open expanded. A user can collapse them into the pill, and they stay collapsed until you add or change a banner.
 - **Dismissing** uses the same memory as Open WebUI's own banners, so banners a user closed before stay closed, and switching the function off keeps their choices.
 - **Language** follows the language each user picked in Open WebUI. When a banner has no translation for it, the main text is shown.
 
@@ -108,7 +108,7 @@ Turn the function off before deleting it. A deleted function cannot tell the ser
 
 - Banners show in chats. Other pages (Workspace, Admin Panel, Notes) show none.
 - On Enterprise instances, the "Trial License" and "Exceeded the number of seats" notices share the spot of the built-in banners, so they are hidden too while the function is on.
-- The collapse and dismiss buttons are labelled in English. The banner text itself follows each user's language.
+- The collapse, expand and dismiss buttons are labelled in English. The banner text itself follows each user's language.
 - With several servers that do not share a data folder, turning the function off takes effect on each of the other servers after its next restart.
 
 ---

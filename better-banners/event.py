@@ -5,7 +5,7 @@ author_url: https://github.com/Classic298
 funding_url: https://github.com/Classic298
 version: 1.0.0
 required_open_webui_version: 0.11.4
-description: Shows the banners from Admin Panel → Settings → General → Banners in every chat, at the top of the page or right above the message input. Users can collapse any banner and dismiss the dismissible ones, and both choices are remembered. Banner edits reach open tabs live, in each user's language. Inspired by Broadcast Toasts by G30.
+description: Shows the banners from Admin Panel → Settings → General → Banners in every chat, at the top of the page or right above the message input. Users can collapse the banners into a small pill and dismiss the dismissible ones, and both choices are remembered. Banner edits reach open tabs live, in each user's language. Inspired by Broadcast Toasts by G30.
 """
 
 import hashlib
@@ -236,7 +236,8 @@ BANNER_CSS = r"""
 html.dark #owui-better-banners{--obb-surface:rgba(23,23,23,.72);--obb-text:#f3f4f6;--obb-muted:#9ca3af;--obb-hover:rgba(255,255,255,.08)}
 #owui-better-banners[data-position="top"]{flex:none;width:100%;max-width:58rem;max-height:40vh;margin:3rem auto 0;padding:0 8px}
 #owui-better-banners[data-position="bottom"]{width:100%;max-height:40vh;margin:0 0 8px}
-.obb-banner{pointer-events:auto;position:relative;display:flex;align-items:flex-start;gap:10px;padding:8px 6px 8px 12px;border-radius:16px;border:1px solid color-mix(in srgb,var(--obb-accent) 24%,transparent);background:linear-gradient(color-mix(in srgb,var(--obb-accent) 10%,transparent),color-mix(in srgb,var(--obb-accent) 10%,transparent)),var(--obb-surface);-webkit-backdrop-filter:blur(18px) saturate(1.4);backdrop-filter:blur(18px) saturate(1.4);box-shadow:0 6px 20px -12px rgba(0,0,0,.25);color:var(--obb-text);font-size:.8125rem;line-height:1.5;text-align:left;animation:obb-in .22s cubic-bezier(.22,1,.36,1)}
+.obb-banner,.obb-pill{pointer-events:auto;background:linear-gradient(color-mix(in srgb,var(--obb-accent) 10%,transparent),color-mix(in srgb,var(--obb-accent) 10%,transparent)),var(--obb-surface);-webkit-backdrop-filter:blur(18px) saturate(1.4);backdrop-filter:blur(18px) saturate(1.4);box-shadow:0 6px 20px -12px rgba(0,0,0,.25);color:var(--obb-text);font-size:.8125rem}
+.obb-banner{position:relative;display:flex;align-items:flex-start;gap:10px;padding:8px 6px 8px 12px;border-radius:16px;border:1px solid color-mix(in srgb,var(--obb-accent) 24%,transparent);line-height:1.5;text-align:left;animation:obb-in .26s cubic-bezier(.22,1,.36,1) backwards;animation-delay:var(--obb-delay,0ms)}
 .obb-info{--obb-accent:#3b82f6}.obb-success{--obb-accent:#22c55e}.obb-warning{--obb-accent:#f59e0b}.obb-error{--obb-accent:#ef4444}
 .obb-icon{flex:none;width:16px;height:16px;margin-top:2px;color:var(--obb-accent)}
 .obb-body{flex:1;min-width:0;cursor:default}
@@ -246,21 +247,26 @@ html.dark #owui-better-banners{--obb-surface:rgba(23,23,23,.72);--obb-text:#f3f4
 .obb-content ul{list-style:disc}.obb-content ol{list-style:decimal}
 .obb-content a{color:inherit;text-decoration:underline;text-underline-offset:2px}
 .obb-content code{font-size:.75rem;padding:1px 5px;border-radius:6px;background:var(--obb-hover)}
-.obb-preview{display:none;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}
-.obb-collapsed .obb-body{cursor:pointer}
-.obb-collapsed .obb-title,.obb-collapsed .obb-content{display:none}
-.obb-collapsed .obb-preview{display:block}
 .obb-actions{flex:none;display:flex;gap:2px;margin:-2px 0}
 .obb-button{display:flex;align-items:center;justify-content:center;width:24px;height:24px;padding:0;border:0;border-radius:8px;background:transparent;color:var(--obb-muted);cursor:pointer}
 .obb-button:hover{background:var(--obb-hover);color:var(--obb-text)}
 .obb-button:focus-visible{outline:2px solid var(--obb-accent);outline-offset:1px}
 .obb-button svg{width:14px;height:14px}
-.obb-chevron svg{transition:transform .18s}
-.obb-collapsed .obb-chevron svg{transform:rotate(-90deg)}
+.obb-pill{align-self:center;display:inline-flex;align-items:center;gap:8px;height:30px;padding:0 10px 0 12px;border-radius:999px;border:1px solid color-mix(in srgb,var(--obb-accent) 30%,transparent);font:inherit;line-height:1;cursor:pointer;animation:obb-pop .28s cubic-bezier(.34,1.56,.64,1)}
+.obb-pill:hover{border-color:color-mix(in srgb,var(--obb-accent) 60%,transparent)}
+.obb-pill:focus-visible{outline:2px solid var(--obb-accent);outline-offset:2px}
+.obb-dot{width:8px;height:8px;border-radius:50%;background:var(--obb-accent);box-shadow:0 0 0 3px color-mix(in srgb,var(--obb-accent) 25%,transparent)}
+.obb-count{min-width:18px;padding:2px 6px;border-radius:999px;background:color-mix(in srgb,var(--obb-accent) 18%,transparent);font-size:.75rem;font-weight:600;font-variant-numeric:tabular-nums;text-align:center}
+.obb-pill svg{width:14px;height:14px;color:var(--obb-muted)}
 .obb-leave{animation:obb-out .16s ease-in forwards}
-@keyframes obb-in{from{opacity:0;transform:translateY(-4px)}to{opacity:1;transform:none}}
-@keyframes obb-out{to{opacity:0;transform:scale(.98)}}
-@media (prefers-reduced-motion:reduce){.obb-banner,.obb-leave{animation-duration:.01ms}.obb-chevron svg{transition:none}}
+.obb-collapsing{overflow:hidden;transition:height .24s cubic-bezier(.4,0,.2,1),padding .24s cubic-bezier(.4,0,.2,1),margin .24s cubic-bezier(.4,0,.2,1),border-width .24s,opacity .18s ease,transform .24s cubic-bezier(.4,0,.2,1)}
+.obb-collapsed{height:0!important;padding-top:0;padding-bottom:0;border-width:0;opacity:0;transform:scale(.96) translateY(-8px)}
+.obb-collapsed:not(:first-child){margin-top:-6px}
+#owui-better-banners[data-position="bottom"] .obb-collapsed{transform:scale(.96) translateY(8px)}
+@keyframes obb-in{from{opacity:0;transform:translateY(-6px) scale(.98)}to{opacity:1;transform:none}}
+@keyframes obb-out{to{opacity:0;transform:scale(.92)}}
+@keyframes obb-pop{from{opacity:0;transform:scale(.8)}to{opacity:1;transform:none}}
+@media (prefers-reduced-motion:reduce){.obb-banner,.obb-pill,.obb-leave{animation-duration:.01ms;animation-delay:0s}.obb-collapsing{transition-duration:.01ms}}
 #new-chat-button~nav>.absolute.top-\[100\%\]{display:none!important}
 """
 
@@ -277,6 +283,10 @@ LOADER_SCRIPT = r"""
   var DISMISSED_KEY = 'dismissedBannerIds';
   var FRAME = '42["' + CFG.event + '"';
   var SYNC_SPREAD_MS = 2000;
+  var COLLAPSE_MS = 240;
+  var LEAVE_MS = 200;
+  var STAGGER_MS = 45;
+  var LEVEL_ORDER = ['success', 'info', 'warning', 'error'];
   var ICONS = {
     info: '<circle cx="12" cy="12" r="9"/><path d="M12 11v5"/><path d="M12 8h.01"/>',
     success: '<circle cx="12" cy="12" r="9"/><path d="m8.5 12.5 2.5 2.5 4.5-5"/>',
@@ -285,10 +295,12 @@ LOADER_SCRIPT = r"""
   };
   var CHEVRON = '<path d="m6 9 6 6 6-6"/>';
   var CLOSE = '<path d="M6 6l12 12"/><path d="M18 6 6 18"/>';
+  var MEGAPHONE = '<path d="m3 11 18-5v12L3 14v-3z"/><path d="M11.6 16.8a3 3 0 1 1-5.8-1.6"/>';
 
   var banners = [];
   var root = null;
   var placeQueued = false;
+  var lastRenderKey = '';
   var inflight = false;
   var syncAgain = false;
   var syncTimer = null;
@@ -413,17 +425,6 @@ LOADER_SCRIPT = r"""
     });
   }
 
-  function plainPreview(banner) {
-    var title = localized(banner, 'title').trim();
-    var content = localized(banner, 'content')
-      .replace(/^\s*(?:[-*+]|\d+[.)])\s+/gm, '')
-      .replace(/\[([^\]]+)\]\((?:[^()]|\([^()]*\))*\)/g, '$1')
-      .replace(/[*`#]/g, '')
-      .replace(/\s+/g, ' ')
-      .trim();
-    return title ? title + (content ? ' · ' + content : '') : content;
-  }
-
   function dismissedIds() {
     var ids = readJson(DISMISSED_KEY, []);
     return Array.isArray(ids) ? ids : [];
@@ -440,14 +441,10 @@ LOADER_SCRIPT = r"""
     });
   }
 
-  function isNewChat() {
-    return location.pathname === '/';
-  }
-
   function anchor() {
     var chatNav = document.querySelector('#new-chat-button ~ nav');
     if (!chatNav) return null;
-    if (CFG.newChatOnly && !isNewChat()) return null;
+    if (CFG.newChatOnly && location.pathname !== '/') return null;
     if (CFG.position === 'top') {
       // In the page flow, so the chat moves down instead of hiding under the banners.
       var pane = document.getElementById('chat-pane');
@@ -459,22 +456,14 @@ LOADER_SCRIPT = r"""
     return form && form.parentNode ? { parent: form.parentNode, before: form } : null;
   }
 
-  function ensureStyle() {
-    var style = document.createElement('style');
-    style.id = 'owui-better-banners-style';
-    style.textContent = CSS;
-    document.head.appendChild(style);
-  }
-
   function ensureRoot() {
-    if (root) return root;
+    if (root) return;
     root = document.createElement('div');
     root.id = 'owui-better-banners';
     root.setAttribute('role', 'region');
     root.setAttribute('aria-label', 'Announcements');
     root.dataset.position = CFG.position;
     root.style.setProperty('--obb-max-height', CFG.maxHeight + 'px');
-    return root;
   }
 
   function place() {
@@ -499,16 +488,45 @@ LOADER_SCRIPT = r"""
     requestAnimationFrame(place);
   }
 
-  function setCollapsed(banner, element, collapsed) {
+  function isCollapsed(visible) {
     var map = collapsedMap();
-    if (collapsed) map[banner.id] = fingerprint(banner);
-    else delete map[banner.id];
+    return visible.length > 0 && visible.every(function (banner) {
+      return map[banner.id] === fingerprint(banner);
+    });
+  }
+
+  function collapseAll() {
+    var map = {};
+    visibleBanners().forEach(function (banner) { map[banner.id] = fingerprint(banner); });
     writeJson(COLLAPSED_KEY, map);
-    element.classList.toggle('obb-collapsed', collapsed);
-    var toggle = element.querySelector('.obb-chevron');
-    toggle.setAttribute('aria-expanded', String(!collapsed));
-    toggle.setAttribute('aria-label', collapsed ? 'Expand' : 'Collapse');
-    toggle.title = collapsed ? 'Expand' : 'Collapse';
+    var elements = root.querySelectorAll('.obb-banner');
+    elements.forEach(function (element) {
+      element.style.height = element.offsetHeight + 'px';
+      element.classList.add('obb-collapsing');
+    });
+    void root.offsetHeight;
+    elements.forEach(function (element) { element.classList.add('obb-collapsed'); });
+    setTimeout(function () {
+      render();
+      focusFirst('.obb-pill');
+    }, COLLAPSE_MS);
+  }
+
+  function expandAll() {
+    writeJson(COLLAPSED_KEY, {});
+    root.querySelector('.obb-pill').classList.add('obb-leave');
+    setTimeout(function () {
+      render();
+      focusFirst('.obb-chevron');
+    }, LEAVE_MS);
+  }
+
+  // Only when focus was left on the button that just disappeared.
+  function focusFirst(selector) {
+    var target = root.querySelector(selector);
+    if (target && (!document.activeElement || document.activeElement === document.body)) {
+      target.focus({ preventScroll: true });
+    }
   }
 
   function dismiss(banner, element) {
@@ -520,8 +538,9 @@ LOADER_SCRIPT = r"""
     element.classList.add('obb-leave');
     setTimeout(function () {
       element.remove();
+      lastRenderKey = renderKey(visibleBanners(), false);
       schedulePlace();
-    }, 200);
+    }, LEAVE_MS);
   }
 
   function button(className, paths, label) {
@@ -534,10 +553,15 @@ LOADER_SCRIPT = r"""
     return el;
   }
 
-  function bannerElement(banner, collapsed) {
-    var level = ICONS[banner.type] ? banner.type : 'info';
+  function bannerLevel(banner) {
+    return ICONS[banner.type] ? banner.type : 'info';
+  }
+
+  function bannerElement(banner, index) {
+    var level = bannerLevel(banner);
     var element = document.createElement('div');
-    element.className = 'obb-banner obb-' + level + (collapsed ? ' obb-collapsed' : '');
+    element.className = 'obb-banner obb-' + level;
+    element.style.setProperty('--obb-delay', index * STAGGER_MS + 'ms');
     element.dataset.id = banner.id;
 
     var icon = document.createElement('span');
@@ -558,22 +582,13 @@ LOADER_SCRIPT = r"""
     content.className = 'obb-content';
     renderMarkdown(content, localized(banner, 'content'));
     body.appendChild(content);
-    var preview = document.createElement('div');
-    preview.className = 'obb-preview';
-    preview.textContent = plainPreview(banner);
-    body.appendChild(preview);
-    body.addEventListener('click', function () {
-      if (element.classList.contains('obb-collapsed')) setCollapsed(banner, element, false);
-    });
     element.appendChild(body);
 
     var actions = document.createElement('div');
     actions.className = 'obb-actions';
-    var toggle = button('obb-chevron', CHEVRON, collapsed ? 'Expand' : 'Collapse');
-    toggle.setAttribute('aria-expanded', String(!collapsed));
-    toggle.addEventListener('click', function () {
-      setCollapsed(banner, element, !element.classList.contains('obb-collapsed'));
-    });
+    var toggle = button('obb-chevron', CHEVRON, 'Collapse all');
+    toggle.setAttribute('aria-expanded', 'true');
+    toggle.addEventListener('click', collapseAll);
     actions.appendChild(toggle);
     if (banner.dismissible) {
       var close = button('obb-close', CLOSE, 'Dismiss');
@@ -584,23 +599,40 @@ LOADER_SCRIPT = r"""
     return element;
   }
 
-  function render() {
-    ensureRoot();
-    var collapsed = collapsedMap();
-    var elements = visibleBanners().map(function (banner) {
-      return bannerElement(banner, collapsed[banner.id] === fingerprint(banner));
+  function pillElement(visible) {
+    var pillLevel = visible.map(bannerLevel).reduce(function (highest, level) {
+      return LEVEL_ORDER.indexOf(level) > LEVEL_ORDER.indexOf(highest) ? level : highest;
     });
-    root.replaceChildren.apply(root, elements);
-    schedulePlace();
+    var label = 'Expand all (' + visible.length + ')';
+    var pill = document.createElement('button');
+    pill.type = 'button';
+    pill.className = 'obb-pill obb-' + pillLevel;
+    pill.setAttribute('aria-label', label);
+    pill.setAttribute('aria-expanded', 'false');
+    pill.title = label;
+    pill.innerHTML = '<span class="obb-dot"></span>' + svg(MEGAPHONE) +
+      '<span class="obb-count">' + visible.length + '</span>' + svg(CHEVRON);
+    pill.addEventListener('click', expandAll);
+    return pill;
   }
 
-  function pruneCollapsed() {
-    var map = collapsedMap();
-    var kept = {};
-    banners.forEach(function (banner) {
-      if (map[banner.id]) kept[banner.id] = map[banner.id];
-    });
-    writeJson(COLLAPSED_KEY, kept);
+  function renderKey(visible, collapsed) {
+    return JSON.stringify([collapsed, document.documentElement.getAttribute('lang'), visible]);
+  }
+
+  function render() {
+    ensureRoot();
+    var visible = visibleBanners();
+    var collapsed = isCollapsed(visible);
+    // Skip identical re-renders so a routine sync does not replay the entrance animation.
+    var key = renderKey(visible, collapsed);
+    if (key === lastRenderKey) return;
+    lastRenderKey = key;
+    // Forget an old collapse once the stack is open, or dismissing the banner that reopened it re-collapses it.
+    if (visible.length && !collapsed) writeJson(COLLAPSED_KEY, {});
+    var elements = collapsed ? [pillElement(visible)] : visible.map(bannerElement);
+    root.replaceChildren.apply(root, elements);
+    schedulePlace();
   }
 
   function sync() {
@@ -627,7 +659,6 @@ LOADER_SCRIPT = r"""
       .then(function (data) {
         if (!Array.isArray(data)) return;
         banners = data;
-        pruneCollapsed();
         render();
       })
       .catch(function () {})
@@ -658,12 +689,9 @@ LOADER_SCRIPT = r"""
   function hookSocket() {
     var proto = window.WebSocket.prototype;
     var listen = proto.addEventListener;
-    var watched = new WeakSet();
     var connectedBefore = false;
 
     function watch(ws) {
-      if (watched.has(ws)) return;
-      watched.add(ws);
       if (String(ws.url).indexOf('socket.io') === -1) return;
       listen.call(ws, 'message', onFrame);
       // The first connection comes with the page load, which already fetched.
@@ -703,7 +731,9 @@ LOADER_SCRIPT = r"""
     }
   }
 
-  ensureStyle();
+  var style = document.createElement('style');
+  style.textContent = CSS;
+  document.head.appendChild(style);
   hookSocket();
   start();
 })();
@@ -813,8 +843,6 @@ class Event:
 
         if is_own and __event_name__ == "function.enable_started":
             Event._set_disabled(False)
-        elif Event._is_disabled():
-            return
 
         asset_register(
             __app__,
