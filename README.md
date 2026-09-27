@@ -1,3 +1,4 @@
+<img width="1600" height="1600" alt="square-better-banners" src="https://github.com/user-attachments/assets/39678f49-a938-469f-bbaf-bf2bf89025e9" />
 # 🧩 Open WebUI Plugins
 
 A curated collection of plugins for [Open WebUI](https://github.com/open-webui/open-webui): tools, skills, filters, pipes, actions and events that extend your AI chat experience.
