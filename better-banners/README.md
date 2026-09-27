@@ -1,3 +1,8 @@
+<img width="2800" height="1800" alt="better-banners-i18n-de" src="https://github.com/user-attachments/assets/e529aaf1-62f3-4b1e-9544-616c87efa6c7" />
+<img width="2800" height="1800" alt="better-banners-collapsed-dark" src="https://github.com/user-attachments/assets/458b7f14-de0e-494c-85e2-d4462fd8dcd7" />
+<img width="2800" height="1800" alt="better-banners-bottom-dark" src="https://github.com/user-attachments/assets/a9ca576d-fe5b-408a-9812-6afb4c5e41bd" />
+<img width="2800" height="1800" alt="better-banners-top-light" src="https://github.com/user-attachments/assets/74f21bbc-26ef-4d30-93db-8f50db00c9ad" />
+<img width="6400" height="1600" alt="banner-better-banners" src="https://github.com/user-attachments/assets/6296f5ce-2ec9-4df4-aab4-628585ca7124" />
 # 📣 Better Banners
 
 Makes the banners you already manage in **Admin Panel → Settings → General → Banners** reach your users properly: in every chat, at the top of the page or right above the message input, collapsible and dismissible, updated live and shown in each user's language.
