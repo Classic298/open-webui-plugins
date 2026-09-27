@@ -113,4 +113,4 @@ Turn the function off before deleting it. A deleted function cannot tell the ser
 
 ## 🙏 Credits
 
-Inspired by [Broadcast Toasts](https://openwebui.com/posts/e3b3e715-1312-4b46-8b74-94aef3e681b5) by [G30](https://openwebui.com/u/g30).
+Inspired by [Broadcast Toasts](https://openwebui.com/posts/e3b3e715-1312-4b46-8b74-94aef3e681b5) by [G30](https://openwebui.com/u/g30) ([@silentoplayz](https://github.com/silentoplayz) on GitHub).
