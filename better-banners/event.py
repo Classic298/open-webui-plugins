@@ -235,7 +235,7 @@ BANNER_CSS = r"""
 #owui-better-banners{--obb-surface:rgba(255,255,255,.78);--obb-text:#1f2937;--obb-muted:#6b7280;--obb-hover:rgba(0,0,0,.06);display:flex;flex-direction:column;gap:6px;box-sizing:border-box;overflow-y:auto;overscroll-behavior:contain;scrollbar-width:thin}
 html.dark #owui-better-banners{--obb-surface:rgba(23,23,23,.72);--obb-text:#f3f4f6;--obb-muted:#9ca3af;--obb-hover:rgba(255,255,255,.08)}
 #owui-better-banners[data-position="top"]{flex:none;width:100%;max-width:58rem;max-height:40vh;margin:3rem auto 0;padding:0 8px}
-#owui-better-banners[data-position="bottom"]{width:100%;max-height:40vh;margin:0 0 8px}
+#owui-better-banners[data-position="bottom"]{--obb-from:10px;--obb-into:14px;width:100%;max-height:40vh;margin:0 0 8px}
 .obb-banner,.obb-pill{pointer-events:auto;background:linear-gradient(color-mix(in srgb,var(--obb-accent) 10%,transparent),color-mix(in srgb,var(--obb-accent) 10%,transparent)),var(--obb-surface);-webkit-backdrop-filter:blur(18px) saturate(1.4);backdrop-filter:blur(18px) saturate(1.4);box-shadow:0 6px 20px -12px rgba(0,0,0,.25);color:var(--obb-text);font-size:.8125rem}
 .obb-banner{position:relative;display:flex;align-items:flex-start;gap:10px;padding:8px 6px 8px 12px;border-radius:16px;border:1px solid color-mix(in srgb,var(--obb-accent) 24%,transparent);line-height:1.5;text-align:left}
 .obb-info{--obb-accent:#3b82f6}.obb-success{--obb-accent:#22c55e}.obb-warning{--obb-accent:#f59e0b}.obb-error{--obb-accent:#ef4444}
@@ -258,17 +258,23 @@ html.dark #owui-better-banners{--obb-surface:rgba(23,23,23,.72);--obb-text:#f3f4
 .obb-dot{width:8px;height:8px;border-radius:50%;background:var(--obb-accent);box-shadow:0 0 0 3px color-mix(in srgb,var(--obb-accent) 25%,transparent)}
 .obb-count{min-width:18px;padding:2px 6px;border-radius:999px;background:color-mix(in srgb,var(--obb-accent) 18%,transparent);font-size:.75rem;font-weight:600;font-variant-numeric:tabular-nums;text-align:center}
 .obb-pill svg{width:14px;height:14px;color:var(--obb-muted)}
+.obb-pill svg:last-child{transition:transform .32s cubic-bezier(.34,1.56,.64,1)}
+.obb-pill.obb-open svg:last-child{transform:rotate(180deg)}
+.obb-pill.obb-absorb{animation:obb-absorb .46s cubic-bezier(.34,1.56,.64,1)}
+.obb-pill.obb-release{animation:obb-release .3s cubic-bezier(.34,1.56,.64,1)}
 .obb-banner.obb-enter{animation:obb-in .26s cubic-bezier(.22,1,.36,1) backwards;animation-delay:var(--obb-delay,0ms)}
 .obb-pill.obb-enter{animation:obb-pop .28s cubic-bezier(.34,1.56,.64,1)}
 .obb-banner.obb-leave,.obb-pill.obb-leave{animation:obb-out .16s ease-in forwards}
-.obb-collapsing{overflow:hidden;transition:height .24s cubic-bezier(.4,0,.2,1),padding .24s cubic-bezier(.4,0,.2,1),margin .24s cubic-bezier(.4,0,.2,1),border-width .24s,opacity .18s ease,transform .24s cubic-bezier(.4,0,.2,1)}
-.obb-collapsed{height:0!important;padding-top:0;padding-bottom:0;border-width:0;opacity:0;transform:scale(.96) translateY(-8px)}
+.obb-collapsing{overflow:hidden;transition:height .24s cubic-bezier(.4,0,.2,1),padding .24s cubic-bezier(.4,0,.2,1),margin .24s cubic-bezier(.4,0,.2,1),border-width .24s,opacity .18s ease,transform .24s cubic-bezier(.4,0,.2,1);transition-delay:var(--obb-delay,0ms)}
+.obb-collapsed{height:0!important;padding-top:0;padding-bottom:0;border-width:0;opacity:0;transform:translateY(calc(-1 * var(--obb-into,14px))) scale(.88)}
 .obb-collapsed:not(:first-child){margin-top:-6px}
-#owui-better-banners[data-position="bottom"] .obb-collapsed{transform:scale(.96) translateY(8px)}
-@keyframes obb-in{from{opacity:0;transform:translateY(-6px) scale(.98)}to{opacity:1;transform:none}}
+#owui-better-banners[data-position="bottom"] .obb-collapsed{transform:translateY(var(--obb-into)) scale(.88)}
+@keyframes obb-in{from{opacity:0;transform:translateY(var(--obb-from,-10px)) scale(.94)}to{opacity:1;transform:none}}
 @keyframes obb-out{to{opacity:0;transform:scale(.92)}}
 @keyframes obb-pop{from{opacity:0;transform:scale(.8)}to{opacity:1;transform:none}}
-@media (prefers-reduced-motion:reduce){.obb-banner.obb-enter,.obb-pill.obb-enter,.obb-banner.obb-leave,.obb-pill.obb-leave{animation-duration:.01ms;animation-delay:0s}.obb-collapsing{transition-duration:.01ms}}
+@keyframes obb-absorb{0%{transform:scale(1)}30%{transform:scale(1.16)}60%{transform:scale(.94)}100%{transform:scale(1)}}
+@keyframes obb-release{0%{transform:scale(1)}35%{transform:scale(.9)}100%{transform:scale(1)}}
+@media (prefers-reduced-motion:reduce){.obb-banner.obb-enter,.obb-pill.obb-enter,.obb-banner.obb-leave,.obb-pill.obb-leave,.obb-pill.obb-absorb,.obb-pill.obb-release{animation-duration:.01ms;animation-delay:0s}.obb-collapsing,.obb-pill svg:last-child{transition-duration:.01ms;transition-delay:0s}}
 """
 
 LOADER_SCRIPT = r"""
@@ -480,7 +486,10 @@ LOADER_SCRIPT = r"""
     if (target && !anchored) render();
     anchored = Boolean(target);
     if (!target || !root.childNodes.length) {
-      if (root && root.parentNode) root.parentNode.removeChild(root);
+      if (root && root.parentNode) {
+        root.parentNode.removeChild(root);
+        root.querySelectorAll('.obb-enter').forEach(function (element) { element.classList.remove('obb-enter'); });
+      }
       return;
     }
     var misplaced = root.parentNode !== target.parent || (target.before && root.nextSibling !== target.before);
@@ -500,38 +509,54 @@ LOADER_SCRIPT = r"""
     });
   }
 
-  function collapseAll() {
+  // Delays run outward from the pill, so the nearest banner moves first.
+  function staggerFromPill(elements) {
+    elements.forEach(function (element, index) {
+      var distance = CFG.position === 'top' ? index : elements.length - 1 - index;
+      element.style.setProperty('--obb-delay', distance * STAGGER_MS + 'ms');
+    });
+  }
+
+  function playOnce(element, className) {
+    element.classList.remove(className);
+    void element.offsetWidth;
+    element.classList.add(className);
+    element.addEventListener('animationend', function () { element.classList.remove(className); }, { once: true });
+  }
+
+  function collapseAll(pill) {
+    var visible = visibleBanners();
     var map = {};
-    visibleBanners().forEach(function (banner) { map[banner.id] = fingerprint(banner); });
+    visible.forEach(function (banner) { map[banner.id] = fingerprint(banner); });
     writeJson(COLLAPSED_KEY, map);
-    var elements = root.querySelectorAll('.obb-banner');
+    lastRenderKey = renderKey(visible, true);
+    var elements = Array.prototype.slice.call(root.querySelectorAll('.obb-banner'));
+    staggerFromPill(elements);
     elements.forEach(function (element) {
+      element.classList.remove('obb-enter');
       element.style.height = element.offsetHeight + 'px';
       element.classList.add('obb-collapsing');
     });
     void root.offsetHeight;
     elements.forEach(function (element) { element.classList.add('obb-collapsed'); });
     setTimeout(function () {
-      render();
-      focusFirst('.obb-pill');
-    }, COLLAPSE_MS);
+      elements.forEach(function (element) { element.remove(); });
+      updatePill(pill, visible, true);
+      playOnce(pill, 'obb-absorb');
+    }, COLLAPSE_MS + (elements.length - 1) * STAGGER_MS);
   }
 
-  function expandAll() {
+  function expandAll(pill) {
+    var visible = visibleBanners();
     writeJson(COLLAPSED_KEY, {});
-    root.querySelector('.obb-pill').classList.add('obb-leave');
-    setTimeout(function () {
-      render();
-      focusFirst('.obb-chevron');
-    }, LEAVE_MS);
-  }
-
-  // Only when focus was left on the button that just disappeared.
-  function focusFirst(selector) {
-    var target = root.querySelector(selector);
-    if (target && (!document.activeElement || document.activeElement === document.body)) {
-      target.focus({ preventScroll: true });
-    }
+    lastRenderKey = renderKey(visible, false);
+    updatePill(pill, visible, false);
+    playOnce(pill, 'obb-release');
+    var elements = visible.map(bannerElement);
+    staggerFromPill(elements);
+    elements.forEach(function (element) { playOnce(element, 'obb-enter'); });
+    if (CFG.position === 'top') pill.after.apply(pill, elements);
+    else pill.before.apply(pill, elements);
   }
 
   function dismiss(banner, element) {
@@ -540,10 +565,16 @@ LOADER_SCRIPT = r"""
       return remaining.indexOf(id) !== -1;
     });
     writeJson(DISMISSED_KEY, ids);
+    // Start the fade from wherever a running entrance left it.
+    element.style.opacity = getComputedStyle(element).opacity;
+    element.classList.remove('obb-enter');
     element.classList.add('obb-leave');
     setTimeout(function () {
       element.remove();
-      lastRenderKey = renderKey(visibleBanners(), false);
+      var visible = visibleBanners();
+      lastRenderKey = renderKey(visible, false);
+      if (visible.length) updatePill(root.querySelector('.obb-pill'), visible, false);
+      else root.replaceChildren();
       schedulePlace();
     }, LEAVE_MS);
   }
@@ -562,11 +593,10 @@ LOADER_SCRIPT = r"""
     return ICONS[banner.type] ? banner.type : 'info';
   }
 
-  function bannerElement(banner, index) {
+  function bannerElement(banner) {
     var level = bannerLevel(banner);
     var element = document.createElement('div');
     element.className = 'obb-banner obb-' + level;
-    element.style.setProperty('--obb-delay', index * STAGGER_MS + 'ms');
     element.dataset.id = banner.id;
 
     var icon = document.createElement('span');
@@ -589,35 +619,38 @@ LOADER_SCRIPT = r"""
     body.appendChild(content);
     element.appendChild(body);
 
-    var actions = document.createElement('div');
-    actions.className = 'obb-actions';
-    var toggle = button('obb-chevron', CHEVRON, 'Collapse all');
-    toggle.setAttribute('aria-expanded', 'true');
-    toggle.addEventListener('click', collapseAll);
-    actions.appendChild(toggle);
     if (banner.dismissible) {
+      var actions = document.createElement('div');
+      actions.className = 'obb-actions';
       var close = button('obb-close', CLOSE, 'Dismiss');
       close.addEventListener('click', function () { dismiss(banner, element); });
       actions.appendChild(close);
+      element.appendChild(actions);
     }
-    element.appendChild(actions);
     return element;
   }
 
-  function pillElement(visible) {
+  function updatePill(pill, visible, collapsed) {
     var pillLevel = visible.map(bannerLevel).reduce(function (highest, level) {
       return LEVEL_ORDER.indexOf(level) > LEVEL_ORDER.indexOf(highest) ? level : highest;
     });
-    var label = 'Expand all (' + visible.length + ')';
+    var label = (collapsed ? 'Expand all (' : 'Collapse all (') + visible.length + ')';
+    pill.className = 'obb-pill obb-' + pillLevel + (collapsed ? '' : ' obb-open');
+    pill.setAttribute('aria-label', label);
+    pill.setAttribute('aria-expanded', String(!collapsed));
+    pill.title = label;
+    pill.querySelector('.obb-count').textContent = String(visible.length);
+  }
+
+  function pillElement(visible, collapsed) {
     var pill = document.createElement('button');
     pill.type = 'button';
-    pill.className = 'obb-pill obb-' + pillLevel;
-    pill.setAttribute('aria-label', label);
-    pill.setAttribute('aria-expanded', 'false');
-    pill.title = label;
-    pill.innerHTML = '<span class="obb-dot"></span>' + svg(MEGAPHONE) +
-      '<span class="obb-count">' + visible.length + '</span>' + svg(CHEVRON);
-    pill.addEventListener('click', expandAll);
+    pill.innerHTML = '<span class="obb-dot"></span>' + svg(MEGAPHONE) + '<span class="obb-count"></span>' + svg(CHEVRON);
+    updatePill(pill, visible, collapsed);
+    pill.addEventListener('click', function () {
+      if (pill.getAttribute('aria-expanded') === 'true') collapseAll(pill);
+      else expandAll(pill);
+    });
     return pill;
   }
 
@@ -635,11 +668,16 @@ LOADER_SCRIPT = r"""
     lastRenderKey = key;
     // Forget an old collapse once the stack is open, or dismissing the banner that reopened it re-collapses it.
     if (visible.length && !collapsed) writeJson(COLLAPSED_KEY, {});
-    var elements = collapsed ? [pillElement(visible)] : visible.map(bannerElement);
-    elements.forEach(function (element) {
-      element.classList.add('obb-enter');
-      element.addEventListener('animationend', function () { element.classList.remove('obb-enter'); });
-    });
+    if (!visible.length) {
+      root.replaceChildren();
+      schedulePlace();
+      return;
+    }
+    var cards = collapsed ? [] : visible.map(bannerElement);
+    staggerFromPill(cards);
+    var pill = pillElement(visible, collapsed);
+    var elements = CFG.position === 'top' ? [pill].concat(cards) : cards.concat([pill]);
+    elements.forEach(function (element) { playOnce(element, 'obb-enter'); });
     root.replaceChildren.apply(root, elements);
     schedulePlace();
   }
