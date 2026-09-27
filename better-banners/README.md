@@ -11,9 +11,9 @@ Makes the banners you already manage in **Admin Panel → Settings → General �
 | Feature | What you get |
 |---|---|
 | 📍 **Two positions** | Show banners at the top of the chat or right above the message input. |
-| 💬 **In every chat** | Open WebUI only shows banners on the new chat screen. Here they stay visible in every chat (or only on new chats, if you prefer). |
+| 💬 **In every chat** | Open WebUI shows banners only on the new chat screen. Better Banners keeps them visible inside every chat. |
 | 🔽 **Collapsible** | One click collapses all banners into a small pill that shows how many there are. Clicking the pill brings them back. The choice is remembered, and a new or edited banner expands them again for everyone. |
-| ✖️ **Dismissible** | Banners with **Dismissible** turned on get a close button and stay gone for that user. Banners without it cannot be closed, only collapsed. |
+| ✖️ **Dismissible** | Banners with **Dismissible** turned on get a close button and stay gone for that user. Inside chats, banners without it cannot be closed, only collapsed. |
 | ⚡ **Live updates** | Add, edit or remove a banner and every open tab updates within about 2 seconds, without a reload. |
 | 🌍 **Translations** | Banner translations you set in the admin panel are shown in each user's language. |
 | 🎨 **Sleek design** | Frosted, color-coded cards for Info, Success, Warning and Error that follow light and dark mode. |
@@ -49,7 +49,7 @@ Makes the banners you already manage in **Admin Panel → Settings → General �
 3. Paste, **Save**, and switch the function **on**
 4. Reload the page once
 
-Your banners now show up in the new style. Manage them as before under **Admin Panel → Settings → General → Banners**.
+Your banners now show up in the new style inside every chat. Manage them as before under **Admin Panel → Settings → General → Banners**.
 
 ---
 
@@ -60,7 +60,6 @@ Open **Admin Panel → Functions → Better Banners → gear icon**.
 | Valve | Default | What it does |
 |---|---|---|
 | **Position** | `top` | `top` shows banners at the top of the chat, `bottom` right above the message input. |
-| **New Chat Only** | Off | On shows banners only on the new chat screen, like Open WebUI does on its own. |
 | **Max Height Px** | 160 | How tall a single expanded banner gets before its text scrolls. |
 | **Resync Interval Seconds** | 300 | How often each open tab re-reads the banners on its own, in case it missed a live update. 0 turns it off. |
 
@@ -70,6 +69,7 @@ Changed settings reach users on their next page load. With several workers, each
 
 ## 🧭 How it behaves
 
+- **The new chat screen** keeps Open WebUI's own banners, including the Enterprise license notices. Better Banners takes over once a chat is open, with its own collapse and dismiss.
 - **New and edited banners** always open expanded. A user can collapse them into the pill, and they stay collapsed until you add or change a banner.
 - **Dismissing** uses the same memory as Open WebUI's own banners, so banners a user closed before stay closed, and switching the function off keeps their choices.
 - **Language** follows the language each user picked in Open WebUI. When a banner has no translation for it, the main text is shown.
@@ -81,7 +81,7 @@ Changed settings reach users on their next page load. With several workers, each
 <details>
 <summary><b>Banners still look like the default ones</b></summary>
 
-Reload the page. The new style loads with the page, so tabs that were open while you installed the function keep the old look until they reload.
+On the new chat screen this is expected. Open WebUI shows its own banners there. Inside a chat, reload the page. The new style loads with the page, so tabs that were open while you installed the function keep the old look until they reload.
 </details>
 
 <details>
@@ -107,7 +107,6 @@ Turn the function off before deleting it. A deleted function cannot tell the ser
 ## ⚠️ Limits
 
 - Banners show in chats. Other pages (Workspace, Admin Panel, Notes) show none.
-- On Enterprise instances, the "Trial License" and "Exceeded the number of seats" notices share the spot of the built-in banners, so they are hidden too while the function is on.
 - The collapse, expand and dismiss buttons are labelled in English. The banner text itself follows each user's language.
 - With several servers that do not share a data folder, turning the function off takes effect on each of the other servers after its next restart.
 

@@ -237,7 +237,7 @@ html.dark #owui-better-banners{--obb-surface:rgba(23,23,23,.72);--obb-text:#f3f4
 #owui-better-banners[data-position="top"]{flex:none;width:100%;max-width:58rem;max-height:40vh;margin:3rem auto 0;padding:0 8px}
 #owui-better-banners[data-position="bottom"]{width:100%;max-height:40vh;margin:0 0 8px}
 .obb-banner,.obb-pill{pointer-events:auto;background:linear-gradient(color-mix(in srgb,var(--obb-accent) 10%,transparent),color-mix(in srgb,var(--obb-accent) 10%,transparent)),var(--obb-surface);-webkit-backdrop-filter:blur(18px) saturate(1.4);backdrop-filter:blur(18px) saturate(1.4);box-shadow:0 6px 20px -12px rgba(0,0,0,.25);color:var(--obb-text);font-size:.8125rem}
-.obb-banner{position:relative;display:flex;align-items:flex-start;gap:10px;padding:8px 6px 8px 12px;border-radius:16px;border:1px solid color-mix(in srgb,var(--obb-accent) 24%,transparent);line-height:1.5;text-align:left;animation:obb-in .26s cubic-bezier(.22,1,.36,1) backwards;animation-delay:var(--obb-delay,0ms)}
+.obb-banner{position:relative;display:flex;align-items:flex-start;gap:10px;padding:8px 6px 8px 12px;border-radius:16px;border:1px solid color-mix(in srgb,var(--obb-accent) 24%,transparent);line-height:1.5;text-align:left}
 .obb-info{--obb-accent:#3b82f6}.obb-success{--obb-accent:#22c55e}.obb-warning{--obb-accent:#f59e0b}.obb-error{--obb-accent:#ef4444}
 .obb-icon{flex:none;width:16px;height:16px;margin-top:2px;color:var(--obb-accent)}
 .obb-body{flex:1;min-width:0;cursor:default}
@@ -252,13 +252,15 @@ html.dark #owui-better-banners{--obb-surface:rgba(23,23,23,.72);--obb-text:#f3f4
 .obb-button:hover{background:var(--obb-hover);color:var(--obb-text)}
 .obb-button:focus-visible{outline:2px solid var(--obb-accent);outline-offset:1px}
 .obb-button svg{width:14px;height:14px}
-.obb-pill{align-self:center;display:inline-flex;align-items:center;gap:8px;height:30px;padding:0 10px 0 12px;border-radius:999px;border:1px solid color-mix(in srgb,var(--obb-accent) 30%,transparent);font:inherit;line-height:1;cursor:pointer;animation:obb-pop .28s cubic-bezier(.34,1.56,.64,1)}
+.obb-pill{align-self:center;display:inline-flex;align-items:center;gap:8px;height:30px;padding:0 10px 0 12px;border-radius:999px;border:1px solid color-mix(in srgb,var(--obb-accent) 30%,transparent);font:inherit;line-height:1;cursor:pointer}
 .obb-pill:hover{border-color:color-mix(in srgb,var(--obb-accent) 60%,transparent)}
 .obb-pill:focus-visible{outline:2px solid var(--obb-accent);outline-offset:2px}
 .obb-dot{width:8px;height:8px;border-radius:50%;background:var(--obb-accent);box-shadow:0 0 0 3px color-mix(in srgb,var(--obb-accent) 25%,transparent)}
 .obb-count{min-width:18px;padding:2px 6px;border-radius:999px;background:color-mix(in srgb,var(--obb-accent) 18%,transparent);font-size:.75rem;font-weight:600;font-variant-numeric:tabular-nums;text-align:center}
 .obb-pill svg{width:14px;height:14px;color:var(--obb-muted)}
-.obb-leave{animation:obb-out .16s ease-in forwards}
+.obb-banner.obb-enter{animation:obb-in .26s cubic-bezier(.22,1,.36,1) backwards;animation-delay:var(--obb-delay,0ms)}
+.obb-pill.obb-enter{animation:obb-pop .28s cubic-bezier(.34,1.56,.64,1)}
+.obb-banner.obb-leave,.obb-pill.obb-leave{animation:obb-out .16s ease-in forwards}
 .obb-collapsing{overflow:hidden;transition:height .24s cubic-bezier(.4,0,.2,1),padding .24s cubic-bezier(.4,0,.2,1),margin .24s cubic-bezier(.4,0,.2,1),border-width .24s,opacity .18s ease,transform .24s cubic-bezier(.4,0,.2,1)}
 .obb-collapsed{height:0!important;padding-top:0;padding-bottom:0;border-width:0;opacity:0;transform:scale(.96) translateY(-8px)}
 .obb-collapsed:not(:first-child){margin-top:-6px}
@@ -266,8 +268,7 @@ html.dark #owui-better-banners{--obb-surface:rgba(23,23,23,.72);--obb-text:#f3f4
 @keyframes obb-in{from{opacity:0;transform:translateY(-6px) scale(.98)}to{opacity:1;transform:none}}
 @keyframes obb-out{to{opacity:0;transform:scale(.92)}}
 @keyframes obb-pop{from{opacity:0;transform:scale(.8)}to{opacity:1;transform:none}}
-@media (prefers-reduced-motion:reduce){.obb-banner,.obb-pill,.obb-leave{animation-duration:.01ms;animation-delay:0s}.obb-collapsing{transition-duration:.01ms}}
-#new-chat-button~nav>.absolute.top-\[100\%\]{display:none!important}
+@media (prefers-reduced-motion:reduce){.obb-banner.obb-enter,.obb-pill.obb-enter,.obb-banner.obb-leave,.obb-pill.obb-leave{animation-duration:.01ms;animation-delay:0s}.obb-collapsing{transition-duration:.01ms}}
 """
 
 LOADER_SCRIPT = r"""
@@ -301,6 +302,7 @@ LOADER_SCRIPT = r"""
   var root = null;
   var placeQueued = false;
   var lastRenderKey = '';
+  var anchored = false;
   var inflight = false;
   var syncAgain = false;
   var syncTimer = null;
@@ -437,18 +439,18 @@ LOADER_SCRIPT = r"""
   function visibleBanners() {
     var dismissed = dismissedIds();
     return banners.filter(function (banner) {
-      return !(banner.dismissible && dismissed.indexOf(banner.id) !== -1);
+      return dismissed.indexOf(banner.id) === -1;
     });
   }
 
   function anchor() {
     var chatNav = document.querySelector('#new-chat-button ~ nav');
     if (!chatNav) return null;
-    if (CFG.newChatOnly && location.pathname !== '/') return null;
+    var pane = document.getElementById('chat-pane');
+    var inChat = pane && (pane.querySelector('#chat-conversation') || location.pathname.lastIndexOf('/c/', 0) === 0);
+    if (!inChat) return null;
     if (CFG.position === 'top') {
       // In the page flow, so the chat moves down instead of hiding under the banners.
-      var pane = document.getElementById('chat-pane');
-      if (!pane) return null;
       return { parent: pane, before: pane.firstChild === root ? root.nextSibling : pane.firstChild };
     }
     var input = document.getElementById('message-input-container');
@@ -474,7 +476,10 @@ LOADER_SCRIPT = r"""
       sync();
     }
     var target = root && root.childNodes.length ? anchor() : null;
-    if (!target) {
+    // Pick up dismissals made in Open WebUI's own banners in this tab.
+    if (target && !anchored) render();
+    anchored = Boolean(target);
+    if (!target || !root.childNodes.length) {
       if (root && root.parentNode) root.parentNode.removeChild(root);
       return;
     }
@@ -631,6 +636,10 @@ LOADER_SCRIPT = r"""
     // Forget an old collapse once the stack is open, or dismissing the banner that reopened it re-collapses it.
     if (visible.length && !collapsed) writeJson(COLLAPSED_KEY, {});
     var elements = collapsed ? [pillElement(visible)] : visible.map(bannerElement);
+    elements.forEach(function (element) {
+      element.classList.add('obb-enter');
+      element.addEventListener('animationend', function () { element.classList.remove('obb-enter'); });
+    });
     root.replaceChildren.apply(root, elements);
     schedulePlace();
   }
@@ -746,10 +755,6 @@ class Event:
             default="top",
             description="Where banners appear: at the top of the chat, or right above the message input.",
         )
-        new_chat_only: bool = Field(
-            default=False,
-            description="Show banners only on the new chat screen, like Open WebUI does. Off shows them in every chat.",
-        )
         max_height_px: int = Field(
             default=160,
             ge=60,
@@ -775,7 +780,6 @@ class Event:
         valves = self.valves
         cache_key = (
             valves.position,
-            valves.new_chat_only,
             valves.max_height_px,
             valves.resync_interval_seconds,
         )
@@ -785,7 +789,6 @@ class Event:
             {
                 "event": SOCKET_EVENT,
                 "position": valves.position,
-                "newChatOnly": valves.new_chat_only,
                 "maxHeight": valves.max_height_px,
                 "resync": valves.resync_interval_seconds,
             }
