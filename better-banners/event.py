@@ -349,7 +349,7 @@ LOADER_SCRIPT = r"""
   }
 
   function appendInline(target, text) {
-    var pattern = /\*\*([^*]+)\*\*|__([^_]+)__|\*([^*\s][^*]*)\*|`([^`]+)`|\[([^\]]+)\]\(((?:[^()\s]|\([^()\s]*\))+)\)|https?:\/\/[^\s<>"']+/g;
+    var pattern = /\*\*([^*]+)\*\*|\*([^*\s][^*]*)\*|`([^`]+)`|\[([^\]]+)\]\(((?:[^()\s]|\([^()\s]*\))+)\)|https?:\/\/[^\s<>"']+/g;
     var last = 0;
     var match;
     while ((match = pattern.exec(text))) {
@@ -361,19 +361,19 @@ LOADER_SCRIPT = r"""
         pattern.lastIndex = match.index + raw.length;
       }
       if (match.index > last) target.appendChild(document.createTextNode(text.slice(last, match.index)));
-      var bold = match[1] || match[2];
-      var italic = match[3];
+      var bold = match[1];
+      var italic = match[2];
       if (bold || italic) {
         var emphasis = document.createElement(bold ? 'strong' : 'em');
         appendInline(emphasis, bold || italic);
         target.appendChild(emphasis);
-      } else if (match[4]) {
+      } else if (match[3]) {
         var code = document.createElement('code');
-        code.textContent = match[4];
+        code.textContent = match[3];
         target.appendChild(code);
-      } else if (match[5]) {
-        if (isSafeUrl(match[6])) appendLink(target, match[6], match[5]);
-        else target.appendChild(document.createTextNode(match[5]));
+      } else if (match[4]) {
+        if (isSafeUrl(match[5])) appendLink(target, match[5], match[4]);
+        else target.appendChild(document.createTextNode(match[4]));
       } else {
         appendLink(target, raw, raw);
       }
@@ -418,7 +418,7 @@ LOADER_SCRIPT = r"""
     var content = localized(banner, 'content')
       .replace(/^\s*(?:[-*+]|\d+[.)])\s+/gm, '')
       .replace(/\[([^\]]+)\]\((?:[^()]|\([^()]*\))*\)/g, '$1')
-      .replace(/[*`#]|__/g, '')
+      .replace(/[*`#]/g, '')
       .replace(/\s+/g, ' ')
       .trim();
     return title ? title + (content ? ' · ' + content : '') : content;
@@ -430,8 +430,7 @@ LOADER_SCRIPT = r"""
   }
 
   function collapsedMap() {
-    var map = readJson(COLLAPSED_KEY, {});
-    return Array.isArray(map) ? {} : map;
+    return readJson(COLLAPSED_KEY, {});
   }
 
   function visibleBanners() {
@@ -442,7 +441,7 @@ LOADER_SCRIPT = r"""
   }
 
   function isNewChat() {
-    return location.pathname === '/' || location.pathname === '';
+    return location.pathname === '/';
   }
 
   function anchor() {
@@ -461,11 +460,10 @@ LOADER_SCRIPT = r"""
   }
 
   function ensureStyle() {
-    if (document.getElementById('owui-better-banners-style')) return;
     var style = document.createElement('style');
     style.id = 'owui-better-banners-style';
     style.textContent = CSS;
-    (document.head || document.documentElement).appendChild(style);
+    document.head.appendChild(style);
   }
 
   function ensureRoot() {
@@ -623,7 +621,6 @@ LOADER_SCRIPT = r"""
     inflight = true;
     fetch('/api/v1/configs/banners', {
       headers: { Authorization: 'Bearer ' + auth },
-      credentials: 'same-origin',
       cache: 'no-store'
     })
       .then(function (res) { return res.ok ? res.json() : null; })
@@ -676,24 +673,17 @@ LOADER_SCRIPT = r"""
       });
     }
 
-    ['onmessage', 'onopen'].forEach(function (name) {
-      var desc = Object.getOwnPropertyDescriptor(proto, name);
-      if (!desc || !desc.set || !desc.configurable) return;
-      Object.defineProperty(proto, name, {
-        configurable: true,
-        enumerable: desc.enumerable,
-        get: desc.get,
-        set: function (fn) {
-          watch(this);
-          desc.set.call(this, fn);
-        }
-      });
+    // engine.io sets onmessage right after onopen, before the socket connects.
+    var desc = Object.getOwnPropertyDescriptor(proto, 'onmessage');
+    Object.defineProperty(proto, 'onmessage', {
+      configurable: true,
+      enumerable: desc.enumerable,
+      get: desc.get,
+      set: function (fn) {
+        watch(this);
+        desc.set.call(this, fn);
+      }
     });
-
-    proto.addEventListener = function (type, fn, options) {
-      if (type === 'message' || type === 'open') watch(this);
-      return listen.call(this, type, fn, options);
-    };
   }
 
   function start() {
@@ -707,7 +697,6 @@ LOADER_SCRIPT = r"""
     });
     window.addEventListener('storage', function (evt) {
       if (evt.key === DISMISSED_KEY || evt.key === COLLAPSED_KEY) render();
-      if (evt.key === 'token') sync();
     });
     if (CFG.resync > 0) {
       setInterval(function () { if (!document.hidden) sync(); }, CFG.resync * 1000);
@@ -716,11 +705,7 @@ LOADER_SCRIPT = r"""
 
   ensureStyle();
   hookSocket();
-  if (document.readyState === 'loading') {
-    document.addEventListener('DOMContentLoaded', start, { once: true });
-  } else {
-    start();
-  }
+  start();
 })();
 """
 
@@ -748,17 +733,17 @@ class Event:
             description="How often each open tab re-reads the banners on its own, as a backstop for a live update it missed. 0 turns it off.",
         )
 
-    _fragment_cache: Optional[tuple] = None
-    _disabled_cache: Optional[tuple] = None
+    _fragment_cache: Optional[tuple[tuple, str]] = None
+    _disabled_cache: Optional[tuple[float, bool]] = None
 
     def __init__(self):
         self.valves = self.Valves()
 
     def _loader_fragment(self) -> str:
+        if Event._is_disabled():
+            return ""
         valves = self.valves
-        is_disabled = Event._is_disabled()
         cache_key = (
-            is_disabled,
             valves.position,
             valves.new_chat_only,
             valves.max_height_px,
@@ -766,24 +751,21 @@ class Event:
         )
         if Event._fragment_cache and Event._fragment_cache[0] == cache_key:
             return Event._fragment_cache[1]
-        if is_disabled:
-            fragment = ""
-        else:
-            config = json.dumps(
-                {
-                    "event": SOCKET_EVENT,
-                    "position": valves.position,
-                    "newChatOnly": valves.new_chat_only,
-                    "maxHeight": valves.max_height_px,
-                    "resync": valves.resync_interval_seconds,
-                }
-            )
-            script = (
-                LOADER_SCRIPT.strip()
-                .replace("__CONFIG__", config)
-                .replace("__CSS__", json.dumps(BANNER_CSS.strip()))
-            )
-            fragment = f"{LOADER_BLOCK_START}\n{script}\n{LOADER_BLOCK_END}"
+        config = json.dumps(
+            {
+                "event": SOCKET_EVENT,
+                "position": valves.position,
+                "newChatOnly": valves.new_chat_only,
+                "maxHeight": valves.max_height_px,
+                "resync": valves.resync_interval_seconds,
+            }
+        )
+        script = (
+            LOADER_SCRIPT.strip()
+            .replace("__CONFIG__", config)
+            .replace("__CSS__", json.dumps(BANNER_CSS.strip()))
+        )
+        fragment = f"{LOADER_BLOCK_START}\n{script}\n{LOADER_BLOCK_END}"
         Event._fragment_cache = (cache_key, fragment)
         return fragment
 

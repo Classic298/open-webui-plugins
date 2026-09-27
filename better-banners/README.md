@@ -1,9 +1,6 @@
-<img width="2800" height="1800" alt="better-banners-i18n-de" src="https://github.com/user-attachments/assets/e529aaf1-62f3-4b1e-9544-616c87efa6c7" />
-<img width="2800" height="1800" alt="better-banners-collapsed-dark" src="https://github.com/user-attachments/assets/458b7f14-de0e-494c-85e2-d4462fd8dcd7" />
-<img width="2800" height="1800" alt="better-banners-bottom-dark" src="https://github.com/user-attachments/assets/a9ca576d-fe5b-408a-9812-6afb4c5e41bd" />
-<img width="2800" height="1800" alt="better-banners-top-light" src="https://github.com/user-attachments/assets/74f21bbc-26ef-4d30-93db-8f50db00c9ad" />
-<img width="6400" height="1600" alt="banner-better-banners" src="https://github.com/user-attachments/assets/6296f5ce-2ec9-4df4-aab4-628585ca7124" />
 # 📣 Better Banners
+
+<img width="6400" height="1600" alt="banner-better-banners" src="https://github.com/user-attachments/assets/6296f5ce-2ec9-4df4-aab4-628585ca7124" />
 
 Makes the banners you already manage in **Admin Panel → Settings → General → Banners** reach your users properly: in every chat, at the top of the page or right above the message input, collapsible and dismissible, updated live and shown in each user's language.
 
@@ -20,8 +17,18 @@ Makes the banners you already manage in **Admin Panel → Settings → General �
 | ⚡ **Live updates** | Add, edit or remove a banner and every open tab updates within about 2 seconds, without a reload. |
 | 🌍 **Translations** | Banner translations you set in the admin panel are shown in each user's language. |
 | 🎨 **Sleek design** | Frosted, color-coded cards for Info, Success, Warning and Error that follow light and dark mode. |
-| 📝 **Formatting** | Bold, italic, inline code, lists, headings and links in the banner text. |
+| 📝 **Formatting** | A small set of Markdown in the banner text: **bold**, *italic*, `code`, lists, headings and links. |
 | 🤝 **Plays well with others** | Built on the [Shared Assets Protocol](../shared-assets-protocol/), so it runs side by side with other plugins that add code to Open WebUI. |
+
+---
+
+## 📸 Screenshots
+
+| At the top of the chat | Right above the message input |
+|---|---|
+| <img width="2800" height="1800" alt="better-banners-top-light" src="https://github.com/user-attachments/assets/74f21bbc-26ef-4d30-93db-8f50db00c9ad" /> | <img width="2800" height="1800" alt="better-banners-bottom-dark" src="https://github.com/user-attachments/assets/a9ca576d-fe5b-408a-9812-6afb4c5e41bd" /> |
+| **Collapsed to one line** | **In each user's language** |
+| <img width="2800" height="1800" alt="better-banners-collapsed-dark" src="https://github.com/user-attachments/assets/458b7f14-de0e-494c-85e2-d4462fd8dcd7" /> | <img width="2800" height="1800" alt="better-banners-i18n-de" src="https://github.com/user-attachments/assets/e529aaf1-62f3-4b1e-9544-616c87efa6c7" /> |
 
 ---
 
@@ -33,7 +40,7 @@ Makes the banners you already manage in **Admin Panel → Settings → General �
 
 ---
 
-## Setup
+## 🚀 Setup
 
 1. Copy the contents of `event.py`
 2. In Open WebUI: **Admin Panel → Functions → + New Function**
@@ -95,10 +102,12 @@ Turn the function off before deleting it. A deleted function cannot tell the ser
 
 ---
 
-## Limits
+## ⚠️ Limits
 
 - Banners show in chats. Other pages (Workspace, Admin Panel, Notes) show none.
-- Open WebUI's own license notices use the same spot as its banners and are hidden while the function is on.
+- On Enterprise instances, the "Trial License" and "Exceeded the number of seats" notices share the spot of the built-in banners, so they are hidden too while the function is on.
+- The collapse and dismiss buttons are labelled in English. The banner text itself follows each user's language.
+- With several servers that do not share a data folder, turning the function off takes effect on each of the other servers after its next restart.
 
 ---
 
