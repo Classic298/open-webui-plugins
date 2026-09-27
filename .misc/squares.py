@@ -63,6 +63,7 @@ squares = {
   "mcp-app-bridge":       dict(a1="#10b981", a2="#34d399", emoji="🧩", title=["MCP App", "Bridge"]),
   "vision-bridge":        dict(a1="#f59e0b", a2="#fb7185", emoji="👁️", title=["Vision", "Bridge"]),
   "prune":                dict(a1="#14b8a6", a2="#22c55e", emoji="🧹", title=["Prune"], title_size=58),
+  "better-banners":       dict(a1="#f97316", a2="#facc15", emoji="📣", title=["Better", "Banners"]),
 }
 
 for key, cfg in squares.items():

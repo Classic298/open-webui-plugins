@@ -1,5 +1,5 @@
-// Renders every square_*.html in this folder to a PNG at 2x via headless Chrome (CDP).
-// Output: square_<key>.html -> square-<key>.png   (400x400 @2x = 800x800)
+// Renders every square_*.html in this folder to a PNG at 4x via headless Chrome (CDP).
+// Output: square_<key>.html -> square-<key>.png   (400x400, device scale 2 x capture scale 2 = 1600x1600)
 // Usage:  node render_squares.mjs      (run `python squares.py` first to (re)generate the HTML)
 // Env override: CHROME=/path/to/chrome node render_squares.mjs
 import { spawn } from 'node:child_process';
