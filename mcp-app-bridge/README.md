@@ -26,7 +26,7 @@ When an MCP server declares a `ui://` resource on a tool, this bridge fetches th
 1. **Model calls `search_mcp_tools` or `list_mcp_tools`** → discovers tools on the MCP server, including which ones have UI resources. Listing is paginated and returns only names and short descriptions; search returns full parameter schemas for the top matches. Full schemas only enter context for tools that match the model's search.
 2. **Model calls `call_mcp_tool`** → executes the tool, checks for `_meta.ui.resourceUri`
 3. **If a UI resource exists** → fetches the HTML and returns a Rich UI embed via `HTMLResponse`: a small host frame that loads the app in a nested sandboxed iframe with the server's CSP
-4. **Open WebUI renders it** in a sandboxed iframe, same as the [Inline Visualizer](../inline-visualizer/). The app talks to the host frame over `postMessage` (JSON-RPC), and the host frame forwards the app's server calls through Open WebUI
+4. **Open WebUI renders it** in a sandboxed iframe, same as the [Inline Visualizer](../inline-visualizer-v2/). The app talks to the host frame over `postMessage` (JSON-RPC), and the host frame forwards the app's server calls through Open WebUI
 
 ```
 ┌─────────────┐     ┌─────────────┐     ┌─────────────┐
