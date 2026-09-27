@@ -1,3 +1,5 @@
+<img width="2800" height="1800" alt="better-banners-pill-bottom-dark" src="https://github.com/user-attachments/assets/9083ff5c-2aa3-4e87-8917-7bfd9dbceed7" />
+<img width="2800" height="1800" alt="better-banners-pill-top-light" src="https://github.com/user-attachments/assets/63d7aa03-8c1b-4dae-9ccc-2be9ad9a40ce" />
 # 📣 Better Banners
 
 <img width="6400" height="1600" alt="banner-better-banners" src="https://github.com/user-attachments/assets/6296f5ce-2ec9-4df4-aab4-628585ca7124" />
