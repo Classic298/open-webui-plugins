@@ -1,9 +1,3 @@
-<img width="1952" height="580" alt="better-banners-toggle-animation" src="https://github.com/user-attachments/assets/9e60206a-4232-4e3b-9873-f91501f33317" />
-<img width="1170" height="2532" alt="better-banners-toggle-phone-bottom-dark-collapsed" src="https://github.com/user-attachments/assets/6e6b92d4-c4b9-4563-a8e7-3adbc9ccd19e" />
-<img width="1170" height="2532" alt="better-banners-toggle-phone-top-light" src="https://github.com/user-attachments/assets/7120c83f-6559-42e0-88b7-af054c4a0a49" />
-<img width="2800" height="1800" alt="better-banners-toggle-bottom-dark" src="https://github.com/user-attachments/assets/2e3a1997-60a0-4f3c-80bb-183ad1e4ab09" />
-<img width="2800" height="1800" alt="better-banners-toggle-top-collapsed-light" src="https://github.com/user-attachments/assets/a69258d9-7b7d-4bdd-b5bc-53228f4812b6" />
-<img width="2800" height="1800" alt="better-banners-toggle-top-light" src="https://github.com/user-attachments/assets/64b49547-caa5-40d1-a82d-ab465902ad9a" />
 # 📣 Better Banners
 
 <img width="6400" height="1600" alt="banner-better-banners" src="https://github.com/user-attachments/assets/6296f5ce-2ec9-4df4-aab4-628585ca7124" />
@@ -30,13 +24,13 @@ Makes the banners you already manage in **Admin Panel → Settings → General �
 
 ## 📸 Screenshots
 
-| At the top of the chat | Right above the message input |
+<p align="center"><img width="1952" height="580" alt="better-banners-toggle-animation" src="https://github.com/user-attachments/assets/9e60206a-4232-4e3b-9873-f91501f33317" /></p>
+
+| Expanded, at the top | Collapsed into the pill |
 |---|---|
-| <img width="2800" height="1800" alt="better-banners-top-light" src="https://github.com/user-attachments/assets/74f21bbc-26ef-4d30-93db-8f50db00c9ad" /> | <img width="2800" height="1800" alt="better-banners-bottom-dark" src="https://github.com/user-attachments/assets/a9ca576d-fe5b-408a-9812-6afb4c5e41bd" /> |
-| **Collapsed into the pill, at the top** | **Collapsed into the pill, above the input** |
-| <img width="2800" height="1800" alt="better-banners-pill-top-light" src="https://github.com/user-attachments/assets/63d7aa03-8c1b-4dae-9ccc-2be9ad9a40ce" /> | <img width="2800" height="1800" alt="better-banners-pill-bottom-dark" src="https://github.com/user-attachments/assets/9083ff5c-2aa3-4e87-8917-7bfd9dbceed7" /> |
-| **In each user's language** | |
-| <img width="2800" height="1800" alt="better-banners-i18n-de" src="https://github.com/user-attachments/assets/e529aaf1-62f3-4b1e-9544-616c87efa6c7" /> | |
+| <img width="2800" height="1800" alt="better-banners-toggle-top-light" src="https://github.com/user-attachments/assets/64b49547-caa5-40d1-a82d-ab465902ad9a" /> | <img width="2800" height="1800" alt="better-banners-toggle-top-collapsed-light" src="https://github.com/user-attachments/assets/a69258d9-7b7d-4bdd-b5bc-53228f4812b6" /> |
+| **Right above the message input** | **On a phone, expanded and collapsed** |
+| <img width="2800" height="1800" alt="better-banners-toggle-bottom-dark" src="https://github.com/user-attachments/assets/2e3a1997-60a0-4f3c-80bb-183ad1e4ab09" /> | <img width="260" alt="better-banners-toggle-phone-top-light" src="https://github.com/user-attachments/assets/7120c83f-6559-42e0-88b7-af054c4a0a49" /> <img width="260" alt="better-banners-toggle-phone-bottom-dark-collapsed" src="https://github.com/user-attachments/assets/6e6b92d4-c4b9-4563-a8e7-3adbc9ccd19e" /> |
 
 ---
 
