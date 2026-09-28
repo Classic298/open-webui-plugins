@@ -260,7 +260,10 @@ html.dark #owui-better-banners{--obb-surface:rgba(23,23,23,.72);--obb-text:#f3f4
 .obb-count{min-width:18px;padding:2px 6px;border-radius:999px;background:color-mix(in srgb,var(--obb-accent) 18%,transparent);font-size:.75rem;font-weight:600;font-variant-numeric:tabular-nums;text-align:center}
 .obb-pill svg{width:14px;height:14px;color:var(--obb-muted)}
 .obb-arrow{display:flex;transition:transform .32s cubic-bezier(.34,1.56,.64,1)}
-.obb-pill.obb-open .obb-arrow{transform:rotate(180deg)}
+.obb-pill[aria-expanded="true"] .obb-arrow{transform:rotate(180deg)}
+.obb-pill{position:sticky;z-index:1;flex:none}
+#owui-better-banners[data-position="top"] .obb-pill{top:0}
+#owui-better-banners[data-position="bottom"] .obb-pill{bottom:0}
 .obb-pill.obb-absorb{animation:obb-absorb .46s cubic-bezier(.34,1.56,.64,1)}
 .obb-pill.obb-release{animation:obb-release .3s cubic-bezier(.34,1.56,.64,1)}
 .obb-banner.obb-enter{animation:obb-in .26s cubic-bezier(.22,1,.36,1) backwards;animation-delay:var(--obb-delay,0ms)}
@@ -309,7 +312,7 @@ LOADER_SCRIPT = r"""
   var root = null;
   var placeQueued = false;
   var lastRenderKey = '';
-  var collapseTimer = null;
+  var motionTimer = null;
   var anchored = false;
   var inflight = false;
   var syncAgain = false;
@@ -528,6 +531,7 @@ LOADER_SCRIPT = r"""
   function collapseAll() {
     var pill = root.querySelector('.obb-pill');
     var visible = visibleBanners();
+    if (!visible.length) return;
     var map = {};
     visible.forEach(function (banner) { map[banner.id] = fingerprint(banner); });
     writeJson(COLLAPSED_KEY, map);
@@ -542,8 +546,8 @@ LOADER_SCRIPT = r"""
     });
     void root.offsetHeight;
     elements.forEach(function (element) { element.classList.add('obb-collapsed'); });
-    collapseTimer = setTimeout(function () {
-      collapseTimer = null;
+    clearTimeout(motionTimer);
+    motionTimer = setTimeout(function () {
       elements.forEach(function (element) { element.remove(); });
       replayAnimation(pill, 'obb-absorb');
     }, COLLAPSE_MS + (elements.length - 1) * STAGGER_MS);
@@ -551,20 +555,37 @@ LOADER_SCRIPT = r"""
 
   function expandAll() {
     var pill = root.querySelector('.obb-pill');
-    // A click mid-collapse reverses it.
-    clearTimeout(collapseTimer);
-    collapseTimer = null;
-    root.querySelectorAll('.obb-banner').forEach(function (element) { element.remove(); });
     var visible = visibleBanners();
+    if (!visible.length) return;
+    clearTimeout(motionTimer);
     writeJson(COLLAPSED_KEY, {});
     lastRenderKey = renderKey(visible, false);
     updatePill(pill, visible, false);
     replayAnimation(pill, 'obb-release');
-    var elements = visible.map(bannerElement);
+    // Mid-collapse the same banners are still here and simply turn around.
+    var elements = Array.prototype.slice.call(root.querySelectorAll('.obb-banner'));
+    if (!elements.length) {
+      elements = visible.map(bannerElement);
+      if (CFG.position === 'top') pill.after.apply(pill, elements);
+      else pill.before.apply(pill, elements);
+      // Start collapsed without a transition, so only the opening animates.
+      elements.forEach(function (element) {
+        element.style.height = element.offsetHeight + 'px';
+        element.classList.add('obb-collapsed');
+      });
+      void root.offsetHeight;
+    }
     staggerFromPill(elements);
-    elements.forEach(function (element) { replayAnimation(element, 'obb-enter'); });
-    if (CFG.position === 'top') pill.after.apply(pill, elements);
-    else pill.before.apply(pill, elements);
+    elements.forEach(function (element) {
+      element.classList.add('obb-collapsing');
+      element.classList.remove('obb-collapsed');
+    });
+    motionTimer = setTimeout(function () {
+      elements.forEach(function (element) {
+        element.classList.remove('obb-collapsing');
+        element.style.height = '';
+      });
+    }, COLLAPSE_MS + (elements.length - 1) * STAGGER_MS);
   }
 
   function dismiss(banner, element) {
@@ -581,11 +602,14 @@ LOADER_SCRIPT = r"""
       element.remove();
       var visible = visibleBanners();
       var pill = root.querySelector('.obb-pill');
-      // What this tab shows, since another tab may have collapsed the shared state meanwhile.
-      var collapsed = pill.getAttribute('aria-expanded') !== 'true';
-      lastRenderKey = renderKey(visible, collapsed);
-      if (visible.length) updatePill(pill, visible, collapsed);
-      else root.replaceChildren();
+      if (visible.length && pill) {
+        var collapsed = pill.getAttribute('aria-expanded') !== 'true';
+        lastRenderKey = renderKey(visible, collapsed);
+        updatePill(pill, visible, collapsed);
+      } else {
+        lastRenderKey = renderKey(visible, false);
+        root.replaceChildren();
+      }
       schedulePlace();
     }, LEAVE_MS);
   }
@@ -644,11 +668,10 @@ LOADER_SCRIPT = r"""
   function updatePill(pill, visible, collapsed) {
     var pillLevel = visible.map(bannerLevel).reduce(function (highest, level) {
       return LEVEL_ORDER.indexOf(level) > LEVEL_ORDER.indexOf(highest) ? level : highest;
-    });
+    }, 'success');
     var label = (collapsed ? 'Expand all (' : 'Collapse all (') + visible.length + ')';
     LEVEL_ORDER.forEach(function (level) { pill.classList.remove('obb-' + level); });
     pill.classList.add('obb-' + pillLevel);
-    pill.classList.toggle('obb-open', !collapsed);
     pill.setAttribute('aria-label', label);
     pill.setAttribute('aria-expanded', String(!collapsed));
     pill.title = label;
