@@ -1,3 +1,9 @@
+<img width="1952" height="580" alt="better-banners-toggle-animation" src="https://github.com/user-attachments/assets/9e60206a-4232-4e3b-9873-f91501f33317" />
+<img width="1170" height="2532" alt="better-banners-toggle-phone-bottom-dark-collapsed" src="https://github.com/user-attachments/assets/6e6b92d4-c4b9-4563-a8e7-3adbc9ccd19e" />
+<img width="1170" height="2532" alt="better-banners-toggle-phone-top-light" src="https://github.com/user-attachments/assets/7120c83f-6559-42e0-88b7-af054c4a0a49" />
+<img width="2800" height="1800" alt="better-banners-toggle-bottom-dark" src="https://github.com/user-attachments/assets/2e3a1997-60a0-4f3c-80bb-183ad1e4ab09" />
+<img width="2800" height="1800" alt="better-banners-toggle-top-collapsed-light" src="https://github.com/user-attachments/assets/a69258d9-7b7d-4bdd-b5bc-53228f4812b6" />
+<img width="2800" height="1800" alt="better-banners-toggle-top-light" src="https://github.com/user-attachments/assets/64b49547-caa5-40d1-a82d-ab465902ad9a" />
 # 📣 Better Banners
 
 <img width="6400" height="1600" alt="banner-better-banners" src="https://github.com/user-attachments/assets/6296f5ce-2ec9-4df4-aab4-628585ca7124" />
