@@ -237,7 +237,7 @@ html.dark #owui-better-banners{--obb-surface:rgba(23,23,23,.72);--obb-text:#f3f4
 #owui-better-banners[data-position="top"]{flex:none;width:100%;max-width:58rem;max-height:40vh;margin:3rem auto 0;padding:0 8px}
 #owui-better-banners[data-position="bottom"]{--obb-enter-y:10px;--obb-collapse-y:14px;width:100%;max-height:40vh;margin:0 0 8px}
 .obb-banner,.obb-pill{pointer-events:auto;background:linear-gradient(color-mix(in srgb,var(--obb-accent) 10%,transparent),color-mix(in srgb,var(--obb-accent) 10%,transparent)),var(--obb-surface);-webkit-backdrop-filter:blur(18px) saturate(1.4);backdrop-filter:blur(18px) saturate(1.4);box-shadow:0 6px 20px -12px rgba(0,0,0,.25);color:var(--obb-text);font-size:.8125rem}
-.obb-banner{position:relative;display:flex;align-items:flex-start;gap:10px;padding:8px 6px 8px 12px;border-radius:16px;border:1px solid color-mix(in srgb,var(--obb-accent) 24%,transparent);line-height:1.5;text-align:left}
+.obb-banner{box-sizing:border-box;flex:none;position:relative;display:flex;align-items:flex-start;gap:10px;padding:8px 6px 8px 12px;border-radius:16px;border:1px solid color-mix(in srgb,var(--obb-accent) 24%,transparent);line-height:1.5;text-align:left}
 .obb-banner:not(:has(.obb-actions)){padding-right:12px}
 .obb-info{--obb-accent:#3b82f6}.obb-success{--obb-accent:#22c55e}.obb-warning{--obb-accent:#f59e0b}.obb-error{--obb-accent:#ef4444}
 .obb-icon{flex:none;width:16px;height:16px;margin-top:2px;color:var(--obb-accent)}
@@ -259,8 +259,8 @@ html.dark #owui-better-banners{--obb-surface:rgba(23,23,23,.72);--obb-text:#f3f4
 .obb-dot{width:8px;height:8px;border-radius:50%;background:var(--obb-accent);box-shadow:0 0 0 3px color-mix(in srgb,var(--obb-accent) 25%,transparent)}
 .obb-count{min-width:18px;padding:2px 6px;border-radius:999px;background:color-mix(in srgb,var(--obb-accent) 18%,transparent);font-size:.75rem;font-weight:600;font-variant-numeric:tabular-nums;text-align:center}
 .obb-pill svg{width:14px;height:14px;color:var(--obb-muted)}
-.obb-arrow{display:flex;transition:transform .32s cubic-bezier(.34,1.56,.64,1)}
-#owui-better-banners[data-position="top"] .obb-pill[aria-expanded="true"] .obb-arrow,#owui-better-banners[data-position="bottom"] .obb-pill[aria-expanded="false"] .obb-arrow{transform:rotate(180deg)}
+.obb-chevron{display:flex;transition:transform .32s cubic-bezier(.34,1.56,.64,1)}
+#owui-better-banners[data-position="top"] .obb-pill[aria-expanded="true"] .obb-chevron,#owui-better-banners[data-position="bottom"] .obb-pill[aria-expanded="false"] .obb-chevron{transform:rotate(180deg)}
 #owui-better-banners[data-position="top"] .obb-pill{top:0}
 #owui-better-banners[data-position="bottom"] .obb-pill{bottom:0}
 .obb-pill.obb-absorb{animation:obb-absorb .46s cubic-bezier(.34,1.56,.64,1)}
@@ -270,14 +270,13 @@ html.dark #owui-better-banners{--obb-surface:rgba(23,23,23,.72);--obb-text:#f3f4
 .obb-banner.obb-leave{animation:obb-out .16s ease-in forwards}
 .obb-collapsing{overflow:hidden;transition:height .24s cubic-bezier(.4,0,.2,1),padding .24s cubic-bezier(.4,0,.2,1),margin .24s cubic-bezier(.4,0,.2,1),border-width .24s,opacity .18s ease,transform .24s cubic-bezier(.4,0,.2,1);transition-delay:var(--obb-delay,0ms)}
 .obb-collapsed{height:0!important;padding-top:0;padding-bottom:0;border-width:0;opacity:0;transform:translateY(var(--obb-collapse-y)) scale(.88)}
-#owui-better-banners[data-position="top"] .obb-collapsed{margin-top:-6px}
-#owui-better-banners[data-position="bottom"] .obb-collapsed{margin-bottom:-6px}
+.obb-collapsed{margin-top:-6px}
 @keyframes obb-in{from{opacity:0;transform:translateY(var(--obb-enter-y)) scale(.94)}to{opacity:1;transform:none}}
 @keyframes obb-out{to{opacity:0;transform:scale(.92)}}
 @keyframes obb-pop{from{opacity:0;transform:scale(.8)}to{opacity:1;transform:none}}
 @keyframes obb-absorb{0%{transform:scale(1)}30%{transform:scale(1.16)}60%{transform:scale(.94)}100%{transform:scale(1)}}
 @keyframes obb-release{0%{transform:scale(1)}35%{transform:scale(.9)}100%{transform:scale(1)}}
-@media (prefers-reduced-motion:reduce){.obb-banner.obb-enter,.obb-pill.obb-enter,.obb-banner.obb-leave,.obb-pill.obb-absorb,.obb-pill.obb-release{animation-duration:.01ms;animation-delay:0s}.obb-collapsing,.obb-arrow{transition-duration:.01ms;transition-delay:0s}}
+@media (prefers-reduced-motion:reduce){.obb-banner.obb-enter,.obb-pill.obb-enter,.obb-banner.obb-leave,.obb-pill.obb-absorb,.obb-pill.obb-release{animation-duration:.01ms;animation-delay:0s}.obb-collapsing,.obb-chevron{transition-duration:.01ms;transition-delay:0s}}
 """
 
 LOADER_SCRIPT = r"""
@@ -311,7 +310,7 @@ LOADER_SCRIPT = r"""
   var root = null;
   var placeQueued = false;
   var lastRenderKey = '';
-  var motionTimer = null;
+  var collapseTimer = null;
   var anchored = false;
   var inflight = false;
   var syncAgain = false;
@@ -531,7 +530,7 @@ LOADER_SCRIPT = r"""
     var pill = root.querySelector('.obb-pill');
     var visible = visibleBanners();
     if (!visible.length) return;
-    clearTimeout(motionTimer);
+    clearTimeout(collapseTimer);
     var map = {};
     visible.forEach(function (banner) { map[banner.id] = fingerprint(banner); });
     writeJson(COLLAPSED_KEY, map);
@@ -550,7 +549,7 @@ LOADER_SCRIPT = r"""
     });
     void root.offsetHeight;
     elements.forEach(function (element) { element.classList.add('obb-collapsed'); });
-    motionTimer = setTimeout(function () {
+    collapseTimer = setTimeout(function () {
       elements.forEach(function (element) { element.remove(); });
       replayAnimation(pill, 'obb-absorb');
     }, COLLAPSE_MS + (elements.length - 1) * STAGGER_MS);
@@ -560,7 +559,7 @@ LOADER_SCRIPT = r"""
     var pill = root.querySelector('.obb-pill');
     var visible = visibleBanners();
     if (!visible.length) return;
-    clearTimeout(motionTimer);
+    clearTimeout(collapseTimer);
     writeJson(COLLAPSED_KEY, {});
     lastRenderKey = renderKey(visible, false);
     updatePill(pill, visible, false);
@@ -582,7 +581,7 @@ LOADER_SCRIPT = r"""
       element.classList.add('obb-collapsing');
       element.classList.remove('obb-collapsed');
     });
-    motionTimer = setTimeout(function () {
+    collapseTimer = setTimeout(function () {
       elements.forEach(function (element) {
         element.classList.remove('obb-collapsing');
         element.style.height = '';
@@ -685,7 +684,7 @@ LOADER_SCRIPT = r"""
     pill.type = 'button';
     pill.className = 'obb-pill';
     pill.innerHTML = '<span class="obb-dot"></span>' + svg(MEGAPHONE) + '<span class="obb-count"></span>' +
-      '<span class="obb-arrow">' + svg(CHEVRON) + '</span>';
+      '<span class="obb-chevron">' + svg(CHEVRON) + '</span>';
     updatePill(pill, visible, collapsed);
     pill.addEventListener('click', function () {
       if (pill.getAttribute('aria-expanded') === 'true') collapseAll();
