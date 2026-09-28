@@ -1,5 +1,5 @@
-// Renders every banner_*.html in this folder to a PNG at 2x via headless Chrome (CDP).
-// Output: banner_<key>.html -> banner-<key>.png   (1600x400 @2x = 3200x800)
+// Renders every banner_*.html in this folder to a PNG at 4x via headless Chrome (CDP).
+// Output: banner_<key>.html -> banner-<key>.png   (1600x400, device scale 2 x capture scale 2 = 6400x1600)
 // Usage:  node render.mjs      (run `python banners.py` first to (re)generate the HTML)
 // Env override: CHROME=/path/to/chrome node render.mjs
 import { spawn } from 'node:child_process';

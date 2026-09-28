@@ -255,6 +255,36 @@ def m_prune(a1, a2):  # database, throttle gauge, metered trickle, progress bar,
       <circle cx="234" cy="263.5" r="6" fill="#fff"/>
     </svg>'''
 
+def m_banners(a1, a2):  # banner stack above a chat input: expanded, collapsed, dismissible
+    def card(y, height, color, line_widths, dismissible):
+        lines = "".join(
+            f'<rect x="54" y="{y + 16 + i * 15}" width="{width}" height="7" rx="3.5" fill="#dcdeea" opacity="{0.9 - i * 0.25:.2f}"/>'
+            for i, width in enumerate(line_widths)
+        )
+        chevron_x = 326 if dismissible else 350
+        close = (
+            f'<path d="M350 {y + 15} l10 10 M360 {y + 15} l-10 10" stroke="#9a9cb0" stroke-width="2.4" stroke-linecap="round"/>'
+            if dismissible
+            else ""
+        )
+        return f'''<rect x="8" y="{y}" width="368" height="{height}" rx="14" fill="{color}1c" stroke="{color}80" stroke-width="1.6"/>
+      <circle cx="31" cy="{y + 20}" r="8.5" fill="none" stroke="{color}" stroke-width="2.6"/>
+      <rect x="29.8" y="{y + 16}" width="2.4" height="5.5" rx="1" fill="{color}"/>
+      {lines}
+      <path d="M{chevron_x} {y + 17} l6 6 l6 -6" fill="none" stroke="#9a9cb0" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/>
+      {close}'''
+
+    return f'''<svg width="384" height="300" viewBox="0 0 384 300" fill="none">
+      {card(12, 76, a1, [226, 184, 120], False)}
+      {card(100, 40, "#38bdf8", [204], True)}
+      {card(152, 40, "#22c55e", [164], True)}
+      <!-- chat input -->
+      <rect x="8" y="220" width="368" height="66" rx="27" fill="#12131c" stroke="rgba(255,255,255,.14)" stroke-width="1.6"/>
+      <rect x="34" y="249" width="150" height="8" rx="4" fill="#3a3c4d"/>
+      <circle cx="342" cy="253" r="17" fill="{a2}"/>
+      <path d="M342 261 v-15 M335 252 l7 -7 l7 7" fill="none" stroke="#1a1204" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+    </svg>'''
+
 banners = {
   "interface-defaults": dict(a1="#7c6ef0", a2="#a78bfa", emoji="🎛️", title="Interface Defaults", title_size=86,
     badges=["Event function","Auto-seed","Bulk apply","Native Valves"],
@@ -280,6 +310,10 @@ banners = {
     badges=["Event function","Throttled deletes","Dry-run preview","Multi-worker safe"],
     tag="Automatic, <b>throttled</b> database &amp; storage cleanup driven by system events. Purposefully slow, so a live instance <b>never even notices</b>.",
     motif=m_prune("#14b8a6","#22c55e")),
+  "better-banners": dict(a1="#f97316", a2="#facc15", emoji="📣", title="Better Banners", title_size=80,
+    badges=["Event function","Live updates","Top or bottom","Translated"],
+    tag="Your admin <b>banners in every chat</b>, on top or right above the input. <b>Collapsible</b>, dismissible, live and translated.",
+    motif=m_banners("#f97316","#facc15")),
 }
 
 for key, cfg in banners.items():
