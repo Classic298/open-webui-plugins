@@ -234,8 +234,8 @@ ASSET_KEY = "better-banners"
 BANNER_CSS = r"""
 #owui-better-banners{--obb-enter-y:-10px;--obb-collapse-y:-14px;--obb-surface:rgba(255,255,255,.78);--obb-text:#1f2937;--obb-muted:#6b7280;--obb-hover:rgba(0,0,0,.06);display:flex;flex-direction:column;gap:6px;box-sizing:border-box;overflow-y:auto;overscroll-behavior:contain;scrollbar-width:thin}
 html.dark #owui-better-banners{--obb-surface:rgba(23,23,23,.72);--obb-text:#f3f4f6;--obb-muted:#9ca3af;--obb-hover:rgba(255,255,255,.08)}
-#owui-better-banners[data-position="top"]{flex:none;width:100%;max-width:58rem;max-height:40vh;margin:3rem auto 0;padding:0 8px}
-#owui-better-banners[data-position="bottom"]{--obb-enter-y:10px;--obb-collapse-y:14px;width:100%;max-height:40vh;margin:0 0 8px}
+#owui-better-banners[data-position="top"]{flex:none;width:100%;max-width:58rem;max-height:40vh;margin:calc(3rem - 4px) auto 0;padding:4px 8px}
+#owui-better-banners[data-position="bottom"]{--obb-enter-y:10px;--obb-collapse-y:14px;width:100%;max-height:40vh;margin:-4px 0 4px;padding:4px 0}
 .obb-banner,.obb-pill{pointer-events:auto;background:linear-gradient(color-mix(in srgb,var(--obb-accent) 10%,transparent),color-mix(in srgb,var(--obb-accent) 10%,transparent)),var(--obb-surface);-webkit-backdrop-filter:blur(18px) saturate(1.4);backdrop-filter:blur(18px) saturate(1.4);box-shadow:0 6px 20px -12px rgba(0,0,0,.25);color:var(--obb-text);font-size:.8125rem}
 .obb-banner{box-sizing:border-box;flex:none;position:relative;display:flex;align-items:flex-start;gap:10px;padding:8px 6px 8px 12px;border-radius:16px;border:1px solid color-mix(in srgb,var(--obb-accent) 24%,transparent);line-height:1.5;text-align:left}
 .obb-banner:not(:has(.obb-actions)){padding-right:12px}
