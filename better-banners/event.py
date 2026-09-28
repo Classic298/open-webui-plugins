@@ -260,8 +260,7 @@ html.dark #owui-better-banners{--obb-surface:rgba(23,23,23,.72);--obb-text:#f3f4
 .obb-count{min-width:18px;padding:2px 6px;border-radius:999px;background:color-mix(in srgb,var(--obb-accent) 18%,transparent);font-size:.75rem;font-weight:600;font-variant-numeric:tabular-nums;text-align:center}
 .obb-pill svg{width:14px;height:14px;color:var(--obb-muted)}
 .obb-arrow{display:flex;transition:transform .32s cubic-bezier(.34,1.56,.64,1)}
-.obb-pill[aria-expanded="true"] .obb-arrow,#owui-better-banners[data-position="bottom"] .obb-arrow{transform:rotate(180deg)}
-#owui-better-banners[data-position="bottom"] .obb-pill[aria-expanded="true"] .obb-arrow{transform:none}
+#owui-better-banners[data-position="top"] .obb-pill[aria-expanded="true"] .obb-arrow,#owui-better-banners[data-position="bottom"] .obb-pill[aria-expanded="false"] .obb-arrow{transform:rotate(180deg)}
 #owui-better-banners[data-position="top"] .obb-pill{top:0}
 #owui-better-banners[data-position="bottom"] .obb-pill{bottom:0}
 .obb-pill.obb-absorb{animation:obb-absorb .46s cubic-bezier(.34,1.56,.64,1)}
@@ -540,9 +539,13 @@ LOADER_SCRIPT = r"""
     updatePill(pill, visible, true);
     var elements = root.querySelectorAll('.obb-banner');
     staggerFromPill(elements);
-    elements.forEach(function (element) {
+    // Keep the target height of an expand still running, so reversing it again opens fully.
+    var heights = Array.prototype.map.call(elements, function (element) {
+      return element.style.height || element.offsetHeight + 'px';
+    });
+    elements.forEach(function (element, index) {
       element.classList.remove('obb-enter');
-      element.style.height = element.offsetHeight + 'px';
+      element.style.height = heights[index];
       element.classList.add('obb-collapsing');
     });
     void root.offsetHeight;
@@ -556,19 +559,20 @@ LOADER_SCRIPT = r"""
   function expandAll() {
     var pill = root.querySelector('.obb-pill');
     var visible = visibleBanners();
+    if (!visible.length) return;
     clearTimeout(motionTimer);
     writeJson(COLLAPSED_KEY, {});
     lastRenderKey = renderKey(visible, false);
     updatePill(pill, visible, false);
     replayAnimation(pill, 'obb-release');
-    // Mid-collapse the same banners are still here and simply turn around.
     var elements = root.querySelectorAll('.obb-banner');
     if (!elements.length) {
       elements = visible.map(bannerElement);
       if (CFG.position === 'top') pill.after.apply(pill, elements);
       else pill.before.apply(pill, elements);
-      elements.forEach(function (element) {
-        element.style.height = element.offsetHeight + 'px';
+      var heights = elements.map(function (element) { return element.offsetHeight + 'px'; });
+      elements.forEach(function (element, index) {
+        element.style.height = heights[index];
         element.classList.add('obb-collapsed');
       });
       void root.offsetHeight;
@@ -606,7 +610,6 @@ LOADER_SCRIPT = r"""
         updatePill(pill, visible, collapsed);
       } else if (!root.querySelector('.obb-banner')) {
         // Wait for any other banner still fading out before clearing the stack.
-        lastRenderKey = '';
         render();
       }
       schedulePlace();
@@ -714,7 +717,7 @@ LOADER_SCRIPT = r"""
     }
     elements.forEach(function (element) {
       element.classList.add('obb-enter');
-      element.addEventListener('animationend', function () { element.classList.remove('obb-enter'); }, { once: true });
+      element.addEventListener('animationend', function () { element.classList.remove('obb-enter'); });
     });
     root.replaceChildren.apply(root, elements);
     schedulePlace();
