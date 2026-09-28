@@ -17,7 +17,7 @@ Makes the banners you already manage in **Admin Panel → Settings → General �
 | ⚡ **Live updates** | Add, edit or remove a banner and every open tab updates within about 2 seconds, without a reload. |
 | 🌍 **Translations** | Banner translations you set in the admin panel are shown in each user's language. |
 | 🎨 **Sleek design** | Frosted, color-coded cards for Info, Success, Warning and Error that follow light and dark mode. |
-| 📝 **Formatting** | A small set of Markdown in the banner text: **bold**, *italic*, `code`, lists, headings and links. |
+| 📝 **Formatting** | Markdown (**bold**, *italic*, `code`, lists, headings, links) or HTML with inline styles, like Open WebUI's own banners. |
 | 🤝 **Plays well with others** | Built on the [Shared Assets Protocol](../shared-assets-protocol/), so it runs side by side with other plugins that add code to Open WebUI. |
 
 ---
@@ -91,9 +91,9 @@ Live updates ride on Open WebUI's WebSocket connection. With `ENABLE_WEBSOCKET_S
 </details>
 
 <details>
-<summary><b>HTML in a banner shows up as text</b></summary>
+<summary><b>Can banners use HTML?</b></summary>
 
-Banner text supports Markdown formatting. HTML is shown as plain text on purpose.
+Yes, like Open WebUI's own banners. Formatting tags and inline styles are kept, so a banner designed in HTML looks the same. Scripts, event handlers, frames and unsafe links are removed.
 </details>
 
 <details>

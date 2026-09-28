@@ -404,6 +404,55 @@ LOADER_SCRIPT = r"""
     if (last < text.length) target.appendChild(document.createTextNode(text.slice(last)));
   }
 
+  var HTML_TAGS = /^(A|ABBR|B|BLOCKQUOTE|BR|CODE|DEL|DETAILS|DIV|EM|H[1-6]|HR|I|IMG|LI|MARK|OL|P|PRE|S|SMALL|SPAN|STRONG|SUB|SUMMARY|SUP|TABLE|TBODY|TD|TH|THEAD|TR|U|UL)$/;
+  var HTML_DROPPED = /^(SCRIPT|STYLE|IFRAME|OBJECT|EMBED|TEMPLATE|NOSCRIPT|SVG|MATH|FORM|INPUT|BUTTON|TEXTAREA|SELECT|LINK|META|BASE)$/;
+
+  // Same idea as Open WebUI's DOMPurify pass: keep formatting and inline styles, drop anything that can run or load code.
+  function appendSafeHtml(target, source) {
+    Array.prototype.forEach.call(source.childNodes, function (node) {
+      if (node.nodeType === 3) {
+        target.appendChild(document.createTextNode(node.nodeValue));
+        return;
+      }
+      if (node.nodeType !== 1 || HTML_DROPPED.test(node.tagName)) return;
+      if (!HTML_TAGS.test(node.tagName)) {
+        appendSafeHtml(target, node);
+        return;
+      }
+      var clean = document.createElement(node.tagName.toLowerCase());
+      var style = node.getAttribute('style');
+      if (style && !/url\s*\(|expression|javascript:/i.test(style)) clean.setAttribute('style', style);
+      ['title', 'class', 'colspan', 'rowspan', 'alt', 'width', 'height'].forEach(function (name) {
+        if (node.hasAttribute(name)) clean.setAttribute(name, node.getAttribute(name));
+      });
+      if (node.tagName === 'A') {
+        var href = node.getAttribute('href') || '';
+        if (isSafeUrl(href)) {
+          clean.href = href;
+          clean.target = '_blank';
+          clean.rel = 'noopener noreferrer';
+        }
+      }
+      if (node.tagName === 'IMG') {
+        var src = node.getAttribute('src') || '';
+        if (!/^https?:\/\//i.test(src)) return;
+        clean.src = src;
+      }
+      appendSafeHtml(clean, node);
+      target.appendChild(clean);
+    });
+  }
+
+  function renderContent(target, text) {
+    // Like Open WebUI, banners written in HTML render as HTML, with line breaks kept.
+    if (/<[a-z][^>]*>/i.test(text)) {
+      var parsed = new DOMParser().parseFromString(String(text).replace(/\r?\n/g, '<br>'), 'text/html');
+      appendSafeHtml(target, parsed.body);
+    } else {
+      renderMarkdown(target, text);
+    }
+  }
+
   function renderMarkdown(target, text) {
     var list = null;
     var needsBreak = false;
@@ -650,7 +699,7 @@ LOADER_SCRIPT = r"""
     }
     var content = document.createElement('div');
     content.className = 'obb-content';
-    renderMarkdown(content, localized(banner, 'content'));
+    renderContent(content, localized(banner, 'content'));
     body.appendChild(content);
     element.appendChild(body);
 
