@@ -269,8 +269,7 @@ html.dark #owui-better-banners{--obb-surface:rgba(23,23,23,.72);--obb-text:#f3f4
 .obb-pill.obb-enter{animation:obb-pop .28s cubic-bezier(.34,1.56,.64,1)}
 .obb-banner.obb-leave{animation:obb-out .16s ease-in forwards}
 .obb-collapsing{overflow:hidden;transition:height .24s cubic-bezier(.4,0,.2,1),padding .24s cubic-bezier(.4,0,.2,1),margin .24s cubic-bezier(.4,0,.2,1),border-width .24s,opacity .18s ease,transform .24s cubic-bezier(.4,0,.2,1);transition-delay:var(--obb-delay,0ms)}
-.obb-collapsed{height:0!important;padding-top:0;padding-bottom:0;border-width:0;opacity:0;transform:translateY(var(--obb-collapse-y)) scale(.88)}
-.obb-collapsed{margin-top:-6px}
+.obb-collapsed{height:0!important;padding-top:0;padding-bottom:0;border-width:0;opacity:0;transform:translateY(var(--obb-collapse-y)) scale(.88);margin-top:-6px}
 @keyframes obb-in{from{opacity:0;transform:translateY(var(--obb-enter-y)) scale(.94)}to{opacity:1;transform:none}}
 @keyframes obb-out{to{opacity:0;transform:scale(.92)}}
 @keyframes obb-pop{from{opacity:0;transform:scale(.8)}to{opacity:1;transform:none}}
@@ -527,9 +526,9 @@ LOADER_SCRIPT = r"""
   }
 
   function collapseAll() {
-    var pill = root.querySelector('.obb-pill');
     var visible = visibleBanners();
     if (!visible.length) return;
+    var pill = root.querySelector('.obb-pill');
     clearTimeout(collapseTimer);
     var map = {};
     visible.forEach(function (banner) { map[banner.id] = fingerprint(banner); });
@@ -556,9 +555,9 @@ LOADER_SCRIPT = r"""
   }
 
   function expandAll() {
-    var pill = root.querySelector('.obb-pill');
     var visible = visibleBanners();
     if (!visible.length) return;
+    var pill = root.querySelector('.obb-pill');
     clearTimeout(collapseTimer);
     writeJson(COLLAPSED_KEY, {});
     lastRenderKey = renderKey(visible, false);
