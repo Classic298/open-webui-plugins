@@ -8,51 +8,202 @@ required_open_webui_version: 0.11.3
 description: Shows the banners from Admin Panel → Settings → General → Banners in every chat, at the top of the page or right above the message input. Users can collapse the banners into a small pill and dismiss the dismissible ones, and both choices are remembered. Banner edits reach open tabs live, in each user's language. Inspired by Broadcast Toasts by G30.
 """
 
+import asyncio
 import hashlib
 import json
-import time
+import logging
+import uuid
 from pathlib import Path
 from typing import Any, Literal, Optional
 
+from open_webui.utils.json_codec import JSONCodec
 from pydantic import BaseModel, Field
+
+ASSET_KEY = "better-banners"  # fixed, used for asset_register too
+
+# ===========================================================================
+# Live reload broadcast
+# ---------------------------------------------------------------------------
+# Each load publishes over Redis; a peer whose cached code differs from the
+# database re-executes it. register(app) is yours and must be idempotent; gate
+# each producer on reload_active(app).
+# ===========================================================================
+RELOAD_STATE_ATTR = "_owui_live_reload"  # {key: {active, exec_id, listener}}
+RELOAD_EXEC_ID = uuid.uuid4().hex  # new on every exec of this source
+# Open WebUI executes each function as module "function_<id>".
+RELOAD_FUNCTION_ID = __name__.removeprefix("function_")
+
+reload_log = logging.getLogger("owui-live-reload")
+# asyncio only keeps weak references to tasks.
+reload_tasks: set = set()
+
+
+def reload_state(app: Any) -> dict:
+    registry = getattr(app.state, RELOAD_STATE_ATTR, None)
+    if not isinstance(registry, dict):
+        registry = {}
+        app.state.__setattr__(RELOAD_STATE_ATTR, registry)
+    return registry.setdefault(ASSET_KEY, {})
+
+
+def reload_active(app: Any) -> bool:
+    return bool(reload_state(app).get("active"))
+
+
+def reload_channel() -> str:
+    from open_webui.env import REDIS_KEY_PREFIX
+
+    return f"{REDIS_KEY_PREFIX}:live-reload:{ASSET_KEY}"
+
+
+def reload_mark_loaded(app: Any) -> None:
+    register(app)
+    state = reload_state(app)
+    state["active"] = True
+    state["exec_id"] = RELOAD_EXEC_ID
+
+
+async def reload_publish(app: Any, active: bool) -> None:
+    redis = getattr(app.state, "redis", None)
+    if redis is None:
+        return
+    try:
+        await redis.publish(reload_channel(), JSONCodec.dumps({"active": active}))
+    except Exception as e:
+        reload_log.warning("[%s] publish failed: %s", ASSET_KEY, type(e).__name__)
+
+
+async def reload_ensure_listener(app: Any) -> None:
+    state = reload_state(app)
+    if state.get("listener") is not None:
+        return
+    redis = getattr(app.state, "redis", None)
+    if redis is None:
+        return
+
+    from types import SimpleNamespace
+
+    from open_webui.models.functions import Functions
+    from open_webui.utils.plugin import (
+        get_function_module_from_cache,
+        get_functions_cache,
+    )
+
+    # Mark before awaiting so a concurrent event() can't double-subscribe.
+    state["listener"] = True
+    try:
+        pubsub = redis.pubsub()
+        await pubsub.subscribe(reload_channel())
+    except Exception as e:
+        state["listener"] = None
+        reload_log.warning("[%s] subscribe failed: %s", ASSET_KEY, type(e).__name__)
+        return
+
+    async def listen():
+        try:
+            async for message in pubsub.listen():
+                if message.get("type") != "message":
+                    continue
+                if not JSONCodec.loads(message["data"])["active"]:
+                    state["active"] = False
+                    continue
+                was_active = state.get("active")
+                # Enable broadcasts arrive before is_active commits; bootstrap trusts this flag.
+                state["active"] = True
+                context = SimpleNamespace(app=app)
+                if not was_active:
+                    # Force a fresh exec so its bootstrap registers again.
+                    get_functions_cache(context).pop(RELOAD_FUNCTION_ID, None)
+                try:
+                    function_module, _, _ = await get_function_module_from_cache(
+                        context, RELOAD_FUNCTION_ID
+                    )
+                    # Peers never see a valves save; re-read them like Open WebUI's dispatch does.
+                    if hasattr(function_module, "Valves"):
+                        valves = await Functions.get_function_valves_by_id(
+                            RELOAD_FUNCTION_ID
+                        )
+                        function_module.valves = function_module.Valves(
+                            **(valves or {})
+                        )
+                except Exception as e:
+                    reload_log.warning(
+                        "[%s] reload from db failed: %s", ASSET_KEY, type(e).__name__
+                    )
+        except Exception as e:
+            reload_log.warning("[%s] listener stopped: %s", ASSET_KEY, type(e).__name__)
+
+    state["listener"] = asyncio.create_task(listen())
+
+
+def reload_bootstrap() -> None:
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return
+
+    async def bootstrap():
+        try:
+            from open_webui.main import app
+            from open_webui.models.functions import Functions
+
+            own = await Functions.get_function_by_id(RELOAD_FUNCTION_ID)
+            # Loading a disabled function (e.g. for its valves) must not switch it on.
+            if own is None or not (own.is_active or reload_active(app)):
+                return
+            reload_mark_loaded(app)
+            await reload_ensure_listener(app)
+            await reload_publish(app, True)
+        except Exception as e:
+            reload_log.warning("[%s] bootstrap failed: %s", ASSET_KEY, type(e).__name__)
+
+    task = loop.create_task(bootstrap())
+    reload_tasks.add(task)
+    task.add_done_callback(reload_tasks.discard)
+
+
+async def reload_on_event(
+    app: Any, event: Optional[dict], event_name: Optional[str]
+) -> None:
+    await reload_ensure_listener(app)
+    state = reload_state(app)
+
+    is_own = ((event or {}).get("subject") or {}).get("id") == RELOAD_FUNCTION_ID
+    if is_own and event_name == "function.disable_started":
+        state["active"] = False
+        await reload_publish(app, False)
+        return
+    if is_own and event_name == "function.valves_updated":
+        await reload_publish(app, True)
+
+    current = state.get("active") and state.get("exec_id") == RELOAD_EXEC_ID
+    if current and event_name != "system.startup.completed":
+        return
+    reload_mark_loaded(app)
+    await reload_publish(app, True)
+
+
+# =========================== end live reload block =========================
+
 
 # ===========================================================================
 # Shared static-asset registry
 # --- KEEP BYTE-IDENTICAL IN EVERY PLUGIN THAT USES IT ----------------------
 # ---------------------------------------------------------------------------
-# app.html loads /static/loader.js and /static/custom.css on every page, and
-# loader.js is the only hook running before the SvelteKit bundle hydrates. Two
-# URLs, many plugins - so none may own either. Each publishes a fragment into
-# one app.state registry and the route composes them PER REQUEST, so load order
-# is irrelevant, a late plugin needs no cooperation, and a re-exec'd one
-# replaces its own key. Per-process: each container serves what it has loaded.
-#
-# Fragments are inlined, never <script src> / @import - a second request would
-# land after hydration, defeating the point.
+# Each plugin publishes a fragment into one app.state registry and the route
+# composes them per request, so load order is irrelevant. Per-process: each
+# container serves what it has loaded.
 #
 # Contract:
 #   * ASSET_REGISTRY_ATTR, ASSET_ROUTE_ATTR, the entry shape and the paths are
-#     the interop surface. Everything else is implementation owned by whichever
-#     plugin created the route - a stale copy silently serves everyone, hence
-#     ASSET_IMPL_VERSION and byte-identity.
-#   * `key` must be a module-level constant. Derive it from a build id or a
-#     function id and a re-exec registers a SECOND entry - duplicated output,
-#     not just a leaked closure.
-#   * `order` breaks ties: lower composes first, so on custom.css it loses the
-#     cascade and on loader.js it wraps innermost. Default 0. Use it instead of
-#     encoding priority in the key, which would only work if every plugin
-#     renamed at once.
-#   * Producers run SYNCHRONOUSLY on the event loop, on every request, and
-#     BEFORE the ETag is compared - so a 304 costs exactly what a 200 costs.
-#     "Cheap" is per-call work, not payload size: memoise anything that
-#     parses, formats or regexes and return a prebuilt string. No I/O, no
-#     locks, no sleeps. Budget tens of microseconds, not milliseconds.
-#   * To withdraw, return "" - there is no unregister. A disabled plugin still
-#     gets function.disable_started (it fires before is_active flips), but a
-#     DELETED one never sees its own deletion, so disable before deleting or
-#     the fragment serves until that process restarts.
-#   * Reach is the SPA only. A plugin serving its own HTML page loads neither
-#     asset and must inject its own.
+#     the interop surface. The route owner's copy serves everyone.
+#   * `key` must be a module-level constant, or a re-exec adds a second entry.
+#   * Lower `order` composes first (default 0). Never encode priority in the key.
+#   * Producers run on the event loop for every request, 304s included: return
+#     a prebuilt string, no I/O, no locks.
+#   * Return "" to withdraw. A deleted plugin never sees its own deletion, so
+#     disable it first.
+#   * Inline fragments only: <script src> / @import lands after hydration.
 # ===========================================================================
 LOADER_PATH = "/static/loader.js"
 CUSTOM_CSS_PATH = "/static/custom.css"
@@ -63,12 +214,10 @@ SHARED_ASSET_TYPES = {
 ASSET_REGISTRY_ATTR = "_owui_static_fragments"  # {path: {key: entry}}
 ASSET_ROUTE_ATTR = "_owui_shared_asset"  # set to the path the route serves
 ASSET_IMPL_ATTR = "_owui_shared_asset_impl"  # implementation version of the route
-# Bump when this block changes behaviour: newer evicts older, so the fleet
-# converges on one implementation instead of whichever plugin booted first.
+# Bump on any behaviour change: the newest copy takes over the route.
 ASSET_IMPL_VERSION = 4
 
-# Producer failures are reported once per (path, key, exception type) - compose
-# runs on every page load, so an unconditional warning would be a firehose.
+# Warn once per (path, key, exception type): compose runs on every page load.
 _ASSET_WARNED: set = set()
 
 
@@ -85,9 +234,7 @@ def asset_fragments(app: Any, path: str) -> dict:
 
 
 def asset_sort_key(item):
-    """(order, key). Coerced defensively: a non-int order from a third-party
-    plugin would raise inside sorted(), outside the per-fragment guard, and
-    take down the whole asset."""
+    """(order, key); a non-int order falls back to 0 so it cannot break sorted()."""
     key, entry = item
     try:
         order = int(entry.get("order", 0))
@@ -158,8 +305,7 @@ def asset_compose(app: Any, path: str) -> str:
 def asset_register(
     app: Any, path: str, key: str, start: str, end: str, producer, order: int = 0
 ) -> None:
-    """Publish a fragment and ensure the route exists. Idempotent, and safe
-    from any plugin in any order."""
+    """Publish a fragment and ensure the route exists. Idempotent."""
     from starlette.responses import Response
     from starlette.routing import Mount, Route
 
@@ -177,8 +323,7 @@ def asset_register(
             return  # an equal or newer implementation already owns the route
         break  # ours is newer - fall through and replace it
 
-    # Replaces a single-owner route from an older build, or an older impl of
-    # this block. Fragments live on app.state, so nothing is lost.
+    # Fragments live on app.state, so replacing the route loses nothing.
     app.routes[:] = [r for r in app.routes if getattr(r, "path", "") != path]
     media_type = SHARED_ASSET_TYPES.get(path, "text/plain; charset=utf-8")
 
@@ -186,28 +331,20 @@ def asset_register(
         content = asset_compose(app, path)
         etag = (
             '"owui-'
-            # usedforsecurity=False: this is a cache validator, not a security
-            # primitive, and a bare md5() raises ValueError on a FIPS host -
-            # which would 500 the asset for every visitor.
+            # Cache validator only; a bare md5() raises on FIPS hosts.
             + hashlib.md5(
                 (path + "\x00" + content).encode("utf-8"), usedforsecurity=False
             ).hexdigest()
             + '"'
         )
-        # no-cache, NOT no-store: a response the browser may not store has no
-        # validator, so If-None-Match is never sent and the 304 below is dead
-        # code. no-cache still forbids reuse without revalidation, so a stale
-        # body is impossible either way. Note a proxy may re-add no-store for
-        # these paths, which puts the 304 back to sleep - that is deployment
-        # policy, not this block's business.
+        # no-cache, not no-store: no-store would disable the 304 below.
         headers = {
             "Cache-Control": "no-cache, must-revalidate, private",
             "ETag": etag,
         }
         if request.headers.get("if-none-match") == etag:
             return Response(status_code=304, headers=headers)
-        # Starlette only auto-appends charset for text/*, so JS would ship
-        # undeclared and readers guessing latin-1 get mojibake.
+        # Starlette only adds charset for text/*.
         return Response(content, media_type=media_type, headers=headers)
 
     insert_at = len(app.routes)
@@ -226,10 +363,8 @@ def asset_register(
 
 SOCKET_EVENT = "owui:better-banners"
 BANNERS_UPDATED_EVENT = "config.banners.updated"
-DISABLED_CHECK_SECONDS = 1.0
 LOADER_BLOCK_START = "// owui-better-banners:start"
 LOADER_BLOCK_END = "// owui-better-banners:end"
-ASSET_KEY = "better-banners"
 
 BANNER_CSS = r"""
 #owui-better-banners{--obb-enter-y:-10px;--obb-collapse-y:-14px;--obb-surface:rgba(255,255,255,.78);--obb-text:#1f2937;--obb-muted:#6b7280;--obb-hover:rgba(0,0,0,.06);display:flex;flex-direction:column;gap:6px;box-sizing:border-box;overflow-y:auto;overscroll-behavior:contain;scrollbar-width:thin}
@@ -875,6 +1010,17 @@ LOADER_SCRIPT = r"""
 """
 
 
+def register(app: Any) -> None:
+    asset_register(
+        app,
+        LOADER_PATH,
+        ASSET_KEY,
+        LOADER_BLOCK_START,
+        LOADER_BLOCK_END,
+        lambda: Event.instance._loader_fragment() if reload_active(app) else "",
+    )
+
+
 class Event:
     class Valves(BaseModel):
         position: Literal["top", "bottom"] = Field(
@@ -895,14 +1041,14 @@ class Event:
         )
 
     _fragment_cache: Optional[tuple[tuple, str]] = None
-    _disabled_cache: Optional[tuple[float, bool]] = None
+    instance: Optional["Event"] = None
 
     def __init__(self):
         self.valves = self.Valves()
+        Event.instance = self
+        reload_bootstrap()
 
     def _loader_fragment(self) -> str:
-        if Event._is_disabled():
-            return ""
         valves = self.valves
         cache_key = (
             valves.position,
@@ -928,59 +1074,14 @@ class Event:
         Event._fragment_cache = (cache_key, fragment)
         return fragment
 
-    # Other workers never get this function's disable event, so the state lives on disk.
-    @staticmethod
-    def _disabled_marker() -> Path:
-        from open_webui.config import CACHE_DIR
-
-        return Path(CACHE_DIR) / "better_banners" / "disabled"
-
-    @classmethod
-    def _set_disabled(cls, disabled: bool) -> None:
-        cls._disabled_cache = (time.monotonic(), disabled)
-        marker = cls._disabled_marker()
-        if disabled:
-            marker.parent.mkdir(parents=True, exist_ok=True)
-            marker.touch()
-        else:
-            marker.unlink(missing_ok=True)
-
-    @classmethod
-    def _is_disabled(cls) -> bool:
-        now = time.monotonic()
-        if (
-            cls._disabled_cache
-            and now - cls._disabled_cache[0] < DISABLED_CHECK_SECONDS
-        ):
-            return cls._disabled_cache[1]
-        disabled = cls._disabled_marker().exists()
-        cls._disabled_cache = (now, disabled)
-        return disabled
-
     async def event(
         self,
         event: Optional[dict] = None,
         __event_name__: str = "",
-        __id__: str = "",
         __app__: Any = None,
         **kwargs,
     ) -> None:
-        is_own = ((event or {}).get("subject") or {}).get("id") == __id__
-        if is_own and __event_name__ == "function.disable_started":
-            Event._set_disabled(True)
-            return
-
-        if is_own and __event_name__ == "function.enable_started":
-            Event._set_disabled(False)
-
-        asset_register(
-            __app__,
-            LOADER_PATH,
-            ASSET_KEY,
-            LOADER_BLOCK_START,
-            LOADER_BLOCK_END,
-            self._loader_fragment,
-        )
+        await reload_on_event(__app__, event, __event_name__)
 
         if __event_name__ == BANNERS_UPDATED_EVENT:
             from open_webui.socket.main import sio

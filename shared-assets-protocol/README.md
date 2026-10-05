@@ -76,6 +76,46 @@ asset_register(
 | Put your code inline. | Loading another file with `<script src>` or `@import` arrives too late, after the app has already started. |
 | It covers the main app only. | Pages that a plugin serves on its own do not load these files and need their own code. |
 
+## Optional: update every container instantly
+
+With several Open WebUI containers or workers, a change to your plugin does not reach all of them. Open WebUI keeps each plugin's code in memory per container and does not tell the other containers when something changes:
+
+- **Saving new code:** only the container you saved on loads it right away. Every other container keeps running the old code, and keeps serving the old fragment, until some event happens to fire on it. On a quiet container that can take a long time.
+- **Changing valves:** the same. Other containers keep the old settings until their next event.
+- **Disabling the plugin:** the other containers never find out. A disabled plugin gets no events there, so its fragment keeps being served until that container restarts.
+
+The optional [`live_reload.py`](live_reload.py) add-on makes all three reach every container within a second. Whenever the plugin loads, is disabled or enabled, or has its valves saved, it tells every other container over Redis. Each one then loads the new code if its copy differs from the database, picks up the new valves and switches the fragment off or on to match. There is nothing to bump. [Better Banners](../better-banners/) uses it.
+
+Without Redis the add-on does nothing extra. It needs Open WebUI 0.11.0 or newer.
+
+The add-on is separate from the protocol itself and does not change `ASSET_IMPL_VERSION`. Everything in it is scoped to your own plugin, so your copy never affects anybody else's.
+
+1. Copy everything in [`live_reload.py`](live_reload.py) into your event function, above the shared asset block.
+2. Set `ASSET_KEY` to a name of your choice that no other plugin uses, for example `"my-plugin"`. Pass the same name to `asset_register`.
+3. Put your `asset_register` calls into a function called `register(app)` and let each producer return `""` when `reload_active(app)` is false.
+4. Wire it into your event class:
+
+```python
+def register(app):
+    asset_register(
+        app,
+        LOADER_PATH,
+        ASSET_KEY,
+        LOADER_BLOCK_START,
+        LOADER_BLOCK_END,
+        lambda: LOADER_FRAGMENT if reload_active(app) else "",
+    )
+
+
+class Event:
+    def __init__(self):
+        reload_bootstrap()
+
+    async def event(self, event=None, __event_name__=None, __app__=None):
+        if __app__ is not None:
+            await reload_on_event(__app__, event, __event_name__)
+```
+
 ## Changing the protocol
 
 Any change to the protocol code has to bump `ASSET_IMPL_VERSION` by one, and the new block replaces the old one here first. Plugins that update their copy then take over the route from older copies automatically. Open an issue or a pull request in this repository to propose a change, so every adopter can follow it.

@@ -63,7 +63,7 @@ Open **Admin Panel → Functions → Better Banners → gear icon**.
 | **Max Height Px** | 160 | How tall a single expanded banner gets before its text scrolls. |
 | **Resync Interval Seconds** | 300 | How often each open tab re-reads the banners on its own, in case it missed a live update. 0 turns it off. |
 
-Changed settings reach users on their next page load. With several workers, each worker picks them up the next time it handles any event.
+Changed settings reach users on their next page load. With several workers or containers and Redis, every one of them picks up a code change, a settings change or a disable within a second.
 
 ---
 
