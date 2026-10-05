@@ -1,7 +1,5 @@
 # Shared Assets Protocol, optional build reload add-on for event functions.
-# Copy everything below this header into your event function, next to the
-# shared asset block. It is not part of the interop surface: every name is
-# scoped by RELOAD_KEY, so your copy only ever serves your own plugin.
+# Copy everything below this header into your event function.
 # Spec and rules: https://github.com/Classic298/open-webui-plugins/tree/main/shared-assets-protocol
 
 import asyncio
@@ -10,33 +8,18 @@ import logging
 import uuid
 from typing import Any, Optional
 
-# ===========================================================================
-# BUMP THIS ON EVERY CODE CHANGE.
-# It is the payload of the reload broadcast; peers that already run this build
-# ignore the broadcast, so an unchanged id leaves the fleet on old code.
-# ===========================================================================
+# BUMP ON EVERY CODE CHANGE: peers already on this build ignore the broadcast.
 FUNCTION_BUILD_ID = "2026-10-05.1"
 
 RELOAD_KEY = "my-plugin"  # fixed, like the asset key
 RELOAD_SIGNATURE = "// my-plugin:start"  # a string only your own source contains
 
 # ===========================================================================
-# Build reload broadcast (optional add-on, event functions only)
+# Build reload broadcast
 # ---------------------------------------------------------------------------
-# Every container keeps its own module cache and fragment registry, so a save
-# on one container leaves the others on the old code until they restart. Each
-# load publishes FUNCTION_BUILD_ID over Redis; a peer on another build drops
-# its cached module and re-executes the source from the database, whose fresh
-# Event().__init__ registers again. Without Redis it only tracks local state.
-#
-# Contract:
-#   * Needs FUNCTION_BUILD_ID, RELOAD_KEY and RELOAD_SIGNATURE defined above.
-#   * register(app) is yours: it calls asset_register for every fragment and
-#     must be idempotent. Gate each producer on reload_active(app), so a
-#     disable on one container switches the fragment off on all of them.
-#   * Call reload_bootstrap(register) from Event.__init__ and
-#     reload_on_event(...) from event(). Nothing else is needed.
-#   * A deleted function still never sees its own deletion: disable first.
+# Each load publishes FUNCTION_BUILD_ID over Redis; a peer on another build
+# re-executes the source from the database. register(app) is yours and must be
+# idempotent; gate each producer on reload_active(app).
 # ===========================================================================
 RELOAD_STATE_ATTR = "_owui_build_reload"  # {key: {active, build, function_id, listener}}
 RELOAD_CHANNEL = "owui-build-reload:" + RELOAD_KEY
@@ -58,7 +41,6 @@ def reload_active(app: Any) -> bool:
 
 
 def reload_mark_loaded(app: Any, register, function_id: Optional[str]) -> None:
-    """Publish the fragments and mark this process active and on this build."""
     register(app)
     state = reload_state(app)
     state["active"] = True
@@ -88,7 +70,6 @@ async def reload_publish(app: Any, active: bool) -> None:
 
 
 async def reload_from_db(app: Any) -> None:
-    """Re-exec the DB source so a peer runs the new build, not its stale copy."""
     from types import SimpleNamespace
 
     from open_webui.utils.plugin import (
@@ -110,7 +91,6 @@ async def reload_from_db(app: Any) -> None:
 
 
 async def reload_ensure_listener(app: Any) -> None:
-    """One listener per process; a no-op without Redis."""
     state = reload_state(app)
     if state.get("listener") is not None:
         return
@@ -146,8 +126,7 @@ async def reload_ensure_listener(app: Any) -> None:
                     continue
                 if state.get("active") and payload.get("build") == state.get("build"):
                     continue
-                # Set before the re-exec: an enable broadcast arrives while the
-                # row still reads is_active=False, and bootstrap trusts this flag.
+                # Enable broadcasts arrive before is_active commits; bootstrap trusts this flag.
                 state["active"] = True
                 try:
                     await reload_from_db(app)
@@ -162,8 +141,6 @@ async def reload_ensure_listener(app: Any) -> None:
 
 
 def reload_bootstrap(register) -> None:
-    """Register when the module is (re)loaded in a running app - right after an
-    admin save, or a peer's reload_from_db - so no restart is needed."""
     try:
         loop = asyncio.get_running_loop()
     except RuntimeError:
@@ -174,9 +151,7 @@ def reload_bootstrap(register) -> None:
             from open_webui.main import app
 
             own = await reload_find_own_row()
-            # Loading a disabled function (e.g. to show its valves) must not
-            # switch it on. The active flag covers a peer reloading on an
-            # enable broadcast, sent before the toggle commits is_active.
+            # Loading a disabled function (e.g. for its valves) must not switch it on.
             if own is None or not (own.is_active or reload_active(app)):
                 return
             reload_mark_loaded(app, register, own.id)
