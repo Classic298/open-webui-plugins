@@ -74,6 +74,7 @@ async def reload_ensure_listener(app: Any) -> None:
 
     from types import SimpleNamespace
 
+    from open_webui.models.functions import Functions
     from open_webui.utils.plugin import (
         get_function_module_from_cache,
         get_functions_cache,
@@ -105,7 +106,17 @@ async def reload_ensure_listener(app: Any) -> None:
                     # Force a fresh exec so its bootstrap registers again.
                     get_functions_cache(context).pop(RELOAD_FUNCTION_ID, None)
                 try:
-                    await get_function_module_from_cache(context, RELOAD_FUNCTION_ID)
+                    function_module, _, _ = await get_function_module_from_cache(
+                        context, RELOAD_FUNCTION_ID
+                    )
+                    # Peers never see a valves save; re-read them like Open WebUI's dispatch does.
+                    if hasattr(function_module, "Valves"):
+                        valves = await Functions.get_function_valves_by_id(
+                            RELOAD_FUNCTION_ID
+                        )
+                        function_module.valves = function_module.Valves(
+                            **(valves or {})
+                        )
                 except Exception as e:
                     reload_log.warning(
                         "[%s] reload from db failed: %s", ASSET_KEY, type(e).__name__
@@ -148,11 +159,13 @@ async def reload_on_event(
     await reload_ensure_listener(app)
     state = reload_state(app)
 
-    subject_id = ((event or {}).get("subject") or {}).get("id")
-    if event_name == "function.disable_started" and subject_id == RELOAD_FUNCTION_ID:
+    is_own = ((event or {}).get("subject") or {}).get("id") == RELOAD_FUNCTION_ID
+    if is_own and event_name == "function.disable_started":
         state["active"] = False
         await reload_publish(app, False)
         return
+    if is_own and event_name == "function.valves_updated":
+        await reload_publish(app, True)
 
     current = state.get("active") and state.get("exec_id") == RELOAD_EXEC_ID
     if current and event_name != "system.startup.completed":
