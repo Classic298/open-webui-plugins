@@ -3,8 +3,8 @@ title: Better Banners
 author: Classic298
 author_url: https://github.com/Classic298
 funding_url: https://github.com/Classic298
-version: 1.0.0
-required_open_webui_version: 0.11.4
+version: 1.0.1
+required_open_webui_version: 0.11.3
 description: Shows the banners from Admin Panel → Settings → General → Banners in every chat, at the top of the page or right above the message input. Users can collapse the banners into a small pill and dismiss the dismissible ones, and both choices are remembered. Banner edits reach open tabs live, in each user's language. Inspired by Broadcast Toasts by G30.
 """
 
