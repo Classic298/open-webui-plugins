@@ -85,7 +85,7 @@ Whenever the plugin loads, it tells every other container over Redis. A containe
 The add-on is separate from the protocol itself and does not change `ASSET_IMPL_VERSION`. Everything in it is scoped to your own plugin, so your copy never affects anybody else's.
 
 1. Copy everything in [`live_reload.py`](live_reload.py) into your event function, above the shared asset block.
-2. Set `ASSET_KEY` to your plugin's fixed key and use it for your fragments too.
+2. Set `ASSET_KEY` to a name of your choice that no other plugin uses, for example `"my-plugin"`. Pass the same name to `asset_register`.
 3. Put your `asset_register` calls into a function called `register(app)` and let each producer return `""` when `reload_active(app)` is false.
 4. Wire it into your event class:
 

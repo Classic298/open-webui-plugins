@@ -43,6 +43,8 @@ RELOAD_EXEC_ID = uuid.uuid4().hex  # new on every exec of this source
 RELOAD_FUNCTION_ID = __name__.removeprefix("function_")
 
 reload_log = logging.getLogger("owui-live-reload")
+# asyncio only keeps weak references to tasks.
+reload_tasks: set = set()
 
 
 def reload_state(app: Any) -> dict:
@@ -81,6 +83,13 @@ async def reload_publish(app: Any, active: bool) -> None:
 
 
 async def reload_ensure_listener(app: Any) -> None:
+    state = reload_state(app)
+    if state.get("listener") is not None:
+        return
+    redis = getattr(app.state, "redis", None)
+    if redis is None:
+        return
+
     from types import SimpleNamespace
 
     from open_webui.utils.plugin import (
@@ -88,12 +97,6 @@ async def reload_ensure_listener(app: Any) -> None:
         get_functions_cache,
     )
 
-    state = reload_state(app)
-    if state.get("listener") is not None:
-        return
-    redis = getattr(app.state, "redis", None)
-    if redis is None:
-        return
     # Mark before awaiting so a concurrent event() can't double-subscribe.
     state["listener"] = True
     try:
@@ -152,7 +155,9 @@ def reload_bootstrap() -> None:
         except Exception as e:
             reload_log.warning("[%s] bootstrap failed: %s", ASSET_KEY, type(e).__name__)
 
-    loop.create_task(bootstrap())
+    task = loop.create_task(bootstrap())
+    reload_tasks.add(task)
+    task.add_done_callback(reload_tasks.discard)
 
 
 async def reload_on_event(
