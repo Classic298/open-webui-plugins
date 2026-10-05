@@ -85,8 +85,8 @@ You put a version string at the top of your plugin, `FUNCTION_BUILD_ID`, and bum
 The add-on is separate from the protocol itself and does not change `ASSET_IMPL_VERSION`. Everything in it is scoped to your own plugin, so your copy never affects anybody else's.
 
 1. Copy everything in [`build_reload.py`](build_reload.py) into the top of your event function, above the shared asset block, so `FUNCTION_BUILD_ID` is the first thing you see when it needs a bump.
-2. Set `RELOAD_KEY` to your fixed key and `RELOAD_SIGNATURE` to a string that only your own code contains, for example your start marker.
-3. Put your `asset_register` calls into one function and let each producer return `""` when `reload_active(app)` is false.
+2. Set `ASSET_KEY` to your plugin's fixed key and use it for your fragments too.
+3. Put your `asset_register` calls into a function called `register(app)` and let each producer return `""` when `reload_active(app)` is false.
 4. Wire it into your event class:
 
 ```python
@@ -94,7 +94,7 @@ def register(app):
     asset_register(
         app,
         LOADER_PATH,
-        "my-plugin",
+        ASSET_KEY,
         LOADER_BLOCK_START,
         LOADER_BLOCK_END,
         lambda: LOADER_FRAGMENT if reload_active(app) else "",
@@ -103,11 +103,11 @@ def register(app):
 
 class Event:
     def __init__(self):
-        reload_bootstrap(register)
+        reload_bootstrap()
 
-    async def event(self, event=None, __id__=None, __event_name__=None, __app__=None):
+    async def event(self, event=None, __event_name__=None, __app__=None):
         if __app__ is not None:
-            await reload_on_event(__app__, register, event, __id__, __event_name__)
+            await reload_on_event(__app__, event, __event_name__)
 ```
 
 5. Bump `FUNCTION_BUILD_ID` on every code change. If you forget, the other containers think they already run your code and ignore the update.
