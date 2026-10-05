@@ -78,13 +78,13 @@ asset_register(
 
 ## Optional: reload every container on save
 
-Each Open WebUI container keeps its own copy of your plugin's code in memory. When you save a new version on one container, the others keep serving the old one until they restart. The optional [`build_reload.py`](build_reload.py) add-on fixes that for event functions on setups with Redis.
+Each Open WebUI container keeps its own copy of your plugin's code in memory. When you save a new version on one container, the others keep serving the old one until they restart. The optional [`live_reload.py`](live_reload.py) add-on fixes that for event functions on setups with Redis.
 
-You put a version string at the top of your plugin, `FUNCTION_BUILD_ID`, and bump it on every change. When the plugin loads, it tells every other container its version over Redis. A container that runs a different version throws away its cached copy and loads the new code from the database, so the whole fleet is on the new version within seconds. Disabling the plugin on one container switches it off on all of them. Without Redis the add-on does nothing extra.
+Whenever the plugin loads, it tells every other container over Redis. A container whose cached copy differs from the code in the database throws that copy away and loads the new code, so the whole fleet is on the new version within seconds of a save. There is nothing to bump. Disabling the plugin on one container switches it off on all of them. Without Redis the add-on does nothing extra.
 
 The add-on is separate from the protocol itself and does not change `ASSET_IMPL_VERSION`. Everything in it is scoped to your own plugin, so your copy never affects anybody else's.
 
-1. Copy everything in [`build_reload.py`](build_reload.py) into the top of your event function, above the shared asset block, so `FUNCTION_BUILD_ID` is the first thing you see when it needs a bump.
+1. Copy everything in [`live_reload.py`](live_reload.py) into your event function, above the shared asset block.
 2. Set `ASSET_KEY` to your plugin's fixed key and use it for your fragments too.
 3. Put your `asset_register` calls into a function called `register(app)` and let each producer return `""` when `reload_active(app)` is false.
 4. Wire it into your event class:
@@ -109,8 +109,6 @@ class Event:
         if __app__ is not None:
             await reload_on_event(__app__, event, __event_name__)
 ```
-
-5. Bump `FUNCTION_BUILD_ID` on every code change. If you forget, the other containers think they already run your code and ignore the update.
 
 ## Changing the protocol
 

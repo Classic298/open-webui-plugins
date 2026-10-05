@@ -1,6 +1,6 @@
-# Shared Assets Protocol, optional build reload add-on for event functions.
-# Copy everything below this header into the top of your event function, above
-# the shared asset block, so FUNCTION_BUILD_ID is easy to find and bump.
+# Shared Assets Protocol, optional live reload add-on for event functions.
+# Copy everything below this header into your event function, above the shared
+# asset block.
 # Spec and rules: https://github.com/Classic298/open-webui-plugins/tree/main/shared-assets-protocol
 
 import asyncio
@@ -9,24 +9,40 @@ import logging
 import uuid
 from typing import Any, Optional
 
-# BUMP ON EVERY CODE CHANGE: peers already on this build ignore the broadcast.
-FUNCTION_BUILD_ID = "2026-10-05.1"
+# --- fast JSON helpers: use orjson when available, fall back to stdlib json ---
+try:
+    import orjson as _orjson
+
+    def _json_dumps(obj, *, default=str):
+        return _orjson.dumps(obj, default=default).decode("utf-8")
+
+    def _json_loads(payload):
+        return _orjson.loads(payload)
+
+except ImportError:
+
+    def _json_dumps(obj, *, default=str):
+        return json.dumps(obj, ensure_ascii=False, default=default)
+
+    def _json_loads(payload):
+        return json.loads(payload)
+
 
 ASSET_KEY = "my-plugin"  # fixed, used for asset_register too
 
 # ===========================================================================
-# Build reload broadcast
+# Live reload broadcast
 # ---------------------------------------------------------------------------
-# Each load publishes FUNCTION_BUILD_ID over Redis; a peer on another build
-# re-executes the source from the database. register(app) is yours and must be
-# idempotent; gate each producer on reload_active(app).
+# Each load publishes over Redis; a peer whose cached code differs from the
+# database re-executes it. register(app) is yours and must be idempotent; gate
+# each producer on reload_active(app).
 # ===========================================================================
-RELOAD_STATE_ATTR = "_owui_build_reload"  # {key: {active, build, listener}}
-RELOAD_PROCESS_TOKEN = uuid.uuid4().hex
+RELOAD_STATE_ATTR = "_owui_live_reload"  # {key: {active, exec_id, listener}}
+RELOAD_EXEC_ID = uuid.uuid4().hex  # new on every exec of this source
 # Open WebUI executes each function as module "function_<id>".
 RELOAD_FUNCTION_ID = __name__.removeprefix("function_")
 
-reload_log = logging.getLogger("owui-build-reload")
+reload_log = logging.getLogger("owui-live-reload")
 
 
 def reload_state(app: Any) -> dict:
@@ -44,14 +60,14 @@ def reload_active(app: Any) -> bool:
 def reload_channel() -> str:
     from open_webui.env import REDIS_KEY_PREFIX
 
-    return f"{REDIS_KEY_PREFIX}:build-reload:{ASSET_KEY}"
+    return f"{REDIS_KEY_PREFIX}:live-reload:{ASSET_KEY}"
 
 
 def reload_mark_loaded(app: Any) -> None:
     register(app)
     state = reload_state(app)
     state["active"] = True
-    state["build"] = FUNCTION_BUILD_ID
+    state["exec_id"] = RELOAD_EXEC_ID
 
 
 async def reload_publish(app: Any, active: bool) -> None:
@@ -59,29 +75,19 @@ async def reload_publish(app: Any, active: bool) -> None:
     if redis is None:
         return
     try:
-        await redis.publish(
-            reload_channel(),
-            json.dumps(
-                {
-                    "origin": RELOAD_PROCESS_TOKEN,
-                    "build": FUNCTION_BUILD_ID,
-                    "active": active,
-                }
-            ),
-        )
+        await redis.publish(reload_channel(), _json_dumps({"active": active}))
     except Exception as e:
         reload_log.warning("[%s] publish failed: %s", ASSET_KEY, type(e).__name__)
 
 
-async def reload_from_db(app: Any) -> None:
+async def reload_ensure_listener(app: Any) -> None:
     from types import SimpleNamespace
 
-    from open_webui.utils.plugin import get_function_module_from_cache
+    from open_webui.utils.plugin import (
+        get_function_module_from_cache,
+        get_functions_cache,
+    )
 
-    await get_function_module_from_cache(SimpleNamespace(app=app), RELOAD_FUNCTION_ID)
-
-
-async def reload_ensure_listener(app: Any) -> None:
     state = reload_state(app)
     if state.get("listener") is not None:
         return
@@ -103,30 +109,22 @@ async def reload_ensure_listener(app: Any) -> None:
             async for message in pubsub.listen():
                 if message.get("type") != "message":
                     continue
-                raw = message.get("data")
-                if isinstance(raw, (bytes, bytearray)):
-                    raw = raw.decode("utf-8", "ignore")
-                try:
-                    payload = json.loads(raw) if raw else {}
-                except Exception:
-                    payload = {}
-                if payload.get("origin") == RELOAD_PROCESS_TOKEN:
-                    continue
-                if not payload.get("active"):
+                if not _json_loads(message["data"])["active"]:
                     state["active"] = False
                     continue
-                if state.get("active") and payload.get("build") == state.get("build"):
-                    continue
+                was_active = state.get("active")
                 # Enable broadcasts arrive before is_active commits; bootstrap trusts this flag.
                 state["active"] = True
+                context = SimpleNamespace(app=app)
+                if not was_active:
+                    # Force a fresh exec so its bootstrap registers again.
+                    get_functions_cache(context).pop(RELOAD_FUNCTION_ID, None)
                 try:
-                    await reload_from_db(app)
+                    await get_function_module_from_cache(context, RELOAD_FUNCTION_ID)
                 except Exception as e:
                     reload_log.warning(
                         "[%s] reload from db failed: %s", ASSET_KEY, type(e).__name__
                     )
-        except asyncio.CancelledError:
-            raise
         except Exception as e:
             reload_log.warning("[%s] listener stopped: %s", ASSET_KEY, type(e).__name__)
 
@@ -149,7 +147,6 @@ def reload_bootstrap() -> None:
             if own is None or not (own.is_active or reload_active(app)):
                 return
             reload_mark_loaded(app)
-            reload_log.info("[%s] build %s loaded", ASSET_KEY, FUNCTION_BUILD_ID)
             await reload_ensure_listener(app)
             await reload_publish(app, True)
         except Exception as e:
@@ -161,33 +158,20 @@ def reload_bootstrap() -> None:
 async def reload_on_event(
     app: Any, event: Optional[dict], event_name: Optional[str]
 ) -> None:
-    try:
-        await reload_ensure_listener(app)
-    except Exception as e:
-        reload_log.warning(
-            "[%s] listener setup failed: %s", ASSET_KEY, type(e).__name__
-        )
+    await reload_ensure_listener(app)
+    state = reload_state(app)
 
     subject_id = ((event or {}).get("subject") or {}).get("id")
     if event_name == "function.disable_started" and subject_id == RELOAD_FUNCTION_ID:
-        reload_state(app)["active"] = False
+        state["active"] = False
         await reload_publish(app, False)
         return
 
-    state = reload_state(app)
-    current = state.get("active") and state.get("build") == FUNCTION_BUILD_ID
+    current = state.get("active") and state.get("exec_id") == RELOAD_EXEC_ID
     if current and event_name != "system.startup.completed":
         return
-    try:
-        reload_mark_loaded(app)
-        await reload_publish(app, True)
-    except Exception as e:
-        reload_log.warning(
-            "[%s] registration failed (%s): %s",
-            ASSET_KEY,
-            event_name,
-            type(e).__name__,
-        )
+    reload_mark_loaded(app)
+    await reload_publish(app, True)
 
 
-# =========================== end build reload block ========================
+# =========================== end live reload block =========================
