@@ -80,7 +80,7 @@ asset_register(
 
 Each Open WebUI container keeps its own copy of your plugin's code in memory. When you save a new version on one container, the others keep serving the old one until they restart. The optional [`live_reload.py`](live_reload.py) add-on fixes that for event functions on setups with Redis.
 
-Whenever the plugin loads, it tells every other container over Redis. A container whose cached copy differs from the code in the database throws that copy away and loads the new code, so the whole fleet is on the new version within seconds of a save. There is nothing to bump. Disabling the plugin on one container switches it off on all of them. Without Redis the add-on does nothing extra.
+Whenever the plugin loads, it tells every other container over Redis. A container whose cached copy differs from the code in the database throws that copy away and loads the new code, so the whole fleet is on the new version within seconds of a save. There is nothing to bump. Disabling the plugin on one container switches it off on all of them. Without Redis the add-on does nothing extra. It needs Open WebUI 0.11.0 or newer.
 
 The add-on is separate from the protocol itself and does not change `ASSET_IMPL_VERSION`. Everything in it is scoped to your own plugin, so your copy never affects anybody else's.
 

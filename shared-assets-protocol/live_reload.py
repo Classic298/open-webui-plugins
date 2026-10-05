@@ -4,29 +4,11 @@
 # Spec and rules: https://github.com/Classic298/open-webui-plugins/tree/main/shared-assets-protocol
 
 import asyncio
-import json
 import logging
 import uuid
 from typing import Any, Optional
 
-# --- fast JSON helpers: use orjson when available, fall back to stdlib json ---
-try:
-    import orjson as _orjson
-
-    def _json_dumps(obj, *, default=str):
-        return _orjson.dumps(obj, default=default).decode("utf-8")
-
-    def _json_loads(payload):
-        return _orjson.loads(payload)
-
-except ImportError:
-
-    def _json_dumps(obj, *, default=str):
-        return json.dumps(obj, ensure_ascii=False, default=default)
-
-    def _json_loads(payload):
-        return json.loads(payload)
-
+from open_webui.utils.json_codec import JSONCodec
 
 ASSET_KEY = "my-plugin"  # fixed, used for asset_register too
 
@@ -77,7 +59,7 @@ async def reload_publish(app: Any, active: bool) -> None:
     if redis is None:
         return
     try:
-        await redis.publish(reload_channel(), _json_dumps({"active": active}))
+        await redis.publish(reload_channel(), JSONCodec.dumps({"active": active}))
     except Exception as e:
         reload_log.warning("[%s] publish failed: %s", ASSET_KEY, type(e).__name__)
 
@@ -112,7 +94,7 @@ async def reload_ensure_listener(app: Any) -> None:
             async for message in pubsub.listen():
                 if message.get("type") != "message":
                     continue
-                if not _json_loads(message["data"])["active"]:
+                if not JSONCodec.loads(message["data"])["active"]:
                     state["active"] = False
                     continue
                 was_active = state.get("active")
