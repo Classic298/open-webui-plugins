@@ -8,13 +8,183 @@ required_open_webui_version: 0.11.4
 description: Shows the banners from Admin Panel → Settings → General → Banners in every chat, at the top of the page or right above the message input. Users can collapse the banners into a small pill and dismiss the dismissible ones, and both choices are remembered. Banner edits reach open tabs live, in each user's language. Inspired by Broadcast Toasts by G30.
 """
 
+import asyncio
 import hashlib
 import json
-import time
+import logging
+import uuid
 from pathlib import Path
 from typing import Any, Literal, Optional
 
+from open_webui.utils.json_codec import JSONCodec
 from pydantic import BaseModel, Field
+
+ASSET_KEY = "better-banners"  # fixed, used for asset_register too
+
+# ===========================================================================
+# Live reload broadcast
+# ---------------------------------------------------------------------------
+# Each load publishes over Redis; a peer whose cached code differs from the
+# database re-executes it. register(app) is yours and must be idempotent; gate
+# each producer on reload_active(app).
+# ===========================================================================
+RELOAD_STATE_ATTR = "_owui_live_reload"  # {key: {active, exec_id, listener}}
+RELOAD_EXEC_ID = uuid.uuid4().hex  # new on every exec of this source
+# Open WebUI executes each function as module "function_<id>".
+RELOAD_FUNCTION_ID = __name__.removeprefix("function_")
+
+reload_log = logging.getLogger("owui-live-reload")
+# asyncio only keeps weak references to tasks.
+reload_tasks: set = set()
+
+
+def reload_state(app: Any) -> dict:
+    registry = getattr(app.state, RELOAD_STATE_ATTR, None)
+    if not isinstance(registry, dict):
+        registry = {}
+        app.state.__setattr__(RELOAD_STATE_ATTR, registry)
+    return registry.setdefault(ASSET_KEY, {})
+
+
+def reload_active(app: Any) -> bool:
+    return bool(reload_state(app).get("active"))
+
+
+def reload_channel() -> str:
+    from open_webui.env import REDIS_KEY_PREFIX
+
+    return f"{REDIS_KEY_PREFIX}:live-reload:{ASSET_KEY}"
+
+
+def reload_mark_loaded(app: Any) -> None:
+    register(app)
+    state = reload_state(app)
+    state["active"] = True
+    state["exec_id"] = RELOAD_EXEC_ID
+
+
+async def reload_publish(app: Any, active: bool) -> None:
+    redis = getattr(app.state, "redis", None)
+    if redis is None:
+        return
+    try:
+        await redis.publish(reload_channel(), JSONCodec.dumps({"active": active}))
+    except Exception as e:
+        reload_log.warning("[%s] publish failed: %s", ASSET_KEY, type(e).__name__)
+
+
+async def reload_ensure_listener(app: Any) -> None:
+    state = reload_state(app)
+    if state.get("listener") is not None:
+        return
+    redis = getattr(app.state, "redis", None)
+    if redis is None:
+        return
+
+    from types import SimpleNamespace
+
+    from open_webui.models.functions import Functions
+    from open_webui.utils.plugin import (
+        get_function_module_from_cache,
+        get_functions_cache,
+    )
+
+    # Mark before awaiting so a concurrent event() can't double-subscribe.
+    state["listener"] = True
+    try:
+        pubsub = redis.pubsub()
+        await pubsub.subscribe(reload_channel())
+    except Exception as e:
+        state["listener"] = None
+        reload_log.warning("[%s] subscribe failed: %s", ASSET_KEY, type(e).__name__)
+        return
+
+    async def listen():
+        try:
+            async for message in pubsub.listen():
+                if message.get("type") != "message":
+                    continue
+                if not JSONCodec.loads(message["data"])["active"]:
+                    state["active"] = False
+                    continue
+                was_active = state.get("active")
+                # Enable broadcasts arrive before is_active commits; bootstrap trusts this flag.
+                state["active"] = True
+                context = SimpleNamespace(app=app)
+                if not was_active:
+                    # Force a fresh exec so its bootstrap registers again.
+                    get_functions_cache(context).pop(RELOAD_FUNCTION_ID, None)
+                try:
+                    function_module, _, _ = await get_function_module_from_cache(
+                        context, RELOAD_FUNCTION_ID
+                    )
+                    # Peers never see a valves save; re-read them like Open WebUI's dispatch does.
+                    if hasattr(function_module, "Valves"):
+                        valves = await Functions.get_function_valves_by_id(
+                            RELOAD_FUNCTION_ID
+                        )
+                        function_module.valves = function_module.Valves(
+                            **(valves or {})
+                        )
+                except Exception as e:
+                    reload_log.warning(
+                        "[%s] reload from db failed: %s", ASSET_KEY, type(e).__name__
+                    )
+        except Exception as e:
+            reload_log.warning("[%s] listener stopped: %s", ASSET_KEY, type(e).__name__)
+
+    state["listener"] = asyncio.create_task(listen())
+
+
+def reload_bootstrap() -> None:
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return
+
+    async def bootstrap():
+        try:
+            from open_webui.main import app
+            from open_webui.models.functions import Functions
+
+            own = await Functions.get_function_by_id(RELOAD_FUNCTION_ID)
+            # Loading a disabled function (e.g. for its valves) must not switch it on.
+            if own is None or not (own.is_active or reload_active(app)):
+                return
+            reload_mark_loaded(app)
+            await reload_ensure_listener(app)
+            await reload_publish(app, True)
+        except Exception as e:
+            reload_log.warning("[%s] bootstrap failed: %s", ASSET_KEY, type(e).__name__)
+
+    task = loop.create_task(bootstrap())
+    reload_tasks.add(task)
+    task.add_done_callback(reload_tasks.discard)
+
+
+async def reload_on_event(
+    app: Any, event: Optional[dict], event_name: Optional[str]
+) -> None:
+    await reload_ensure_listener(app)
+    state = reload_state(app)
+
+    is_own = ((event or {}).get("subject") or {}).get("id") == RELOAD_FUNCTION_ID
+    if is_own and event_name == "function.disable_started":
+        state["active"] = False
+        await reload_publish(app, False)
+        return
+    if is_own and event_name == "function.valves_updated":
+        await reload_publish(app, True)
+
+    current = state.get("active") and state.get("exec_id") == RELOAD_EXEC_ID
+    if current and event_name != "system.startup.completed":
+        return
+    reload_mark_loaded(app)
+    await reload_publish(app, True)
+
+
+# =========================== end live reload block =========================
+
 
 # ===========================================================================
 # Shared static-asset registry
@@ -193,10 +363,8 @@ def asset_register(
 
 SOCKET_EVENT = "owui:better-banners"
 BANNERS_UPDATED_EVENT = "config.banners.updated"
-DISABLED_CHECK_SECONDS = 1.0
 LOADER_BLOCK_START = "// owui-better-banners:start"
 LOADER_BLOCK_END = "// owui-better-banners:end"
-ASSET_KEY = "better-banners"
 
 BANNER_CSS = r"""
 #owui-better-banners{--obb-enter-y:-10px;--obb-collapse-y:-14px;--obb-surface:rgba(255,255,255,.78);--obb-text:#1f2937;--obb-muted:#6b7280;--obb-hover:rgba(0,0,0,.06);display:flex;flex-direction:column;gap:6px;box-sizing:border-box;overflow-y:auto;overscroll-behavior:contain;scrollbar-width:thin}
@@ -842,6 +1010,17 @@ LOADER_SCRIPT = r"""
 """
 
 
+def register(app: Any) -> None:
+    asset_register(
+        app,
+        LOADER_PATH,
+        ASSET_KEY,
+        LOADER_BLOCK_START,
+        LOADER_BLOCK_END,
+        lambda: Event.instance._loader_fragment() if reload_active(app) else "",
+    )
+
+
 class Event:
     class Valves(BaseModel):
         position: Literal["top", "bottom"] = Field(
@@ -862,14 +1041,14 @@ class Event:
         )
 
     _fragment_cache: Optional[tuple[tuple, str]] = None
-    _disabled_cache: Optional[tuple[float, bool]] = None
+    instance: Optional["Event"] = None
 
     def __init__(self):
         self.valves = self.Valves()
+        Event.instance = self
+        reload_bootstrap()
 
     def _loader_fragment(self) -> str:
-        if Event._is_disabled():
-            return ""
         valves = self.valves
         cache_key = (
             valves.position,
@@ -895,59 +1074,14 @@ class Event:
         Event._fragment_cache = (cache_key, fragment)
         return fragment
 
-    # Other workers never get this function's disable event, so the state lives on disk.
-    @staticmethod
-    def _disabled_marker() -> Path:
-        from open_webui.config import CACHE_DIR
-
-        return Path(CACHE_DIR) / "better_banners" / "disabled"
-
-    @classmethod
-    def _set_disabled(cls, disabled: bool) -> None:
-        cls._disabled_cache = (time.monotonic(), disabled)
-        marker = cls._disabled_marker()
-        if disabled:
-            marker.parent.mkdir(parents=True, exist_ok=True)
-            marker.touch()
-        else:
-            marker.unlink(missing_ok=True)
-
-    @classmethod
-    def _is_disabled(cls) -> bool:
-        now = time.monotonic()
-        if (
-            cls._disabled_cache
-            and now - cls._disabled_cache[0] < DISABLED_CHECK_SECONDS
-        ):
-            return cls._disabled_cache[1]
-        disabled = cls._disabled_marker().exists()
-        cls._disabled_cache = (now, disabled)
-        return disabled
-
     async def event(
         self,
         event: Optional[dict] = None,
         __event_name__: str = "",
-        __id__: str = "",
         __app__: Any = None,
         **kwargs,
     ) -> None:
-        is_own = ((event or {}).get("subject") or {}).get("id") == __id__
-        if is_own and __event_name__ == "function.disable_started":
-            Event._set_disabled(True)
-            return
-
-        if is_own and __event_name__ == "function.enable_started":
-            Event._set_disabled(False)
-
-        asset_register(
-            __app__,
-            LOADER_PATH,
-            ASSET_KEY,
-            LOADER_BLOCK_START,
-            LOADER_BLOCK_END,
-            self._loader_fragment,
-        )
+        await reload_on_event(__app__, event, __event_name__)
 
         if __event_name__ == BANNERS_UPDATED_EVENT:
             from open_webui.socket.main import sio
