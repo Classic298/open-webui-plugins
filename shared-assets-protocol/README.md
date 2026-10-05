@@ -84,7 +84,7 @@ You put a version string at the top of your plugin, `FUNCTION_BUILD_ID`, and bum
 
 The add-on is separate from the protocol itself and does not change `ASSET_IMPL_VERSION`. Everything in it is scoped to your own plugin, so your copy never affects anybody else's.
 
-1. Copy everything in [`build_reload.py`](build_reload.py) into your event function, next to the shared asset block.
+1. Copy everything in [`build_reload.py`](build_reload.py) into the top of your event function, above the shared asset block, so `FUNCTION_BUILD_ID` is the first thing you see when it needs a bump.
 2. Set `RELOAD_KEY` to your fixed key and `RELOAD_SIGNATURE` to a string that only your own code contains, for example your start marker.
 3. Put your `asset_register` calls into one function and let each producer return `""` when `reload_active(app)` is false.
 4. Wire it into your event class:

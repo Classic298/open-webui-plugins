@@ -1,5 +1,6 @@
 # Shared Assets Protocol, optional build reload add-on for event functions.
-# Copy everything below this header into your event function.
+# Copy everything below this header into the top of your event function, above
+# the shared asset block, so FUNCTION_BUILD_ID is easy to find and bump.
 # Spec and rules: https://github.com/Classic298/open-webui-plugins/tree/main/shared-assets-protocol
 
 import asyncio
