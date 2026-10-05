@@ -20,39 +20,20 @@ from pydantic import BaseModel, Field
 # Shared static-asset registry
 # --- KEEP BYTE-IDENTICAL IN EVERY PLUGIN THAT USES IT ----------------------
 # ---------------------------------------------------------------------------
-# app.html loads /static/loader.js and /static/custom.css on every page, and
-# loader.js is the only hook running before the SvelteKit bundle hydrates. Two
-# URLs, many plugins - so none may own either. Each publishes a fragment into
-# one app.state registry and the route composes them PER REQUEST, so load order
-# is irrelevant, a late plugin needs no cooperation, and a re-exec'd one
-# replaces its own key. Per-process: each container serves what it has loaded.
-#
-# Fragments are inlined, never <script src> / @import - a second request would
-# land after hydration, defeating the point.
+# Each plugin publishes a fragment into one app.state registry and the route
+# composes them per request, so load order is irrelevant. Per-process: each
+# container serves what it has loaded.
 #
 # Contract:
 #   * ASSET_REGISTRY_ATTR, ASSET_ROUTE_ATTR, the entry shape and the paths are
-#     the interop surface. Everything else is implementation owned by whichever
-#     plugin created the route - a stale copy silently serves everyone, hence
-#     ASSET_IMPL_VERSION and byte-identity.
-#   * `key` must be a module-level constant. Derive it from a build id or a
-#     function id and a re-exec registers a SECOND entry - duplicated output,
-#     not just a leaked closure.
-#   * `order` breaks ties: lower composes first, so on custom.css it loses the
-#     cascade and on loader.js it wraps innermost. Default 0. Use it instead of
-#     encoding priority in the key, which would only work if every plugin
-#     renamed at once.
-#   * Producers run SYNCHRONOUSLY on the event loop, on every request, and
-#     BEFORE the ETag is compared - so a 304 costs exactly what a 200 costs.
-#     "Cheap" is per-call work, not payload size: memoise anything that
-#     parses, formats or regexes and return a prebuilt string. No I/O, no
-#     locks, no sleeps. Budget tens of microseconds, not milliseconds.
-#   * To withdraw, return "" - there is no unregister. A disabled plugin still
-#     gets function.disable_started (it fires before is_active flips), but a
-#     DELETED one never sees its own deletion, so disable before deleting or
-#     the fragment serves until that process restarts.
-#   * Reach is the SPA only. A plugin serving its own HTML page loads neither
-#     asset and must inject its own.
+#     the interop surface. The route owner's copy serves everyone.
+#   * `key` must be a module-level constant, or a re-exec adds a second entry.
+#   * Lower `order` composes first (default 0). Never encode priority in the key.
+#   * Producers run on the event loop for every request, 304s included: return
+#     a prebuilt string, no I/O, no locks.
+#   * Return "" to withdraw. A deleted plugin never sees its own deletion, so
+#     disable it first.
+#   * Inline fragments only: <script src> / @import lands after hydration.
 # ===========================================================================
 LOADER_PATH = "/static/loader.js"
 CUSTOM_CSS_PATH = "/static/custom.css"
@@ -63,12 +44,10 @@ SHARED_ASSET_TYPES = {
 ASSET_REGISTRY_ATTR = "_owui_static_fragments"  # {path: {key: entry}}
 ASSET_ROUTE_ATTR = "_owui_shared_asset"  # set to the path the route serves
 ASSET_IMPL_ATTR = "_owui_shared_asset_impl"  # implementation version of the route
-# Bump when this block changes behaviour: newer evicts older, so the fleet
-# converges on one implementation instead of whichever plugin booted first.
+# Bump on any behaviour change: the newest copy takes over the route.
 ASSET_IMPL_VERSION = 4
 
-# Producer failures are reported once per (path, key, exception type) - compose
-# runs on every page load, so an unconditional warning would be a firehose.
+# Warn once per (path, key, exception type): compose runs on every page load.
 _ASSET_WARNED: set = set()
 
 
@@ -85,9 +64,7 @@ def asset_fragments(app: Any, path: str) -> dict:
 
 
 def asset_sort_key(item):
-    """(order, key). Coerced defensively: a non-int order from a third-party
-    plugin would raise inside sorted(), outside the per-fragment guard, and
-    take down the whole asset."""
+    """(order, key); a non-int order falls back to 0 so it cannot break sorted()."""
     key, entry = item
     try:
         order = int(entry.get("order", 0))
@@ -158,8 +135,7 @@ def asset_compose(app: Any, path: str) -> str:
 def asset_register(
     app: Any, path: str, key: str, start: str, end: str, producer, order: int = 0
 ) -> None:
-    """Publish a fragment and ensure the route exists. Idempotent, and safe
-    from any plugin in any order."""
+    """Publish a fragment and ensure the route exists. Idempotent."""
     from starlette.responses import Response
     from starlette.routing import Mount, Route
 
@@ -177,8 +153,7 @@ def asset_register(
             return  # an equal or newer implementation already owns the route
         break  # ours is newer - fall through and replace it
 
-    # Replaces a single-owner route from an older build, or an older impl of
-    # this block. Fragments live on app.state, so nothing is lost.
+    # Fragments live on app.state, so replacing the route loses nothing.
     app.routes[:] = [r for r in app.routes if getattr(r, "path", "") != path]
     media_type = SHARED_ASSET_TYPES.get(path, "text/plain; charset=utf-8")
 
@@ -186,28 +161,20 @@ def asset_register(
         content = asset_compose(app, path)
         etag = (
             '"owui-'
-            # usedforsecurity=False: this is a cache validator, not a security
-            # primitive, and a bare md5() raises ValueError on a FIPS host -
-            # which would 500 the asset for every visitor.
+            # Cache validator only; a bare md5() raises on FIPS hosts.
             + hashlib.md5(
                 (path + "\x00" + content).encode("utf-8"), usedforsecurity=False
             ).hexdigest()
             + '"'
         )
-        # no-cache, NOT no-store: a response the browser may not store has no
-        # validator, so If-None-Match is never sent and the 304 below is dead
-        # code. no-cache still forbids reuse without revalidation, so a stale
-        # body is impossible either way. Note a proxy may re-add no-store for
-        # these paths, which puts the 304 back to sleep - that is deployment
-        # policy, not this block's business.
+        # no-cache, not no-store: no-store would disable the 304 below.
         headers = {
             "Cache-Control": "no-cache, must-revalidate, private",
             "ETag": etag,
         }
         if request.headers.get("if-none-match") == etag:
             return Response(status_code=304, headers=headers)
-        # Starlette only auto-appends charset for text/*, so JS would ship
-        # undeclared and readers guessing latin-1 get mojibake.
+        # Starlette only adds charset for text/*.
         return Response(content, media_type=media_type, headers=headers)
 
     insert_at = len(app.routes)
