@@ -3381,6 +3381,12 @@ async def cleanup_dangling_junction_rows() -> int:
         _dangling_row_statement("chat_file", "file_id", "file"),
         _dangling_row_statement("knowledge_file", "file_id", "file"),
         _dangling_row_statement("channel_file", "file_id", "file"),
+        # On SQLite, Open WebUI's message delete keeps the row, pinning the attachment forever
+        (
+            "channel_file",
+            "DELETE FROM channel_file WHERE message_id IS NOT NULL AND NOT EXISTS "
+            "(SELECT 1 FROM message WHERE message.id = channel_file.message_id)",
+        ),
         _dangling_row_statement("knowledge_directory", "knowledge_id", "knowledge"),
         _dangling_row_statement("channel_member", "channel_id", "channel"),
         _dangling_row_statement("channel_webhook", "channel_id", "channel"),
@@ -4882,7 +4888,9 @@ async def get_active_file_ids(
                 result = await db.execute(
                     text(
                         "SELECT cf.file_id FROM channel_file cf "
-                        "JOIN channel c ON c.id = cf.channel_id"
+                        "JOIN channel c ON c.id = cf.channel_id "
+                        "WHERE cf.message_id IS NULL "
+                        "OR EXISTS (SELECT 1 FROM message m WHERE m.id = cf.message_id)"
                     )
                 )
                 while True:
