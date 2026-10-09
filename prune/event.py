@@ -312,7 +312,7 @@ import shutil
 import sqlite3
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Generator, Optional, Set, Tuple
+from typing import Callable, Generator, Optional, Set, Tuple
 from abc import ABC, abstractmethod
 from concurrent.futures import ThreadPoolExecutor
 
@@ -510,6 +510,9 @@ def _file_ids_from_metadatas(metadatas) -> Set[str]:
     return file_ids
 
 
+ActiveIdsLoader = Callable[[], Tuple[Set[str], Set[str], Set[str]]]
+
+
 class VectorDatabaseCleaner(ABC):
     """
     Abstract base class for vector database cleanup operations.
@@ -546,18 +549,13 @@ class VectorDatabaseCleaner(ABC):
 
     @abstractmethod
     def cleanup_orphaned_collections(
-        self,
-        active_file_ids: Set[str],
-        active_kb_ids: Set[str],
-        active_user_ids: Optional[Set[str]] = None,
+        self, load_active_ids: ActiveIdsLoader
     ) -> tuple[int, Optional[str]]:
         """
         Actually delete orphaned vector collections.
 
         Args:
-            active_file_ids: Set of file IDs that are still referenced
-            active_kb_ids: Set of knowledge base IDs that are still active
-            active_user_ids: Set of user IDs that are still active (optional, for multitenancy)
+            load_active_ids: Reads the active (file, KB, user) ids; call it only after listing the store
 
         Returns:
             Tuple of (deleted_count, error_message)
@@ -648,11 +646,14 @@ class VectorDatabaseCleaner(ABC):
             return 0
         return sum(1 for kb_id in present if kb_id not in active_kb_ids)
 
-    def cleanup_orphaned_kb_metadata(self, active_kb_ids: Set[str]) -> int:
+    def cleanup_orphaned_kb_metadata(
+        self, load_active_kb_ids: Callable[[], Set[str]]
+    ) -> int:
         """Delete KB metadata entries whose knowledge base no longer exists."""
         present = self._kb_metadata_ids()
         if not present:
             return 0
+        active_kb_ids = load_active_kb_ids()
         orphaned = [kb_id for kb_id in present if kb_id not in active_kb_ids]
         if not orphaned:
             return 0
@@ -822,17 +823,18 @@ class VectorDatabaseCleaner(ABC):
             total += sum(1 for pid in present if pid not in valid)
         return total
 
-    def cleanup_orphaned_memories(self, valid_ids_by_user: dict) -> int:
+    def cleanup_orphaned_memories(
+        self, user_ids: Set[str], load_memory_ids: Callable[[str], Set[str]]
+    ) -> int:
         """Delete memories whose database row no longer exists, per active user."""
         client = getattr(self, "vector_db_client", None)
         if client is None:
             return 0
-        valid_ids_by_user = valid_ids_by_user or {}
         deleted = 0
-        for uid, present in self._iter_present_memory_ids(valid_ids_by_user.keys()):
+        for uid, present in self._iter_present_memory_ids(user_ids):
             if not present:
                 continue
-            valid = valid_ids_by_user.get(uid) or set()
+            valid = load_memory_ids(uid)
             orphans = [pid for pid in present if pid not in valid]
             if not orphans:
                 continue
@@ -957,19 +959,25 @@ class ChromaDatabaseCleaner(VectorDatabaseCleaner):
             log.debug(f"Error iterating orphaned ChromaDB collections: {e}")
 
     def cleanup_orphaned_collections(
-        self,
-        active_file_ids: Set[str],
-        active_kb_ids: Set[str],
-        active_user_ids: Optional[Set[str]] = None,
+        self, load_active_ids: ActiveIdsLoader
     ) -> tuple[int, Optional[str]]:
         """Actually delete orphaned ChromaDB collections and database records."""
         if not self.chroma_db_path.exists():
             return (0, None)
 
-        expected_collections = self._build_expected_collections(
-            active_file_ids, active_kb_ids, active_user_ids
-        )
-        uuid_to_collection = self._get_collection_mappings()
+        try:
+            # List before reading active ids: later additions are never candidates
+            collection_dirs = [
+                path
+                for path in self.vector_dir.iterdir()
+                if path.is_dir() and not path.name.startswith(".")
+            ]
+            uuid_to_collection = self._get_collection_mappings()
+            expected_collections = self._build_expected_collections(*load_active_ids())
+        except Exception as e:
+            error_msg = f"ChromaDB cleanup failed: {e}"
+            log.error(error_msg)
+            return (0, error_msg)
 
         deleted_count = 0
         errors = []
@@ -1017,8 +1025,8 @@ class ChromaDatabaseCleaner(VectorDatabaseCleaner):
                 return 0
 
         try:
-            for collection_dir in self.vector_dir.iterdir():
-                if not collection_dir.is_dir() or collection_dir.name.startswith("."):
+            for collection_dir in collection_dirs:
+                if not collection_dir.is_dir():
                     continue
 
                 _prog_tick()
@@ -1330,20 +1338,15 @@ class RemoteChromaDatabaseCleaner(ChromaDatabaseCleaner):
     """ChromaDB on a Chroma server (CHROMA_HTTP_HOST), cleaned through its API."""
 
     def _orphaned_collection_names(
-        self,
-        active_file_ids: Set[str],
-        active_kb_ids: Set[str],
-        active_user_ids: Optional[Set[str]] = None,
+        self, load_active_ids: ActiveIdsLoader
     ) -> Optional[list[str]]:
         """Orphans among Open WebUI-named collections; None if listing failed."""
-        expected_collections = self._build_expected_collections(
-            active_file_ids, active_kb_ids, active_user_ids
-        )
         try:
             collections = self.vector_db_client.client.list_collections()
         except Exception as e:
             log.error(f"ChromaDB collection listing failed: {e}")
             return None
+        expected_collections = self._build_expected_collections(*load_active_ids())
         return [
             collection.name
             for collection in collections
@@ -1363,20 +1366,20 @@ class RemoteChromaDatabaseCleaner(ChromaDatabaseCleaner):
     ) -> int:
         """Count orphaned collections on the Chroma server for preview."""
         orphaned_collections = self._orphaned_collection_names(
-            active_file_ids, active_kb_ids, active_user_ids
+            lambda: (active_file_ids, active_kb_ids, active_user_ids)
         )
         return len(orphaned_collections or [])
 
     def cleanup_orphaned_collections(
-        self,
-        active_file_ids: Set[str],
-        active_kb_ids: Set[str],
-        active_user_ids: Optional[Set[str]] = None,
+        self, load_active_ids: ActiveIdsLoader
     ) -> tuple[int, Optional[str]]:
         """Delete orphaned collections through the Chroma server."""
-        orphaned_collections = self._orphaned_collection_names(
-            active_file_ids, active_kb_ids, active_user_ids
-        )
+        try:
+            orphaned_collections = self._orphaned_collection_names(load_active_ids)
+        except Exception as e:
+            error_msg = f"ChromaDB cleanup failed: {e}"
+            log.error(error_msg)
+            return (0, error_msg)
         if orphaned_collections is None:
             return (0, "ChromaDB collection listing failed")
 
@@ -1443,7 +1446,7 @@ class PGVectorDatabaseCleaner(VectorDatabaseCleaner):
 
         try:
             orphaned_collections = self._get_orphaned_collections(
-                active_file_ids, active_kb_ids, active_user_ids
+                lambda: (active_file_ids, active_kb_ids, active_user_ids)
             )
             self.session.rollback()  # Read-only transaction
             return len(orphaned_collections)
@@ -1466,7 +1469,7 @@ class PGVectorDatabaseCleaner(VectorDatabaseCleaner):
 
         try:
             orphaned_collections = self._get_orphaned_collections(
-                active_file_ids, active_kb_ids, active_user_ids
+                lambda: (active_file_ids, active_kb_ids, active_user_ids)
             )
             self.session.rollback()
             for name in orphaned_collections:
@@ -1477,10 +1480,7 @@ class PGVectorDatabaseCleaner(VectorDatabaseCleaner):
             log.debug(f"Error iterating orphaned PGVector collections: {e}")
 
     def cleanup_orphaned_collections(
-        self,
-        active_file_ids: Set[str],
-        active_kb_ids: Set[str],
-        active_user_ids: Optional[Set[str]] = None,
+        self, load_active_ids: ActiveIdsLoader
     ) -> tuple[int, Optional[str]]:
         """
         Delete orphaned PGVector collections using the existing client's delete method.
@@ -1494,9 +1494,7 @@ class PGVectorDatabaseCleaner(VectorDatabaseCleaner):
             return (0, error_msg)
 
         try:
-            orphaned_collections = self._get_orphaned_collections(
-                active_file_ids, active_kb_ids, active_user_ids
-            )
+            orphaned_collections = self._get_orphaned_collections(load_active_ids)
 
             if not orphaned_collections:
                 log.debug("No orphaned PGVector collections found")
@@ -1531,7 +1529,7 @@ class PGVectorDatabaseCleaner(VectorDatabaseCleaner):
             # and cannot be referenced from the vector database.
             orphaned_chunks_deleted = 0
             try:
-                if self.session and active_file_ids:
+                if self.session:
                     log.debug("Cleaning orphaned chunks from active KB collections")
                     # First, find all distinct file_ids referenced by chunks
                     file_id_result = self.session.execute(
@@ -1543,6 +1541,9 @@ class PGVectorDatabaseCleaner(VectorDatabaseCleaner):
                     """)
                     )
                     referenced_file_ids = {row[0] for row in file_id_result}
+                    self.session.rollback()
+                    # Reread after listing the chunks: a file embedded since keeps them
+                    active_file_ids, _, _ = load_active_ids()
 
                     # Determine which referenced file_ids are orphaned (not in active set)
                     orphaned_file_ids = referenced_file_ids - active_file_ids
@@ -1562,24 +1563,6 @@ class PGVectorDatabaseCleaner(VectorDatabaseCleaner):
                             )
                             orphaned_chunks_deleted += result.rowcount
                         self.session.commit()
-                    if orphaned_chunks_deleted > 0:
-                        log.info(
-                            f"Deleted {orphaned_chunks_deleted} orphaned chunks from active collections"
-                        )
-                elif self.session:
-                    log.debug(
-                        "Cleaning orphaned chunks from active KB collections (no active files)"
-                    )
-                    # If there are no active file IDs, all chunks with file_id metadata are orphaned
-                    result = self.session.execute(
-                        text("""
-                        DELETE FROM document_chunk dc
-                        WHERE dc.vmetadata ? 'file_id'
-                          AND dc.vmetadata->>'file_id' IS NOT NULL
-                    """)
-                    )
-                    orphaned_chunks_deleted = result.rowcount
-                    self.session.commit()
                     if orphaned_chunks_deleted > 0:
                         log.info(
                             f"Deleted {orphaned_chunks_deleted} orphaned chunks from active collections"
@@ -1620,41 +1603,34 @@ class PGVectorDatabaseCleaner(VectorDatabaseCleaner):
             log.error(f"Error deleting PGVector collection '{collection_name}': {e}")
             return False
 
-    def _get_orphaned_collections(
-        self,
-        active_file_ids: Set[str],
-        active_kb_ids: Set[str],
-        active_user_ids: Optional[Set[str]] = None,
-    ) -> Set[str]:
+    def _get_orphaned_collections(self, load_active_ids: ActiveIdsLoader) -> Set[str]:
         """
         Find collections that exist in PGVector but are no longer referenced.
 
         This is the only "complex" part - discovery. The actual deletion is simple!
         """
         try:
-            expected_collections = self._build_expected_collections(
-                active_file_ids, active_kb_ids, active_user_ids
-            )
-
             # Query distinct collection names from document_chunk table
             result = self.session.execute(
                 text("SELECT DISTINCT collection_name FROM document_chunk")
             ).fetchall()
-
-            existing_collections = {row[0] for row in result}
-            orphaned_collections = existing_collections - expected_collections
-
-            log.debug(
-                f"Found {len(existing_collections)} existing collections, "
-                f"{len(expected_collections)} expected, "
-                f"{len(orphaned_collections)} orphaned"
-            )
-
-            return orphaned_collections
-
+            self.session.rollback()  # no open transaction during the reference scan
         except Exception as e:
             log.error(f"Error finding orphaned PGVector collections: {e}")
             return set()
+        # Outside the catch: a failed id read must not look like "no orphans"
+        expected_collections = self._build_expected_collections(*load_active_ids())
+
+        existing_collections = {row[0] for row in result}
+        orphaned_collections = existing_collections - expected_collections
+
+        log.debug(
+            f"Found {len(existing_collections)} existing collections, "
+            f"{len(expected_collections)} expected, "
+            f"{len(orphaned_collections)} orphaned"
+        )
+
+        return orphaned_collections
 
     def _build_expected_collections(
         self,
@@ -1878,20 +1854,15 @@ class MilvusDatabaseCleaner(VectorDatabaseCleaner):
             log.debug(f"Error iterating orphaned Milvus collections: {e}")
 
     def cleanup_orphaned_collections(
-        self,
-        active_file_ids: Set[str],
-        active_kb_ids: Set[str],
-        active_user_ids: Optional[Set[str]] = None,
+        self, load_active_ids: ActiveIdsLoader
     ) -> tuple[int, Optional[str]]:
         """Actually delete orphaned Milvus collections."""
         try:
             _ensure_milvus_default_connection()
-            expected_collections = self._build_expected_collections(
-                active_file_ids, active_kb_ids, active_user_ids
-            )
 
             # List all collections
             all_collections = self.vector_db_client.client.list_collections()
+            expected_collections = self._build_expected_collections(*load_active_ids())
 
             deleted_count = 0
             errors = []
@@ -2164,10 +2135,7 @@ class MilvusMultitenancyDatabaseCleaner(VectorDatabaseCleaner):
             log.debug(f"Error iterating orphaned Milvus MT collections: {e}")
 
     def cleanup_orphaned_collections(
-        self,
-        active_file_ids: Set[str],
-        active_kb_ids: Set[str],
-        active_user_ids: Optional[Set[str]] = None,
+        self, load_active_ids: ActiveIdsLoader
     ) -> tuple[int, Optional[str]]:
         """
         Delete orphaned resource_ids from shared collections.
@@ -2177,17 +2145,12 @@ class MilvusMultitenancyDatabaseCleaner(VectorDatabaseCleaner):
         """
         try:
             _ensure_milvus_default_connection()
-            expected_resource_ids = self._build_expected_resource_ids(
-                active_file_ids, active_kb_ids, active_user_ids
-            )
-
             deleted_count = 0
             errors = []
+            listed_collections = []
 
             # Import pymilvus utilities
             for shared_collection_name in self.shared_collections:
-                if self._skip_shared_collection(shared_collection_name, active_user_ids):
-                    continue
                 if not utility.has_collection(shared_collection_name):
                     continue
 
@@ -2225,12 +2188,23 @@ class MilvusMultitenancyDatabaseCleaner(VectorDatabaseCleaner):
                     log.info(
                         f"Total resource_ids in {shared_collection_name}: {len(all_resource_ids)}"
                     )
+                    listed_collections.append(
+                        (shared_collection_name, collection, all_resource_ids)
+                    )
 
+                except Exception as e:
+                    error_msg = f"Error processing shared collection {shared_collection_name}: {e}"
+                    log.error(error_msg)
+                    errors.append(error_msg)
+
+            expected_resource_ids = self._build_expected_resource_ids(
+                *load_active_ids()
+            )
+            for shared_collection_name, collection, resource_ids in listed_collections:
+                try:
                     # Get unique orphaned resource_ids
                     orphaned_ids = [
-                        rid
-                        for rid in all_resource_ids
-                        if rid not in expected_resource_ids
+                        rid for rid in resource_ids if rid not in expected_resource_ids
                     ]
 
                     log.info(
@@ -2463,19 +2437,13 @@ class QdrantDatabaseCleaner(VectorDatabaseCleaner):
             log.debug(f"Error iterating orphaned Qdrant collections: {e}")
 
     def cleanup_orphaned_collections(
-        self,
-        active_file_ids: Set[str],
-        active_kb_ids: Set[str],
-        active_user_ids: Optional[Set[str]] = None,
+        self, load_active_ids: ActiveIdsLoader
     ) -> tuple[int, Optional[str]]:
         """Delete orphaned Qdrant collections."""
         try:
-            expected_collections = self._build_expected_collections(
-                active_file_ids, active_kb_ids, active_user_ids
-            )
-
             # Get all collections with our prefix
             all_collections = self.client.get_collections().collections
+            expected_collections = self._build_expected_collections(*load_active_ids())
             deleted_count = 0
             errors = []
 
@@ -2725,10 +2693,7 @@ class QdrantMultitenancyDatabaseCleaner(VectorDatabaseCleaner):
             log.debug(f"Error iterating orphaned Qdrant MT tenant_ids: {e}")
 
     def cleanup_orphaned_collections(
-        self,
-        active_file_ids: Set[str],
-        active_kb_ids: Set[str],
-        active_user_ids: Optional[Set[str]] = None,
+        self, load_active_ids: ActiveIdsLoader
     ) -> tuple[int, Optional[str]]:
         """
         Delete orphaned tenant_ids from shared collections.
@@ -2736,19 +2701,9 @@ class QdrantMultitenancyDatabaseCleaner(VectorDatabaseCleaner):
         Uses scroll() for memory-safe iteration and batched deletions.
         """
         try:
-            expected_tenant_ids = self._build_expected_tenant_ids(
-                active_file_ids, active_kb_ids, active_user_ids or set()
-            )
-
-            log.info(
-                f"Qdrant multitenancy cleanup: {len(active_kb_ids)} active KBs, {len(active_file_ids)} active files, {len(active_user_ids or set())} active users"
-            )
-            log.info(
-                f"Qdrant multitenancy cleanup: Built {len(expected_tenant_ids)} expected tenant_ids"
-            )
-
             deleted_count = 0
             errors = []
+            listed_collections = []
 
             for collection_name in self.shared_collections:
                 if not self.client.collection_exists(collection_name=collection_name):
@@ -2786,7 +2741,29 @@ class QdrantMultitenancyDatabaseCleaner(VectorDatabaseCleaner):
                     log.info(
                         f"Total tenant_ids in {collection_name}: {len(all_tenant_ids)}"
                     )
+                    listed_collections.append((collection_name, all_tenant_ids))
 
+                except Exception as e:
+                    error_msg = (
+                        f"Error processing Qdrant collection {collection_name}: {e}"
+                    )
+                    log.error(error_msg)
+                    errors.append(error_msg)
+
+            active_file_ids, active_kb_ids, active_user_ids = load_active_ids()
+            expected_tenant_ids = self._build_expected_tenant_ids(
+                active_file_ids, active_kb_ids, active_user_ids
+            )
+
+            log.info(
+                f"Qdrant multitenancy cleanup: {len(active_kb_ids)} active KBs, {len(active_file_ids)} active files, {len(active_user_ids)} active users"
+            )
+            log.info(
+                f"Qdrant multitenancy cleanup: Built {len(expected_tenant_ids)} expected tenant_ids"
+            )
+
+            for collection_name, all_tenant_ids in listed_collections:
+                try:
                     # Delete orphaned tenant_ids
                     orphaned_tenant_ids = [
                         tid for tid in all_tenant_ids if tid not in expected_tenant_ids
@@ -2957,10 +2934,7 @@ class NoOpVectorDatabaseCleaner(VectorDatabaseCleaner):
         return 0
 
     def cleanup_orphaned_collections(
-        self,
-        active_file_ids: Set[str],
-        active_kb_ids: Set[str],
-        active_user_ids: Optional[Set[str]] = None,
+        self, load_active_ids: ActiveIdsLoader
     ) -> tuple[int, Optional[str]]:
         """No collections to cleanup for unsupported databases."""
         return (0, None)
@@ -3411,6 +3385,49 @@ async def get_all_file_row_ids() -> Set[str]:
     """
     async with get_async_db_context() as db:
         return {str(fid) async for (fid,) in stream_rows(db, File.id)}
+
+
+async def get_current_active_kb_ids(form_data: PruneDataForm) -> Set[str]:
+    """Preserved KB ids against the current user list."""
+    active_user_ids = {str(user.id) for user in (await Users.get_users())["users"]}
+    return await get_preserved_kb_ids(form_data, active_user_ids)
+
+
+async def get_current_active_ids(
+    form_data: PruneDataForm, referenced: dict[str, Set[str]]
+) -> Tuple[Set[str], Set[str], Set[str]]:
+    """Current (file row, preserved KB plus referenced web page, user) ids for the vector cleanup."""
+    active_user_ids = {str(user.id) for user in (await Users.get_users())["users"]}
+    active_kb_ids = await get_preserved_kb_ids(form_data, active_user_ids)
+    if "hash_based_collections" not in referenced:  # one reference scan per run
+        _, referenced["hash_based_collections"] = await get_active_file_ids(
+            active_user_ids=active_user_ids, preserved_kb_ids=active_kb_ids
+        )
+        _prog_stage("Cleaning vector collections")  # the scan set its own stages
+    return (
+        await get_all_file_row_ids(),
+        active_kb_ids | referenced["hash_based_collections"],
+        active_user_ids,
+    )
+
+
+async def get_user_memory_ids(user_id: str) -> Set[str]:
+    async def _scan():
+        async with get_async_db_context() as db:
+            result = await db.execute(
+                select(Memory.id).where(Memory.user_id == user_id)
+            )
+            return {str(row[0]) for row in result}
+
+    return await retry_on_db_lock(_scan)
+
+
+def _blocking_on_loop(coroutine_function: Callable[..., Any]) -> Callable[..., Any]:
+    """Blocking version of coroutine_function for the cleaners' worker threads."""
+    loop = asyncio.get_running_loop()
+    return lambda *args: asyncio.run_coroutine_threadsafe(
+        coroutine_function(*args), loop
+    ).result()
 
 
 async def _owner_is_gone(
@@ -6394,13 +6411,9 @@ async def run_prune(form_data: PruneDataForm) -> dict:
         _prog_stage("Recomputing preservation set")
         active_user_ids = {str(user.id) for user in (await Users.get_users())["users"]}
         active_kb_ids = await get_preserved_kb_ids(form_data, active_user_ids)
-        active_file_ids, hash_based_collections = await get_active_file_ids(
+        active_file_ids, _ = await get_active_file_ids(
             active_user_ids=active_user_ids, preserved_kb_ids=active_kb_ids
         )
-        # Vector collections follow file ROWS (like storage bytes): any row
-        # that survived stage 3 (referenced, grace-protected, or deferred to
-        # the next run) keeps its embeddings.
-        all_file_row_ids = await get_all_file_row_ids()
 
         log.info("Cleaning up orphaned physical files")
 
@@ -6422,11 +6435,15 @@ async def run_prune(form_data: PruneDataForm) -> dict:
         # Use modular vector database cleanup
         _prog_stage("Cleaning vector collections")
         warnings = []
+        # Vector collections follow file ROWS (like storage bytes): any row
+        # that survived stage 3 (referenced, grace-protected, or deferred to
+        # the next run) keeps its embeddings.
+        referenced = {}
+        load_active_ids = _blocking_on_loop(
+            lambda: get_current_active_ids(form_data, referenced)
+        )
         deleted_vector_count, vector_error = await asyncio.to_thread(
-            vector_cleaner.cleanup_orphaned_collections,
-            all_file_row_ids,
-            active_kb_ids | hash_based_collections,
-            active_user_ids,
+            vector_cleaner.cleanup_orphaned_collections, load_active_ids
         )
         if vector_error:
             warnings.append(f"Vector cleanup warning: {vector_error}")
@@ -6437,7 +6454,8 @@ async def run_prune(form_data: PruneDataForm) -> dict:
         if form_data.delete_orphaned_kb_metadata:
             _prog_stage("Cleaning the knowledge-base search index")
             deleted_kb_meta = await asyncio.to_thread(
-                vector_cleaner.cleanup_orphaned_kb_metadata, active_kb_ids
+                vector_cleaner.cleanup_orphaned_kb_metadata,
+                _blocking_on_loop(lambda: get_current_active_kb_ids(form_data)),
             )
             if deleted_kb_meta > 0:
                 log.info(f"Deleted {deleted_kb_meta} orphaned KB metadata embeddings")
@@ -6463,10 +6481,11 @@ async def run_prune(form_data: PruneDataForm) -> dict:
         # left their vector point behind).
         if form_data.delete_orphaned_memories:
             await delete_orphaned_memory_rows(active_user_ids)
-            memory_ids_by_user = await get_memory_ids_by_user(active_user_ids)
-            _prog_stage("Reconciling memory embeddings", len(memory_ids_by_user))
+            _prog_stage("Reconciling memory embeddings", len(active_user_ids))
             deleted_mem = await asyncio.to_thread(
-                vector_cleaner.cleanup_orphaned_memories, memory_ids_by_user
+                vector_cleaner.cleanup_orphaned_memories,
+                active_user_ids,
+                _blocking_on_loop(get_user_memory_ids),
             )
             if deleted_mem > 0:
                 log.info(f"Deleted {deleted_mem} orphaned memories")
