@@ -441,8 +441,20 @@ UUID_ANYWHERE_PATTERN = re.compile(
     r"[a-fA-F0-9]{8}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{12}"
 )
 
+# Hash-based collections hold attached web pages; keep those a chat references.
+HASH_BASED_COLLECTION_REF_PATTERN = re.compile(
+    rf'"collection_name":\s*"({HASH_BASED_COLLECTION_PATTERN.pattern})"'
+)
 
-def collect_file_ids_from_text(text_val, out: Set[str], valid_ids: Set[str], odd_ids=()):
+
+def collect_file_ids_from_text(
+    text_val,
+    out: Set[str],
+    valid_ids: Set[str],
+    odd_ids=(),
+    *,
+    hash_based_collections: Set[str],
+):
     """Collect referenced file ids from a JSON column's raw text."""
     if not text_val:
         return
@@ -450,6 +462,7 @@ def collect_file_ids_from_text(text_val, out: Set[str], valid_ids: Set[str], odd
         text_val = text_val.decode("utf-8", "ignore")  # some drivers CAST json to bytes
     elif not isinstance(text_val, str):
         text_val = str(text_val)
+    hash_based_collections.update(HASH_BASED_COLLECTION_REF_PATTERN.findall(text_val))
     out.update(valid_ids.intersection(UUID_ANYWHERE_PATTERN.findall(text_val)))
     # A non-UUID id with special chars stores escaped in json, raw in jsonb; match
     # both forms. Over-matching only ever preserves a file.
@@ -465,12 +478,19 @@ def _collect_file_ids_from_texts(text_values, valid_ids, odd_ids=()):
     CPU-bound and would otherwise starve the request loop on a live instance
     during a manual preview or run."""
     found: Set[str] = set()
+    hash_based_collections: Set[str] = set()
     for text_val in text_values:
         try:
-            collect_file_ids_from_text(text_val, found, valid_ids, odd_ids)
+            collect_file_ids_from_text(
+                text_val,
+                found,
+                valid_ids,
+                odd_ids,
+                hash_based_collections=hash_based_collections,
+            )
         except Exception as e:
             log.debug(f"Error scanning row text: {e}")
-    return found
+    return found, hash_based_collections
 
 
 # Open WebUI stores one metadata embedding per knowledge base (its name +
@@ -2330,7 +2350,7 @@ class MilvusMultitenancyDatabaseCleaner(VectorDatabaseCleaner):
         - Orphaned knowledge bases (KBs deleted from DB)
         - Orphaned user memories (users deleted from DB)
         - Web-search collections (ephemeral cache, not tracked in DB)
-        - Hash-based collections (temporary content hashes, not tracked in DB)
+        - Hash-based collections that no chat references anymore
 
         This matches ChromaDB/PGVector behavior where ONLY DB-tracked items are preserved.
 
@@ -2364,9 +2384,7 @@ class MilvusMultitenancyDatabaseCleaner(VectorDatabaseCleaner):
         # These are NOT in expected set → will be deleted as orphaned ✓
         # Rationale: Ephemeral caches, not tracked in DB, safe to clean
 
-        # HASH_BASED_COLLECTION: {63-char-hex} patterns
-        # These are NOT in expected set → will be deleted as orphaned ✓
-        # Rationale: Temporary content hashes, not tracked in DB, safe to clean
+        # HASH_BASED_COLLECTION: kept only while a chat references it (active_kb_ids)
 
         return expected_resource_ids
 
@@ -2541,7 +2559,7 @@ class QdrantMultitenancyDatabaseCleaner(VectorDatabaseCleaner):
     - {prefix}_files - for file-{file_id}
     - {prefix}_knowledge - for {kb_id} (default)
     - {prefix}_web-search - for web-search-{hash} (ephemeral)
-    - {prefix}_hash-based - for {63-char-hex} (temporary)
+    - {prefix}_hash-based - for {63-char-hex}
 
     Each collection stores points with a tenant_id field. Cleanup deletes
     orphaned tenant_ids (not entire collections).
@@ -2881,7 +2899,7 @@ class QdrantMultitenancyDatabaseCleaner(VectorDatabaseCleaner):
         - {kb_id} for knowledge bases
         - user-memory-{user_id} for memories
         - web-search-{hash} (ephemeral - always orphaned)
-        - {63-char-hex} (temporary - always orphaned)
+        - {63-char-hex}
         """
         expected_tenant_ids = set()
 
@@ -2915,7 +2933,7 @@ class QdrantMultitenancyDatabaseCleaner(VectorDatabaseCleaner):
         if kb_ids_sample:
             log.debug(f"Sample KB IDs added as tenant_ids: {kb_ids_sample}")
 
-        # Note: web-search-* and hash-based are ephemeral/temporary
+        # Note: web-search-* are ephemeral
         # They are NOT added to expected set, so they will be cleaned up
 
         return expected_tenant_ids
@@ -4907,7 +4925,7 @@ async def get_preview_detail_page(
 
 async def get_active_file_ids(
     knowledge_bases=None, active_user_ids=None, preserved_kb_ids=None
-) -> Set[str]:
+) -> Tuple[Set[str], Set[str]]:
     """
     Get all file IDs that are actively referenced by knowledge bases, chats, folders, messages, and models.
 
@@ -4920,8 +4938,11 @@ async def get_active_file_ids(
         preserved_kb_ids: When given, the exact KB set whose file references
             count (overrides the ownership filter); pass get_preserved_kb_ids()
             so exemptions and the off-flag protect KB contents consistently.
+
+    Returns the active file ids and the hash-based collections the records reference.
     """
     active_file_ids = set()
+    hash_based_collections = set()
 
     # Defensively normalize to Set[str] — callers may pass UUID objects
     if active_user_ids is not None:
@@ -5091,13 +5112,14 @@ async def get_active_file_ids(
                     async def _flush():
                         if not chunk:
                             return
-                        found = await asyncio.to_thread(
+                        found, found_collections = await asyncio.to_thread(
                             _collect_file_ids_from_texts,
                             chunk,
                             all_file_ids,
                             odd_file_ids,
                         )
                         active_file_ids.update(found)
+                        hash_based_collections.update(found_collections)
                         chunk.clear()
 
                     async for row in stream_rows(
@@ -5186,7 +5208,7 @@ async def get_active_file_ids(
         raise
 
     log.info(f"Found {len(active_file_ids)} active file IDs")
-    return active_file_ids
+    return active_file_ids, hash_based_collections
 
 
 async def safe_delete_file_by_id(
@@ -5790,7 +5812,7 @@ async def run_prune(form_data: PruneDataForm) -> dict:
             # protect KB contents (files, vectors, metadata), not just rows
             _prog_stage("Deciding which knowledge bases to keep")
             active_kb_ids = await get_preserved_kb_ids(form_data, active_user_ids)
-            active_file_ids = await get_active_file_ids(
+            active_file_ids, hash_based_collections = await get_active_file_ids(
                 active_user_ids=active_user_ids, preserved_kb_ids=active_kb_ids
             )
             # Vector collections follow file ROWS (like storage bytes), so
@@ -5825,7 +5847,7 @@ async def run_prune(form_data: PruneDataForm) -> dict:
             orphaned_vector_collections = await asyncio.to_thread(
                 vector_cleaner.count_orphaned_collections,
                 all_file_row_ids,
-                active_kb_ids,
+                active_kb_ids | hash_based_collections,
                 active_user_ids,
             )
             _prog_stage("Checking the knowledge-base search index")
@@ -5992,7 +6014,7 @@ async def run_prune(form_data: PruneDataForm) -> dict:
         active_kb_ids = await get_preserved_kb_ids(form_data, active_user_ids)
         log.info(f"Found {len(active_kb_ids)} preserved knowledge bases")
 
-        active_file_ids = await get_active_file_ids(
+        active_file_ids, _ = await get_active_file_ids(
             active_user_ids=active_user_ids, preserved_kb_ids=active_kb_ids
         )
 
@@ -6346,7 +6368,7 @@ async def run_prune(form_data: PruneDataForm) -> dict:
         _prog_stage("Recomputing preservation set")
         active_user_ids = {str(user.id) for user in (await Users.get_users())["users"]}
         active_kb_ids = await get_preserved_kb_ids(form_data, active_user_ids)
-        active_file_ids = await get_active_file_ids(
+        active_file_ids, hash_based_collections = await get_active_file_ids(
             active_user_ids=active_user_ids, preserved_kb_ids=active_kb_ids
         )
         # Vector collections follow file ROWS (like storage bytes): any row
@@ -6377,7 +6399,7 @@ async def run_prune(form_data: PruneDataForm) -> dict:
         deleted_vector_count, vector_error = await asyncio.to_thread(
             vector_cleaner.cleanup_orphaned_collections,
             all_file_row_ids,
-            active_kb_ids,
+            active_kb_ids | hash_based_collections,
             active_user_ids,
         )
         if vector_error:
