@@ -7022,6 +7022,8 @@ def mount_routes(app, settings: dict):
         for r in app.router.routes
         if getattr(r, "path", None) == prefix
         or str(getattr(r, "path", "")).startswith(prefix + "/")
+        # never Open WebUI's own routes, e.g. with a route_prefix of /api
+        if hasattr(r, "endpoint") and r.endpoint.__module__ == __name__
     ]
     if stale:
         # Module was re-executed (in-place code update). Starlette can't swap a
