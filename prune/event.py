@@ -3078,6 +3078,7 @@ from open_webui.models.chats import Chat, Chats, ChatFile
 from open_webui.models.chat_messages import ChatMessage
 from open_webui.models.messages import Message, MessageReaction, Messages
 from open_webui.models.memories import Memory, Memories
+from open_webui.models.oauth_sessions import OAuthSessions
 from open_webui.models.files import File, Files
 from open_webui.models.notes import Note, Notes
 from open_webui.models.prompts import Prompt, Prompts
@@ -5225,7 +5226,7 @@ async def delete_inactive_users(
 
     Args:
         inactive_days: Number of days of inactivity before deletion
-        vector_cleaner: Unused; kept for call-site compatibility
+        vector_cleaner: Deletes the user's memory embeddings
         exempt_admin: Whether to exempt admin users from deletion
         exempt_pending: Whether to exempt pending users from deletion
 
@@ -5264,6 +5265,21 @@ async def delete_inactive_users(
                 try:
                     # Delete user's automations and their runs
                     await delete_user_automations(user.id, db=db)
+
+                    # Removed before the user, so a failed delete is retried next pass
+                    if not (
+                        await OAuthSessions.delete_sessions_by_user_id(user.id, db=db)
+                        and await Memories.delete_memories_by_user_id(user.id, db=db)
+                    ):
+                        log.error(
+                            f"Failed to delete OAuth sessions or memories of user {user.id}; user kept"
+                        )
+                        await _pace()
+                        continue
+                    if vector_cleaner is not None:
+                        await asyncio.to_thread(
+                            vector_cleaner.delete_collection, f"user-memory-{user.id}"
+                        )
 
                     # Auths.delete_auth_by_id wraps Users.delete_user_by_id AND
                     # removes the auth credential row, matching Open WebUI's
@@ -7129,7 +7145,7 @@ class Event:
         )
         inactive_user_days: int = Field(
             default=0,
-            description="\u26a0\ufe0f Delete user accounts inactive for this many days, INCLUDING all their private data (0 = never). Files they uploaded that other users still rely on are kept.",
+            description="\u26a0\ufe0f Delete user accounts inactive for this many days (0 = never), with their chats, automations, memories and OAuth sign-ins. Files they uploaded that other users still rely on are kept.",
         )
         exempt_admin_users: bool = Field(
             default=True,
@@ -7475,7 +7491,7 @@ const SECTIONS = [
  ]},
  {title:'👤 Inactive Users', fields:[
   {k:'delete_inactive_users_days',t:'num',label:'Delete users inactive for',unit:'days',
-   tip:'DESTRUCTIVE: deletes the account, its login credentials and all its private data. Files they uploaded that other users still rely on are kept. Empty = off.'},
+   tip:'DESTRUCTIVE: deletes the account, its login, chats, automations, memories and OAuth sign-ins. Files they uploaded that other users still rely on are kept. Empty = off.'},
   {k:'exempt_admin_users',t:'chk',def:true,label:'Never delete admins',
    tip:'Strongly recommended. Admin accounts are never deleted by the rule above.'},
   {k:'exempt_pending_users',t:'chk',def:true,label:'Never delete pending users',

@@ -39,7 +39,7 @@ Automatic, **throttled** database and storage cleanup for your entire instance, 
 - **Reference-based file safety** — a file is deleted only when *nothing* references it (no chat, knowledge base, note, folder, channel or model); who uploaded it is irrelevant. Files younger than `orphan_file_grace_hours` (default 24) are never treated as orphaned, so a sweep can't delete an upload the user hasn't attached yet.
 - **Stale knowledge base embeddings are reconciled** — each sweep compares every kept knowledge base's vector collection against the files it actually lists and deletes the chunks of files it no longer lists, so answers stop citing files that were removed from the knowledge base (through a deleted folder, a bug or a crashed removal). Files touched inside `orphan_file_grace_hours` are left alone, because a file is embedded before it is linked.
 - **Manual admin page** — a session-gated page at `/prune` (admins only, anyone else is redirected to `/`) mirroring the valve sections, with a hoverable ⓘ explanation on every option, a **Preview** that shows exactly what would be deleted — every nonzero category expands into a paginated list of the actual records (ids, owners, titles) and can be **exported as JSON** for an audit trail — and an **Execute** with typed confirmation, a progress bar and a live run log. Both run in the background: the page can be closed and reopened mid-run and picks the run back up. VACUUM lives here as an explicit per-run maintenance checkbox.
-- **Complete account cleanup** — inactive-user deletion removes the account *and* its login credentials through the same path as Open WebUI's own admin delete, plus automations and stored memories; the user's files follow the reference-based rule above.
+- **Complete account cleanup** — inactive-user deletion removes the account *and* its login credentials through the same path as Open WebUI's own admin delete, plus automations, stored memories and stored OAuth sign-ins; the user's files follow the reference-based rule above.
 
 ## ✅ How it works
 
@@ -90,7 +90,7 @@ The manual page and the automatic passes share the exact same deletion engine �
 - **VACUUM** — tick **Run VACUUM afterwards** in the manual page's Maintenance section before an Execute. It runs at the end of that run, under the prune lock. There is deliberately no automatic or valve-triggered VACUUM: a database-locking maintenance operation only ever runs when an admin explicitly asks for it.
 
 > [!WARNING]
-> Some options are **destructive by design** and act on live data: `inactive_user_days` deletes the account **and all its private data**; `knowledge_base_max_age_days` is a retention policy that deletes knowledge bases **even when they are shared and actively in use**. Admins and pending users are exempt from inactivity deletion by default — keep it that way unless you know why you're changing it. VACUUM locks the database while it runs; use it in a maintenance window.
+> Some options are **destructive by design** and act on live data: `inactive_user_days` deletes the **account with its chats, automations, memories and OAuth sign-ins** (files follow the reference rule); `knowledge_base_max_age_days` is a retention policy that deletes knowledge bases **even when they are shared and actively in use**. Admins and pending users are exempt from inactivity deletion by default — keep it that way unless you know why you're changing it. VACUUM locks the database while it runs; use it in a maintenance window.
 
 ## Limitations
 
