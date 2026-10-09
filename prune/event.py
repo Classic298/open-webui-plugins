@@ -3530,6 +3530,18 @@ async def count_old_chats(
         return 0
 
 
+async def delete_chat_with_orphan_tags(chat_id: str, db: AsyncSession) -> bool:
+    """Delete a chat plus the tags no other chat of its owner uses, as Open WebUI's chat delete does."""
+    result = await db.execute(select(Chat.user_id, Chat.meta).where(Chat.id == chat_id))
+    chat = result.first()
+    # delete_chat_by_id swallows exceptions and returns False
+    if chat is None or not await Chats.delete_chat_by_id(chat_id, db=db):
+        return False
+    tag_ids = (chat.meta or {}).get("tags", [])
+    await Chats.delete_orphan_tags_for_user(tag_ids, chat.user_id, db=db)
+    return True
+
+
 def _knowledge_age_column(age_field: str):
     """Resolve the timestamp column used for KB age comparisons."""
     return Knowledge.updated_at if age_field == "updated_at" else Knowledge.created_at
@@ -5802,8 +5814,7 @@ async def run_prune(form_data: PruneDataForm) -> dict:
                 async for (chat_id,) in stream_rows(
                     db, Chat.id, filter_clause=conditions
                 ):
-                    # delete_chat_by_id swallows exceptions and returns False
-                    if await Chats.delete_chat_by_id(chat_id, db=db):
+                    if await delete_chat_with_orphan_tags(chat_id, db):
                         deleted += 1
                     _prog_tick()
                     await db.commit()
@@ -6628,8 +6639,7 @@ async def _delete_old_chats_paced(
 
         deleted = 0
         async for (chat_id,) in stream_rows(db, Chat.id, filter_clause=conditions):
-            # delete_chat_by_id swallows exceptions and returns False
-            if await Chats.delete_chat_by_id(chat_id, db=db):
+            if await delete_chat_with_orphan_tags(chat_id, db):
                 deleted += 1
             await db.commit()  # release the write lock before sleeping
             await _pace()
