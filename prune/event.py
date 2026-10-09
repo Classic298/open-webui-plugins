@@ -3391,6 +3391,8 @@ async def cleanup_dangling_junction_rows() -> int:
         _dangling_row_statement("knowledge_directory", "knowledge_id", "knowledge"),
         _dangling_row_statement("channel_member", "channel_id", "channel"),
         _dangling_row_statement("channel_webhook", "channel_id", "channel"),
+        # On SQLite, chats deleted with their folder on 0.11.3 leave share snapshots behind
+        _dangling_row_statement("shared_chat", "chat_id", "chat"),
     ]
     for table, stmt in statements:
         try:
