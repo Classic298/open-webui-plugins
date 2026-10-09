@@ -3430,6 +3430,28 @@ def _blocking_on_loop(coroutine_function: Callable[..., Any]) -> Callable[..., A
     ).result()
 
 
+async def _file_is_linked(file_id: str) -> bool:
+    """Whether a chat, knowledge base or channel links the file right now."""
+
+    async def _scan():
+        async with get_async_db_context() as db:
+            for query in (
+                "SELECT 1 FROM chat_file cf JOIN chat c ON c.id = cf.chat_id "
+                "WHERE cf.file_id = :file_id LIMIT 1",
+                "SELECT 1 FROM knowledge_file kf JOIN knowledge k ON k.id = kf.knowledge_id "
+                "WHERE kf.file_id = :file_id LIMIT 1",
+                "SELECT 1 FROM channel_file cf JOIN channel c ON c.id = cf.channel_id "
+                "WHERE cf.file_id = :file_id AND (cf.message_id IS NULL "
+                "OR EXISTS (SELECT 1 FROM message m WHERE m.id = cf.message_id)) LIMIT 1",
+            ):
+                result = await db.execute(text(query), {"file_id": file_id})
+                if result.first() is not None:
+                    return True
+        return False
+
+    return await retry_on_db_lock(_scan)
+
+
 async def _owner_is_gone(
     owner_id, active_user_ids: Set[str], owner_checks: dict[str, bool]
 ) -> bool:
@@ -6140,7 +6162,10 @@ async def run_prune(form_data: PruneDataForm) -> dict:
                 _prog_tick()
                 if created_at is not None and created_at > grace_cutoff:
                     continue
-                if str(fid) not in active_file_ids:
+                file_id = str(fid)
+                if file_id not in active_file_ids and not await _file_is_linked(
+                    file_id
+                ):
                     if await safe_delete_file_by_id(fid, vector_cleaner, db=db):
                         deleted_files += 1
                     await db.commit()
