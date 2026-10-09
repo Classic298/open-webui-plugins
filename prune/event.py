@@ -3894,15 +3894,19 @@ async def count_orphaned_records(
                     if form_data.delete_orphaned_channels:
                         counts["channels"] = len(orphan_channel_ids)
 
+                    reply_columns = (
+                        [_orphaned_reply_filter()]
+                        if form_data.delete_orphaned_channel_messages
+                        else []
+                    )
                     n = 0
-                    async for _mid, m_ch_id in stream_rows(
-                        db, Message.id, Message.channel_id
+                    async for _mid, m_ch_id, *orphaned in stream_rows(
+                        db, Message.id, Message.channel_id, *reply_columns
                     ):
                         if m_ch_id is None:
                             continue
-                        if (
-                            form_data.delete_orphaned_channel_messages
-                            and m_ch_id not in all_channel_ids
+                        if form_data.delete_orphaned_channel_messages and (
+                            m_ch_id not in all_channel_ids or any(orphaned)
                         ):
                             n += 1
                         elif (
@@ -4101,19 +4105,37 @@ async def delete_old_channel_messages(
         return 0
 
 
+def _orphaned_reply_filter():
+    """Unpinned replies whose thread parent is gone; pinned ones still show in the pinned list."""
+    thread_parent = aliased(Message)
+    conditions = [
+        Message.parent_id.isnot(None),
+        ~select(thread_parent.id).where(thread_parent.id == Message.parent_id).exists(),
+    ]
+    if hasattr(Message, "is_pinned"):
+        conditions.append(_is_unpinned(Message))
+    return and_(*conditions)
+
+
+def _orphaned_channel_message_filter():
+    """Channel messages whose channel is gone, plus orphaned thread replies."""
+    return and_(
+        Message.channel_id.isnot(None),
+        or_(
+            not_(Message.channel_id.in_(select(Channel.id))),
+            _orphaned_reply_filter(),
+        ),
+    )
+
+
 async def count_orphaned_channel_messages() -> int:
-    """Count channel messages whose channel no longer exists (dangling)."""
+    """Count channel messages whose channel or thread parent no longer exists (dangling)."""
     if Message is None or Channel is None:
         return 0
     try:
         async with get_async_db_context() as db:
             result = await db.execute(
-                select(func.count(Message.id)).where(
-                    and_(
-                        Message.channel_id.isnot(None),
-                        not_(Message.channel_id.in_(select(Channel.id))),
-                    )
-                )
+                select(func.count(Message.id)).where(_orphaned_channel_message_filter())
             )
             return result.scalar_one_or_none() or 0
     except _TABLE_MISSING_ERRORS as e:
@@ -4126,18 +4148,13 @@ async def count_orphaned_channel_messages() -> int:
 
 
 async def delete_orphaned_channel_messages() -> int:
-    """Delete channel messages whose channel no longer exists."""
+    """Delete channel messages whose channel or thread parent no longer exists."""
     if Message is None or Channel is None:
         return 0
     try:
         async with get_async_db_context() as db:
             result = await db.execute(
-                select(Message.id).where(
-                    and_(
-                        Message.channel_id.isnot(None),
-                        not_(Message.channel_id.in_(select(Channel.id))),
-                    )
-                )
+                select(Message.id).where(_orphaned_channel_message_filter())
             )
             ids = [row[0] for row in result.fetchall()]
             if not ids:
@@ -4684,16 +4701,25 @@ async def get_preview_detail_page(
 
                 else:
                     resume_clause = Message.id > resume_after if resume_after is not None else None
+                    reply_columns = (
+                        [_orphaned_reply_filter()]
+                        if form_data.delete_orphaned_channel_messages
+                        else []
+                    )
 
                     async def matching_rows():
-                        async for message_id, channel_id in stream_rows(
-                            db, Message.id, Message.channel_id, filter_clause=resume_clause
+                        async for message_id, channel_id, *orphaned in stream_rows(
+                            db,
+                            Message.id,
+                            Message.channel_id,
+                            *reply_columns,
+                            filter_clause=resume_clause,
                         ):
                             if channel_id is None:
                                 continue
                             if (
                                 form_data.delete_orphaned_channel_messages
-                                and channel_id not in all_channel_ids
+                                and (channel_id not in all_channel_ids or any(orphaned))
                             ) or (
                                 form_data.delete_orphaned_channels
                                 and channel_id in orphaned_channel_ids
@@ -7189,7 +7215,7 @@ class Event:
         )
         delete_orphaned_channel_messages: bool = Field(
             default=True,
-            description="Delete channel messages whose channel no longer exists.",
+            description="Delete channel messages whose channel no longer exists, and unpinned thread replies whose thread parent is gone.",
         )
         delete_orphaned_channels: bool = Field(
             default=False,
@@ -7492,7 +7518,7 @@ const SECTIONS = [
   {k:'exempt_pinned_channel_messages',t:'chk',def:true,label:'↳ Keep pinned channel messages',
    tip:'Pinned messages survive the age rule above; replies of a pinned thread parent are only deleted by their own age.'},
   {k:'delete_orphaned_channel_messages',t:'chk',def:true,label:'Messages of deleted channels',
-   tip:'Channel messages whose channel no longer exists.'},
+   tip:'Channel messages whose channel no longer exists, and unpinned thread replies whose thread parent is gone.'},
   {k:'delete_orphaned_channels',t:'chk',def:false,label:'Channels of deleted users',
    tip:'Off by default: channels are shared infrastructure, other members may still use them.'},
  ]},
