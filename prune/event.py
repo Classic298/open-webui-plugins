@@ -17,6 +17,7 @@ description: Automatic, throttled database and storage cleanup. Configure retent
 import asyncio
 from pydantic import BaseModel, Field
 from fastapi import APIRouter, BackgroundTasks, Depends, Request, Response
+from fastapi import HTTPException
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 
 # Global throttles, set from the valves on every event dispatch. Deletion sites
@@ -3134,6 +3135,23 @@ try:
 except ImportError:
     VECTOR_DB_CLIENT = None
     VECTOR_DB = None
+from open_webui.retrieval.vector.main import VectorDBBase
+
+
+try:
+    # The slim image creates its vector client on first use, after this module loads
+    from open_webui.retrieval.vector.factory import get_vector_db_client
+except ImportError:
+
+    def get_vector_db_client():
+        return VECTOR_DB_CLIENT
+
+
+def get_vector_db_client_or_none() -> Optional[VectorDBBase]:
+    try:
+        return get_vector_db_client()
+    except HTTPException:
+        return None
 
 
 def get_sync_engine():
@@ -5673,7 +5691,7 @@ async def run_prune(form_data: PruneDataForm) -> dict:
         # Get vector database cleaner based on configuration
         vector_cleaner = get_vector_database_cleaner(
             VECTOR_DB,
-            VECTOR_DB_CLIENT,
+            get_vector_db_client_or_none(),
             Path(CACHE_DIR),
             enable_milvus_multitenancy=ENABLE_MILVUS_MULTITENANCY_MODE,
             enable_qdrant_multitenancy=ENABLE_QDRANT_MULTITENANCY_MODE,
@@ -6582,7 +6600,7 @@ def _days(value) -> Optional[int]:
 def _make_cleaner():
     return get_vector_database_cleaner(
         VECTOR_DB,
-        VECTOR_DB_CLIENT,
+        get_vector_db_client_or_none(),
         Path(CACHE_DIR),
         enable_milvus_multitenancy=ENABLE_MILVUS_MULTITENANCY_MODE,
         enable_qdrant_multitenancy=ENABLE_QDRANT_MULTITENANCY_MODE,
