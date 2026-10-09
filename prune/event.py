@@ -3146,7 +3146,7 @@ async def _count_rows(db, table, filter_clause=None) -> int:
 
 
 # Direct Open WebUI imports — this module runs inside the Open WebUI process.
-from open_webui.models.users import User, Users
+from open_webui.models.users import User, UserModel, Users
 from open_webui.models.auths import Auths
 from open_webui.models.chats import Chat, Chats, ChatFile
 from open_webui.models.chat_messages import ChatMessage
@@ -3614,6 +3614,36 @@ async def get_all_folders(db: Optional[AsyncSession] = None):
         return []
 
 
+def _is_inactive_user(
+    user: UserModel, cutoff_time: int, exempt_admin: bool, exempt_pending: bool
+) -> bool:
+    """The inactive-user rule, shared by count, delete and preview."""
+    if exempt_admin and user.role == "admin":
+        return False
+    if exempt_pending and user.role == "pending":
+        return False
+    return user.last_active_at < cutoff_time
+
+
+def _active_user_ids_excluding_inactive(
+    all_users: list, form_data: PruneDataForm
+) -> Set[str]:
+    """Current user ids minus the users the inactive-user rule would delete."""
+    if form_data.delete_inactive_users_days is None:
+        return {str(user.id) for user in all_users}
+    cutoff_time = int(time.time()) - form_data.delete_inactive_users_days * 86400
+    return {
+        str(user.id)
+        for user in all_users
+        if not _is_inactive_user(
+            user,
+            cutoff_time,
+            form_data.exempt_admin_users,
+            form_data.exempt_pending_users,
+        )
+    }
+
+
 async def count_inactive_users(
     inactive_days: Optional[int],
     exempt_admin: bool,
@@ -3637,11 +3667,7 @@ async def count_inactive_users(
     try:
         if all_users is not None:
             for user in all_users:
-                if exempt_admin and user.role == "admin":
-                    continue
-                if exempt_pending and user.role == "pending":
-                    continue
-                if user.last_active_at < cutoff_time:
+                if _is_inactive_user(user, cutoff_time, exempt_admin, exempt_pending):
                     count += 1
             return count
 
@@ -3990,13 +4016,13 @@ async def count_orphaned_records(
                     form_data.exempt_shared_orphaned_folders,
                 ),
             ):
-                if enabled_flag and exempt_flag and active_user_ids:
+                if enabled_flag and exempt_flag:
                     _shared_exempt[cnt_key] = await get_shared_resource_ids(
                         rtype, active_user_ids
                     )
 
             for key, table_cls, user_id_col, enabled in _table_flag_map:
-                if enabled and active_user_ids:
+                if enabled:
                     # Stream and filter in Python, matching execution exactly:
                     # SQL IN() binds one parameter per user (breaks past
                     # SQLite's limit on large instances) and SQL NOT IN never
@@ -4733,7 +4759,7 @@ async def get_preview_detail_page(
         if cached is not None:
             return cached
         all_users = (await Users.get_users())["users"]
-        active_user_ids = {str(user.id) for user in all_users}
+        active_user_ids = _active_user_ids_excluding_inactive(all_users, form_data)
         exempt_ids = set()
         if shared_resource_type and shared_exempt:
             exempt_ids = await get_shared_resource_ids(
@@ -4779,9 +4805,12 @@ async def get_preview_detail_page(
                 "role": getattr(user, "role", None) or "",
             }
             for user in users
-            if (not form_data.exempt_admin_users or user.role != "admin")
-            and (not form_data.exempt_pending_users or user.role != "pending")
-            and user.last_active_at < cutoff_time
+            if _is_inactive_user(
+                user,
+                cutoff_time,
+                form_data.exempt_admin_users,
+                form_data.exempt_pending_users,
+            )
         )
         items = list(matching_users)[start : start + page_size]
     elif category == "old_chats":
@@ -4868,7 +4897,9 @@ async def get_preview_detail_page(
             automation_sets = _detail_sets_get(run_id, category)
             if automation_sets is None:
                 all_users = (await Users.get_users())["users"]
-                active_user_ids = {str(user.id) for user in all_users}
+                active_user_ids = _active_user_ids_excluding_inactive(
+                    all_users, form_data
+                )
                 all_automation_ids = set()
                 orphaned_automation_ids = set()
                 async with get_async_db_context() as db:
@@ -4914,7 +4945,9 @@ async def get_preview_detail_page(
             channel_sets = _detail_sets_get(run_id, category)
             if channel_sets is None:
                 all_users = (await Users.get_users())["users"]
-                active_user_ids = {str(user.id) for user in all_users}
+                active_user_ids = _active_user_ids_excluding_inactive(
+                    all_users, form_data
+                )
                 all_channel_ids = set()
                 orphaned_channel_ids = set()
                 async with get_async_db_context() as db:
@@ -5476,14 +5509,7 @@ async def delete_inactive_users(
         all_users = (await Users.get_users())["users"]
 
         for user in all_users:
-            # Skip if user is exempt
-            if exempt_admin and user.role == "admin":
-                continue
-            if exempt_pending and user.role == "pending":
-                continue
-
-            # Check if user is inactive based on last_active_at
-            if user.last_active_at < cutoff_time:
+            if _is_inactive_user(user, cutoff_time, exempt_admin, exempt_pending):
                 users_to_delete.append(user)
 
         # No savepoint: the OWUI managers commit their own sessions in the
@@ -5914,7 +5940,7 @@ async def run_prune(form_data: PruneDataForm) -> dict:
             # Get counts for all enabled operations
             _prog_stage("Loading users")
             all_users = (await Users.get_users())["users"]
-            active_user_ids = {str(user.id) for user in all_users}
+            active_user_ids = _active_user_ids_excluding_inactive(all_users, form_data)
             # Single preservation decision: off-flag and shared exemption
             # protect KB contents (files, vectors, metadata), not just rows
             _prog_stage("Deciding which knowledge bases to keep")
