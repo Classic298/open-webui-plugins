@@ -143,6 +143,7 @@ class PruneDataForm(BaseModel):
     exempt_shared_orphaned_tools: bool = True
     exempt_shared_orphaned_notes: bool = True
     exempt_shared_orphaned_skills: bool = True
+    exempt_shared_orphaned_folders: bool = True
     # Skip files younger than this in orphan sweeps: upload and first
     # reference (message send / KB add) are separate requests.
     orphan_file_grace_hours: int = 24
@@ -3181,10 +3182,28 @@ async def get_kb_user_map() -> dict:
     return await retry_on_db_lock(_scan)
 
 
+async def _get_folder_ids_with_subfolders(
+    db: Optional[AsyncSession], folder_ids: Set[str]
+) -> Set[str]:
+    """The given folders plus every folder below them, at any depth."""
+    children_by_parent = {}
+    async for folder_id, parent_id in stream_rows(db, Folder.id, Folder.parent_id):
+        if parent_id:
+            children_by_parent.setdefault(parent_id, []).append(folder_id)
+    seen = set(folder_ids)
+    pending = list(folder_ids)
+    while pending:
+        for child_id in children_by_parent.get(pending.pop(), []):
+            if child_id not in seen:
+                seen.add(child_id)
+                pending.append(child_id)
+    return seen
+
+
 async def get_shared_resource_ids(
     resource_type: str, active_user_ids: Set[str]
 ) -> Set[str]:
-    """Resource ids of the given type that a LIVING principal can still reach.
+    """Resource ids of the given type (folders with their subfolders) that a LIVING principal can still reach.
 
     A grant keeps a resource shared when its principal is a live user, an
     existing group (groups outlive their members), or the public '*' wildcard.
@@ -3218,6 +3237,8 @@ async def get_shared_resource_ids(
                     shared.add(str(rid))
                 elif ptype == "group" and pid_str in live_group_ids:
                     shared.add(str(rid))
+            if resource_type == "folder" and shared:
+                shared = await _get_folder_ids_with_subfolders(db, shared)
             return shared
     except _TABLE_MISSING_ERRORS as e:
         if _is_table_missing_error(e):
@@ -3716,6 +3737,12 @@ async def count_orphaned_records(
                     "skill",
                     form_data.delete_orphaned_skills,
                     getattr(form_data, "exempt_shared_orphaned_skills", True),
+                ),
+                (
+                    "folders",
+                    "folder",
+                    form_data.delete_orphaned_folders,
+                    form_data.exempt_shared_orphaned_folders,
                 ),
             ):
                 if enabled_flag and exempt_flag and active_user_ids:
@@ -4501,7 +4528,7 @@ async def get_preview_detail_page(
             "orphaned_models": (Model, Model.user_id, "model", form_data.exempt_shared_orphaned_models, None),
             "orphaned_notes": (Note, Note.user_id, "note", form_data.exempt_shared_orphaned_notes, None),
             "orphaned_skills": (Skill, Skill.user_id, "skill", form_data.exempt_shared_orphaned_skills, None),
-            "orphaned_folders": (Folder, Folder.user_id, None, True, None),
+            "orphaned_folders": (Folder, Folder.user_id, "folder", form_data.exempt_shared_orphaned_folders, None),
         }
         model, owner_column, shared_type, shared_exempt, label_column = model_map[category]
         items = await owned_rows(
@@ -5791,6 +5818,12 @@ async def run_prune(form_data: PruneDataForm) -> dict:
             and getattr(form_data, "exempt_shared_orphaned_skills", True)
             else set()
         )
+        shared_folders = (
+            await get_shared_resource_ids("folder", active_user_ids)
+            if form_data.delete_orphaned_folders
+            and form_data.exempt_shared_orphaned_folders
+            else set()
+        )
 
         # Stage 3: Delete orphaned database records
         log.info("Deleting orphaned database records")
@@ -6015,9 +6048,10 @@ async def run_prune(form_data: PruneDataForm) -> dict:
                 for folder in await get_all_folders(db=db):
                     _prog_tick()
                     if str(folder.user_id) not in active_user_ids:
-                        await Folders.delete_folder_by_id_and_user_id(
-                            folder.id, folder.user_id, db=db
-                        )
+                        if folder.id in shared_folders:
+                            continue
+                        # Open WebUI's folder delete would take kept shared subfolders with it
+                        await db.execute(delete(Folder).where(Folder.id == folder.id))
                         folders_deleted += 1
                         deleted_others += 1
                         await db.commit()
@@ -6471,6 +6505,7 @@ def _form_from_valves(v: dict) -> PruneDataForm:
         exempt_shared_orphaned_skills=v.get("exempt_shared_orphaned_skills", True),
         delete_orphaned_skills=v["delete_orphaned_skills"],
         delete_orphaned_folders=v["delete_orphaned_folders"],
+        exempt_shared_orphaned_folders=v.get("exempt_shared_orphaned_folders", True),
         delete_orphaned_chat_messages=v["delete_orphaned_chat_messages"],
         delete_orphaned_automations=v["delete_orphaned_automations"],
         channel_message_max_age_days=_days(v["channel_message_max_age_days"]),
@@ -7076,6 +7111,10 @@ class Event:
         delete_orphaned_folders: bool = Field(
             default=True, description="Delete folders that belonged to deleted users."
         )
+        exempt_shared_orphaned_folders: bool = Field(
+            default=True,
+            description="\u21b3 Keep them, subfolders included, when a living user, an existing group or a public grant can still access them.",
+        )
         delete_orphaned_automations: bool = Field(
             default=True,
             description="Delete automations, including their run history, that belonged to deleted users.\n\n---\n\n#### 💬 Channels",
@@ -7383,6 +7422,8 @@ const SECTIONS = [
   {k:'exempt_shared_orphaned_notes',t:'chk',def:true,parent:'delete_orphaned_notes',label:'↳ Keep shared ones',
    tip:'Kept when a living user, an existing group or a public grant can still access them.'},
   {k:'delete_orphaned_folders',t:'chk',def:true,label:'Folders of deleted users',tip:'Chat folders whose owner account no longer exists.'},
+  {k:'exempt_shared_orphaned_folders',t:'chk',def:true,parent:'delete_orphaned_folders',label:'↳ Keep shared ones',
+   tip:'Kept, subfolders included, when a living user, an existing group or a public grant can still access them.'},
   {k:'delete_orphaned_automations',t:'chk',def:true,label:'Automations of deleted users',tip:'Automations and their run history.'},
  ]},
  {title:'💬 Channels', fields:[
