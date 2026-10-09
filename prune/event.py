@@ -1685,9 +1685,9 @@ class PGVectorDatabaseCleaner(VectorDatabaseCleaner):
 
 
 def _ensure_milvus_default_connection():
-    """utility.*/Collection() use pymilvus' global 'default' alias, which the
-    standard-mode Open WebUI client never opens at init (only lazily in
-    query()). Connect it if missing so cleanup works on a fresh process."""
+    """utility.*/Collection() use pymilvus' global 'default' alias, which
+    Open WebUI's Milvus clients (standard and multitenancy) never open.
+    Connect it if missing so cleanup works on a fresh process."""
     try:
         from pymilvus import connections
 
@@ -1951,6 +1951,7 @@ class MilvusMultitenancyDatabaseCleaner(VectorDatabaseCleaner):
         in our expected set across all shared collections.
         """
         try:
+            _ensure_milvus_default_connection()
             expected_resource_ids = self._build_expected_resource_ids(
                 active_file_ids, active_kb_ids, active_user_ids
             )
@@ -2026,6 +2027,7 @@ class MilvusMultitenancyDatabaseCleaner(VectorDatabaseCleaner):
     ) -> Generator[Tuple[str, str], None, None]:
         """Yield (resource_id, shared_collection_name) for each orphaned Milvus MT resource."""
         try:
+            _ensure_milvus_default_connection()
             expected_resource_ids = self._build_expected_resource_ids(
                 active_file_ids, active_kb_ids, active_user_ids
             )
@@ -2079,6 +2081,7 @@ class MilvusMultitenancyDatabaseCleaner(VectorDatabaseCleaner):
         from the shared collections.
         """
         try:
+            _ensure_milvus_default_connection()
             expected_resource_ids = self._build_expected_resource_ids(
                 active_file_ids, active_kb_ids, active_user_ids
             )
@@ -2191,6 +2194,7 @@ class MilvusMultitenancyDatabaseCleaner(VectorDatabaseCleaner):
         the appropriate shared collection.
         """
         try:
+            _ensure_milvus_default_connection()
             # Use the reference implementation's _get_collection_and_resource_id logic
             # to determine which shared collection contains this resource_id
             resource_id = collection_name
