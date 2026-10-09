@@ -6483,7 +6483,7 @@ async def run_prune(form_data: PruneDataForm) -> dict:
 # manual admin UI + API (same deletion engine as the automatic passes)
 # ============================================================================
 
-PLUGIN_VERSION = "0.10.10"
+PLUGIN_VERSION = "0.11.0"
 MAX_RUN_LOG_LINES = 4000
 MAX_RUNS_KEPT = 20
 
