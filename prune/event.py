@@ -2944,6 +2944,7 @@ from typing import Iterator, Optional, Set, Tuple, Callable, Any
 from sqlalchemy import select, text, func, and_, or_, not_, delete, update, cast, Text
 from sqlalchemy.exc import OperationalError, ProgrammingError
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import aliased
 
 log = logging.getLogger(__name__)
 
@@ -4012,22 +4013,38 @@ async def _delete_channel_messages_by_ids(db, message_ids: list) -> int:
     return deleted
 
 
+def _is_unpinned(message):
+    return or_(message.is_pinned == False, message.is_pinned == None)
+
+
 def _old_channel_message_filter(cutoff_ns: int, exempt_pinned: bool):
-    """Build the WHERE clause for age-based channel message pruning."""
+    """Build the WHERE clause for age-based channel message pruning, replies of old thread parents included."""
+    skip_pinned = exempt_pinned and hasattr(Message, "is_pinned")
+    thread_parent = aliased(Message)
+    thread_parent_conditions = [
+        thread_parent.id == Message.parent_id,
+        thread_parent.created_at < cutoff_ns,
+    ]
+    if skip_pinned:
+        thread_parent_conditions.append(_is_unpinned(thread_parent))
+    # Postgres, 1.5M old rows: an IN subquery timed out after 60s, this EXISTS took 0.31s
+    old_thread_parent = (
+        select(thread_parent.id).where(*thread_parent_conditions).exists()
+    )
     conditions = [
         Message.channel_id.isnot(None),
         Message.created_at.isnot(None),
-        Message.created_at < cutoff_ns,
+        or_(Message.created_at < cutoff_ns, old_thread_parent),
     ]
-    if exempt_pinned and hasattr(Message, "is_pinned"):
-        conditions.append(or_(Message.is_pinned == False, Message.is_pinned == None))
+    if skip_pinned:
+        conditions.append(_is_unpinned(Message))
     return and_(*conditions)
 
 
 async def count_old_channel_messages(
     max_age_days: Optional[int], exempt_pinned: bool = True
 ) -> int:
-    """Count channel messages older than max_age_days (channel_message.created_at is ns)."""
+    """Count channel messages older than max_age_days, plus newer replies of old thread parents (created_at is ns)."""
     if max_age_days is None or Message is None:
         return 0
     cutoff_ns = (int(time.time()) - max_age_days * 86400) * 1_000_000_000
@@ -4052,7 +4069,7 @@ async def count_old_channel_messages(
 async def delete_old_channel_messages(
     max_age_days: Optional[int], exempt_pinned: bool = True
 ) -> int:
-    """Delete channel messages older than max_age_days. Pinned messages exempt by default."""
+    """Delete channel messages older than max_age_days, plus newer replies of old thread parents. Pinned messages exempt by default."""
     if max_age_days is None or Message is None:
         return 0
     cutoff_ns = (int(time.time()) - max_age_days * 86400) * 1_000_000_000
@@ -4071,7 +4088,7 @@ async def delete_old_channel_messages(
             await db.commit()
             if deleted > 0:
                 log.info(
-                    f"Deleted {deleted} channel messages older than {max_age_days} days"
+                    f"Deleted {deleted} channel messages older than {max_age_days} days or in an old thread"
                 )
             return deleted
     except _TABLE_MISSING_ERRORS as e:
@@ -7164,11 +7181,11 @@ class Event:
         )
         channel_message_max_age_days: int = Field(
             default=0,
-            description="Delete channel messages older than this many days (0 = keep forever).",
+            description="Delete channel messages older than this many days, replies of an old thread included (0 = keep forever).",
         )
         exempt_pinned_channel_messages: bool = Field(
             default=True,
-            description="\u21b3 Never auto-delete pinned channel messages.",
+            description="\u21b3 Never auto-delete pinned channel messages; replies of a pinned thread parent are only deleted by their own age.",
         )
         delete_orphaned_channel_messages: bool = Field(
             default=True,
@@ -7471,9 +7488,9 @@ const SECTIONS = [
  ]},
  {title:'💬 Channels', fields:[
   {k:'channel_message_max_age_days',t:'num',label:'Delete channel messages older than',unit:'days',
-   tip:'Age-based cleanup of channel messages; the channels themselves are kept. Empty = off.'},
+   tip:'Age-based cleanup of channel messages, replies of an old thread included; the channels themselves are kept. Empty = off.'},
   {k:'exempt_pinned_channel_messages',t:'chk',def:true,label:'↳ Keep pinned channel messages',
-   tip:'Pinned messages survive the age rule above.'},
+   tip:'Pinned messages survive the age rule above; replies of a pinned thread parent are only deleted by their own age.'},
   {k:'delete_orphaned_channel_messages',t:'chk',def:true,label:'Messages of deleted channels',
    tip:'Channel messages whose channel no longer exists.'},
   {k:'delete_orphaned_channels',t:'chk',def:false,label:'Channels of deleted users',
