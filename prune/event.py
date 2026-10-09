@@ -3205,6 +3205,7 @@ from open_webui.config import (
     ENABLE_MILVUS_MULTITENANCY_MODE,
 )
 from open_webui.storage.provider import Storage
+from open_webui.events import EVENTS, publish_event
 
 try:
     from open_webui.config import S3_KEY_PREFIX
@@ -5611,6 +5612,16 @@ async def delete_inactive_users(
                         log.info(
                             f"Deleted inactive user: {user.email} (last active: {user.last_active_at})"
                         )
+                        # Like the admin delete: drops live sessions, notifies webhooks
+                        try:
+                            await publish_event(
+                                _STATE["app"],
+                                EVENTS.USER_DELETED,
+                                subject_id=user.id,
+                                source="prune",
+                            )
+                        except Exception as e:
+                            log.warning(f"Could not announce deleted user {user.id}: {e}")
                     else:
                         log.error(f"Failed to delete user {user.id}")
                 except Exception as e:
@@ -6712,6 +6723,7 @@ _STATE = {
     "redis_prefix": "open-webui",
     "redis_tried": False,
     "function_id": None,
+    "app": None,
 }
 
 
@@ -7624,6 +7636,7 @@ class Event:
             _STATE["lock"] = asyncio.Lock()
         log.setLevel(logging.INFO)
         PruneLock.init(Path(CACHE_DIR))
+        _STATE["app"] = app
         if app is not None:
             mount_routes(app, v)
         _STATE["started"] = True
@@ -7704,8 +7717,10 @@ class Event:
                 _spawn("users", lambda: _pass_users(v), on_skip=lambda: _unclaim("users"))
 
         elif name in ("user.deleted", "knowledge.deleted", "file.deleted_all"):
-            if int(v["full_sweep_interval_hours"] or 0) > 0 and _claim(
-                "full-sweep", _full_sweep_ttl(v)
+            if (
+                event.get("source") != "prune"
+                and int(v["full_sweep_interval_hours"] or 0) > 0
+                and _claim("full-sweep", _full_sweep_ttl(v))
             ):
                 _spawn(
                     "full",
