@@ -6496,6 +6496,7 @@ _STATE = {
     "redis": None,
     "redis_prefix": "open-webui",
     "redis_tried": False,
+    "function_id": None,
 }
 
 
@@ -7037,6 +7038,14 @@ def mount_routes(app, settings: dict):
             r for r in app.router.routes if id(r) not in stale_ids
         ]
         log.info("prune: refreshed %d route(s) after code update", len(stale))
+
+    async def get_active_admin(user=Depends(get_admin_user)):
+        # Routes outlive a disable or delete until restart
+        function = await Functions.get_function_by_id(_STATE["function_id"])
+        if function is None or not function.is_active:
+            raise HTTPException(status_code=404)
+        return user
+
     router = APIRouter()
 
     # ---- page: session-gated BEFORE any HTML is served; admins only ----
@@ -7059,13 +7068,14 @@ def mount_routes(app, settings: dict):
                 if header_key == b"set-cookie":
                     redirect.raw_headers.append((header_key, header_value))
             return redirect
+        await get_active_admin(user)
         return HTMLResponse(
             page_html,
             headers={"Cache-Control": "no-store"},
         )
 
     @router.get(f"{prefix}/api/status", include_in_schema=False)
-    async def status(user=Depends(get_admin_user)):
+    async def status(user=Depends(get_active_admin)):
         running = _STATE["lock"] is not None and _STATE["lock"].locked()
         current = next((r for r in _STATE["runs"] if r["status"] == "running"), None)
         return {
@@ -7120,7 +7130,7 @@ def mount_routes(app, settings: dict):
         return {"ok": True, "run_id": run["id"]}
 
     @router.post(f"{prefix}/api/preview", include_in_schema=False)
-    async def preview(request: Request, body: dict, user=Depends(get_admin_user)):
+    async def preview(request: Request, body: dict, user=Depends(get_active_admin)):
         # Same bearer requirement as execute: preview is not destructive but
         # it takes the global run lock and scans the whole database. Runs in
         # the background like execute; poll the run for progress and result.
@@ -7132,7 +7142,7 @@ def mount_routes(app, settings: dict):
         return _start_manual_run(body, user, dry_run=True)
 
     @router.post(f"{prefix}/api/execute", include_in_schema=False)
-    async def execute(request: Request, body: dict, user=Depends(get_admin_user)):
+    async def execute(request: Request, body: dict, user=Depends(get_active_admin)):
         # CSRF hardening: the UI always sends a Bearer header; never accept
         # cookie-only auth for the destructive endpoint.
         if not request.headers.get("authorization", "").lower().startswith("bearer "):
@@ -7149,7 +7159,7 @@ def mount_routes(app, settings: dict):
         category: str,
         page: int = 1,
         page_size: int = 50,
-        user=Depends(get_admin_user),
+        user=Depends(get_active_admin),
     ):
         # Same bearer requirement as preview: whole-database scans must not
         # be reachable with cookie-only auth. The UI always sends the header.
@@ -7175,7 +7185,7 @@ def mount_routes(app, settings: dict):
             )
 
     @router.post(f"{prefix}/api/runs/{{run_id}}/cancel", include_in_schema=False)
-    async def cancel_run(request: Request, run_id: str, user=Depends(get_admin_user)):
+    async def cancel_run(request: Request, run_id: str, user=Depends(get_active_admin)):
         # Bearer-gated like preview/execute: a state-changing control on the run.
         if not request.headers.get("authorization", "").lower().startswith("bearer "):
             return JSONResponse(
@@ -7198,11 +7208,11 @@ def mount_routes(app, settings: dict):
         return {"ok": True, "run_id": run_id, "status": "cancelling"}
 
     @router.get(f"{prefix}/api/runs", include_in_schema=False)
-    async def runs(user=Depends(get_admin_user)):
+    async def runs(user=Depends(get_active_admin)):
         return {"runs": [_run_summary(r, log_tail=5) for r in _STATE["runs"]]}
 
     @router.get(f"{prefix}/api/runs/{{run_id}}", include_in_schema=False)
-    async def run_detail(run_id: str, user=Depends(get_admin_user)):
+    async def run_detail(run_id: str, user=Depends(get_active_admin)):
         for r in _STATE["runs"]:
             if r["id"] == run_id:
                 return _run_summary(r, log_tail=1000)
@@ -7421,6 +7431,7 @@ class Event:
         _PACE["rows_per_second"] = max(0, int(v["deletion_rows_per_second"] or 0))
         _PACE["scan_rows_per_second"] = max(0, int(v.get("scan_rows_per_second") or 0))
         name = __event_name__ or ""
+        _STATE["function_id"] = __id__
 
         if name == "system.startup.completed":
             self._init(__app__, v)

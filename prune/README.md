@@ -99,6 +99,7 @@ The manual page and the automatic passes share the exact same deletion engine �
 - Remote Chroma (`CHROMA_HTTP_HOST`): Prune only deletes collections named the way Open WebUI names its own (`file-…`, `user-memory-…`, `web-search-…`, UUIDs and hash-based names).
 - The dry-run preview reflects the database's current state: when age-based or inactive-user options are enabled, the execute run frees additional orphans mid-run (attachments of the chats it deletes), so it can reclaim more than the preview itemized.
 - Changing `route_prefix` requires a server restart.
+- Disabling or deleting the function closes the Prune page and its API right away; re-enabling it opens them again.
 
 ## Credits
 
