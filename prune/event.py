@@ -6052,6 +6052,15 @@ async def run_prune(form_data: PruneDataForm) -> dict:
                             continue
                         # Open WebUI's folder delete would take kept shared subfolders with it
                         await db.execute(delete(Folder).where(Folder.id == folder.id))
+                        if AccessGrant is not None:
+                            await db.execute(
+                                delete(AccessGrant).where(
+                                    and_(
+                                        AccessGrant.resource_type == "folder",
+                                        AccessGrant.resource_id == folder.id,
+                                    )
+                                )
+                            )
                         folders_deleted += 1
                         deleted_others += 1
                         await db.commit()
