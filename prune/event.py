@@ -3413,6 +3413,19 @@ async def get_all_file_row_ids() -> Set[str]:
         return {str(fid) async for (fid,) in stream_rows(db, File.id)}
 
 
+async def _owner_is_gone(
+    owner_id, active_user_ids: Set[str], owner_checks: dict[str, bool]
+) -> bool:
+    """True when the owner is in neither the snapshot nor the current user list."""
+    owner_id = str(owner_id)
+    if owner_id in active_user_ids:
+        return False
+    if owner_id not in owner_checks:
+        owner = await retry_on_db_lock(lambda: Users.get_user_by_id(owner_id))
+        owner_checks[owner_id] = owner is None
+    return owner_checks[owner_id]
+
+
 async def get_kb_file_ids(kb_ids: Set[str]) -> dict:
     """Return {kb_id: file ids linked in knowledge_file} for the given KBs."""
     kb_file_ids = {kb_id: set() for kb_id in kb_ids}
@@ -4347,8 +4360,9 @@ async def delete_orphaned_channels(active_user_ids: Set[str]) -> int:
     try:
         async with get_async_db_context() as db:
             orphan_ids = []
+            owner_checks = {}
             async for cid, uid in stream_rows(db, Channel.id, Channel.user_id):
-                if str(uid) not in active_user_ids:
+                if await _owner_is_gone(uid, active_user_ids, owner_checks):
                     orphan_ids.append(cid)
             if not orphan_ids:
                 return 0
@@ -5564,12 +5578,13 @@ async def delete_orphaned_automations(active_user_ids: Set[str]) -> int:
             total_autos_deleted = 0
             total_runs_deleted = 0
             batch = []
+            owner_checks = {}
 
             async for auto_id, auto_uid in stream_rows(
                 db, Automation.id, Automation.user_id
             ):
                 _prog_tick()
-                if str(auto_uid) not in active_user_ids:
+                if await _owner_is_gone(auto_uid, active_user_ids, owner_checks):
                     batch.append(str(auto_id))
 
                 if len(batch) >= batch_size:
@@ -5703,8 +5718,9 @@ async def delete_orphaned_memory_rows(active_user_ids) -> int:
     try:
         async with get_async_db_context() as db:
             batch = []
+            owner_checks = {}
             async for mem_id, mem_uid in stream_rows(db, Memory.id, Memory.user_id):
-                if str(mem_uid) not in active_user_ids:
+                if await _owner_is_gone(mem_uid, active_user_ids, owner_checks):
                     batch.append(mem_id)
                 if len(batch) >= 500:
                     result = await db.execute(delete(Memory).where(Memory.id.in_(batch)))
@@ -6013,6 +6029,7 @@ async def run_prune(form_data: PruneDataForm) -> dict:
 
         active_kb_ids = await get_preserved_kb_ids(form_data, active_user_ids)
         log.info(f"Found {len(active_kb_ids)} preserved knowledge bases")
+        owner_checks = {}
 
         active_file_ids, _ = await get_active_file_ids(
             active_user_ids=active_user_ids, preserved_kb_ids=active_kb_ids
@@ -6100,9 +6117,8 @@ async def run_prune(form_data: PruneDataForm) -> dict:
                     # loops and the count path and closes a TOCTOU window: the
                     # snapshot predates the (long, throttled) file sweep, so a KB
                     # a live user creates mid-pass would otherwise be deleted.
-                    if (
-                        str(kb_id) not in active_kb_ids
-                        and str(owner_id) not in active_user_ids
+                    if str(kb_id) not in active_kb_ids and await _owner_is_gone(
+                        owner_id, active_user_ids, owner_checks
                     ):
                         orphan_kb_ids.append(str(kb_id))
                 _prog_tick(0, len(orphan_kb_ids))
@@ -6145,7 +6161,7 @@ async def run_prune(form_data: PruneDataForm) -> dict:
                 )
                 async for chat_id, chat_uid in stream_rows(db, Chat.id, Chat.user_id):
                     _prog_tick()
-                    if str(chat_uid) not in active_user_ids:
+                    if await _owner_is_gone(chat_uid, active_user_ids, owner_checks):
                         if await Chats.delete_chat_by_id(chat_id, db=db):
                             chats_deleted += 1
                             deleted_others += 1
@@ -6162,7 +6178,9 @@ async def run_prune(form_data: PruneDataForm) -> dict:
             async with get_async_db() as db:
                 for tool in await Tools.get_tools(db=db):
                     _prog_tick()
-                    if str(tool.user_id) not in active_user_ids:
+                    if await _owner_is_gone(
+                        tool.user_id, active_user_ids, owner_checks
+                    ):
                         if str(tool.id) in shared_tools:
                             continue
                         await Tools.delete_tool_by_id(tool.id, db=db)
@@ -6181,7 +6199,9 @@ async def run_prune(form_data: PruneDataForm) -> dict:
             async with get_async_db() as db:
                 for function in await Functions.get_functions(db=db):
                     _prog_tick()
-                    if str(function.user_id) not in active_user_ids:
+                    if await _owner_is_gone(
+                        function.user_id, active_user_ids, owner_checks
+                    ):
                         await Functions.delete_function_by_id(function.id, db=db)
                         functions_deleted += 1
                         deleted_others += 1
@@ -6199,7 +6219,7 @@ async def run_prune(form_data: PruneDataForm) -> dict:
                 # Stream raw columns — Notes.get_notes() paginates (limit=50)
                 async for note_id, note_uid in stream_rows(db, Note.id, Note.user_id):
                     _prog_tick()
-                    if str(note_uid) not in active_user_ids:
+                    if await _owner_is_gone(note_uid, active_user_ids, owner_checks):
                         if str(note_id) in shared_notes:
                             continue
                         await Notes.delete_note_by_id(note_id, db=db)
@@ -6218,7 +6238,9 @@ async def run_prune(form_data: PruneDataForm) -> dict:
             async with get_async_db() as db:
                 for skill in await Skills.get_skills(db=db):
                     _prog_tick()
-                    if str(skill.user_id) not in active_user_ids:
+                    if await _owner_is_gone(
+                        skill.user_id, active_user_ids, owner_checks
+                    ):
                         if str(skill.id) in shared_skills:
                             continue
                         await Skills.delete_skill_by_id(skill.id, db=db)
@@ -6241,7 +6263,7 @@ async def run_prune(form_data: PruneDataForm) -> dict:
                     db, Prompt.id, Prompt.command, Prompt.user_id
                 ):
                     _prog_tick()
-                    if str(prompt_uid) not in active_user_ids:
+                    if await _owner_is_gone(prompt_uid, active_user_ids, owner_checks):
                         if str(_pid) in shared_prompts:
                             continue
                         await Prompts.delete_prompt_by_command(command, db=db)
@@ -6260,7 +6282,9 @@ async def run_prune(form_data: PruneDataForm) -> dict:
             async with get_async_db() as db:
                 for model in await Models.get_all_models(db=db):
                     _prog_tick()
-                    if str(model.user_id) not in active_user_ids:
+                    if await _owner_is_gone(
+                        model.user_id, active_user_ids, owner_checks
+                    ):
                         if str(model.id) in shared_models:
                             continue
                         await Models.delete_model_by_id(model.id, db=db)
@@ -6279,7 +6303,9 @@ async def run_prune(form_data: PruneDataForm) -> dict:
             async with get_async_db() as db:
                 for folder in await get_all_folders(db=db):
                     _prog_tick()
-                    if str(folder.user_id) not in active_user_ids:
+                    if await _owner_is_gone(
+                        folder.user_id, active_user_ids, owner_checks
+                    ):
                         if folder.id in shared_folders:
                             continue
                         # Open WebUI's folder delete would take kept shared subfolders with it
