@@ -4443,14 +4443,26 @@ async def delete_orphaned_channels(active_user_ids: Set[str]) -> int:
         return 0
 
 
-def iter_storage_objects() -> Iterator[Tuple[str, str, Optional[int]]]:
+def _epoch_or_none(moment: Optional[datetime]) -> Optional[float]:
+    return moment.timestamp() if moment is not None else None
+
+
+def _within_grace(modified_at: Optional[float], grace_hours: int) -> bool:
+    """Young or undated objects may be uploads still missing their file row."""
+    return grace_hours > 0 and (
+        modified_at is None or modified_at > time.time() - grace_hours * 3600
+    )
+
+
+def iter_storage_objects() -> Iterator[Tuple[str, str, Optional[int], Optional[float]]]:
     """
-    Yield (ref, display_name, size_bytes) for every object in the configured
+    Yield (ref, display_name, size_bytes, modified_at) for every object in the configured
     storage backend. `ref` matches the format stored in File.path and is safe
     to pass to Storage.delete_file().
 
     size_bytes is best-effort — may be None for remote backends where listing
     pages don't include a byte count (or it's expensive to fetch per-object).
+    modified_at is the last write as epoch seconds, None when unknown.
     """
     provider = (STORAGE_PROVIDER or "local").lower()
 
@@ -4464,10 +4476,11 @@ def iter_storage_objects() -> Iterator[Tuple[str, str, Optional[int]]]:
             if not p.is_file():
                 continue
             try:
-                size = p.stat().st_size
+                stat = p.stat()
+                size, modified_at = stat.st_size, stat.st_mtime
             except OSError:
-                size = None
-            yield (str(p), p.name, size)
+                size = modified_at = None
+            yield (str(p), p.name, size, modified_at)
         return
 
     if provider == "s3":
@@ -4484,7 +4497,12 @@ def iter_storage_objects() -> Iterator[Tuple[str, str, Optional[int]]]:
                 # Mirrors the safety check in S3StorageProvider.delete_all_files
                 if key_prefix and not key.startswith(key_prefix):
                     continue
-                yield (f"s3://{bucket}/{key}", key.rsplit("/", 1)[-1], obj.get("Size"))
+                yield (
+                    f"s3://{bucket}/{key}",
+                    key.rsplit("/", 1)[-1],
+                    obj.get("Size"),
+                    _epoch_or_none(obj.get("LastModified")),
+                )
         return
 
     if provider == "gcs":
@@ -4494,6 +4512,7 @@ def iter_storage_objects() -> Iterator[Tuple[str, str, Optional[int]]]:
                 f"gs://{bucket_name}/{blob.name}",
                 blob.name,
                 getattr(blob, "size", None),
+                _epoch_or_none(getattr(blob, "updated", None)),
             )
         return
 
@@ -4506,7 +4525,12 @@ def iter_storage_objects() -> Iterator[Tuple[str, str, Optional[int]]]:
                 size = blob.size
             except AttributeError:
                 pass
-            yield (f"{endpoint}/{container}/{blob.name}", blob.name, size)
+            yield (
+                f"{endpoint}/{container}/{blob.name}",
+                blob.name,
+                size,
+                _epoch_or_none(getattr(blob, "last_modified", None)),
+            )
         return
 
     log.warning(f"Unknown STORAGE_PROVIDER '{provider}' — orphan storage scan skipped")
@@ -4536,7 +4560,7 @@ async def _get_active_file_paths(active_file_ids: Set[str]) -> Set[str]:
         return active_paths
 
 
-async def count_orphaned_uploads(active_file_ids: Set[str]) -> int:
+async def count_orphaned_uploads(active_file_ids: Set[str], grace_hours: int) -> int:
     """Count orphaned objects in the configured storage backend (local/S3/GCS/Azure)."""
     active_paths = await _get_active_file_paths(active_file_ids)
 
@@ -4544,9 +4568,11 @@ async def count_orphaned_uploads(active_file_ids: Set[str]) -> int:
 
     def _count() -> int:
         n = 0
-        for ref, name, _size in iter_storage_objects():
+        for ref, name, _size, modified_at in iter_storage_objects():
             _prog_tick()
             if ref in active_paths or name in active_paths:
+                continue
+            if _within_grace(modified_at, grace_hours):
                 continue
             # GCS/Azure delete_file cannot round-trip nested blob names and
             # could target the wrong key; skip them (foreign objects anyway)
@@ -4905,8 +4931,10 @@ async def get_preview_detail_page(
         def scan_uploads():
             items = []
             index = 0
-            for ref, name, size in iter_storage_objects():
+            for ref, name, size, modified_at in iter_storage_objects():
                 if ref in active_paths or name in active_paths:
+                    continue
+                if _within_grace(modified_at, form_data.orphan_file_grace_hours):
                     continue
                 if provider in ("gcs", "azure") and "/" in name:
                     continue
@@ -5322,7 +5350,7 @@ async def safe_delete_file_by_id(
         return False
 
 
-async def cleanup_orphaned_uploads(active_file_ids: Set[str]) -> int:
+async def cleanup_orphaned_uploads(active_file_ids: Set[str], grace_hours: int) -> int:
     """
     Delete orphaned objects from the configured storage backend
     (local/S3/GCS/Azure). An object is orphaned when its storage ref does
@@ -5338,9 +5366,10 @@ async def cleanup_orphaned_uploads(active_file_ids: Set[str]) -> int:
     def _list_orphans():
         return [
             (ref, name)
-            for ref, name, _size in iter_storage_objects()
+            for ref, name, _size, modified_at in iter_storage_objects()
             if ref not in active_paths
             and name not in active_paths
+            and not _within_grace(modified_at, grace_hours)
             # GCS/Azure delete_file extracts the key naively (first segment /
             # basename) and would delete a DIFFERENT, possibly live blob for
             # nested names; never touch those.
@@ -5875,7 +5904,9 @@ async def run_prune(form_data: PruneDataForm) -> dict:
                 form_data.knowledge_bases_age_field,
             )
             _prog_stage("Scanning storage for orphaned uploads")
-            orphaned_uploads = await count_orphaned_uploads(active_file_ids)
+            orphaned_uploads = await count_orphaned_uploads(
+                active_file_ids, form_data.orphan_file_grace_hours
+            )
             _prog_stage("Scanning vector collections")
             orphaned_vector_collections = await asyncio.to_thread(
                 vector_cleaner.count_orphaned_collections,
@@ -6418,7 +6449,9 @@ async def run_prune(form_data: PruneDataForm) -> dict:
         log.info("Cleaning up orphaned physical files")
 
         _prog_stage("Deleting orphaned uploads from storage")
-        deleted_uploads = await cleanup_orphaned_uploads(active_file_ids)
+        deleted_uploads = await cleanup_orphaned_uploads(
+            active_file_ids, form_data.orphan_file_grace_hours
+        )
         if deleted_uploads > 0:
             log.info(f"Deleted {deleted_uploads} orphaned upload files")
 
@@ -7306,7 +7339,7 @@ class Event:
         )
         orphan_file_grace_hours: int = Field(
             default=24,
-            description="Never treat files younger than this many hours as orphaned, and never touch knowledge base embeddings of files updated within the window. Protects uploads the user has not yet attached to a chat or knowledge base (0 = no protection).\n\n---\n\n#### 🕒 Age Rules",
+            description="Never treat files or stored upload objects younger than this many hours as orphaned, and never touch knowledge base embeddings of files updated within the window. Protects uploads the user has not yet attached to a chat or knowledge base, and uploads still being written (0 = no protection).\n\n---\n\n#### 🕒 Age Rules",
         )
         chat_max_age_days: int = Field(
             default=0,
@@ -7655,7 +7688,7 @@ const token = localStorage.getItem('token');
 const SECTIONS = [
  {title:'🛡️ Safety', fields:[
   {k:'orphan_file_grace_hours',t:'num',label:'Protect uploads younger than',unit:'hours',val:24,
-   tip:'Files younger than this are never treated as orphaned. Uploading and attaching are separate steps in Open WebUI, so this protects uploads not yet attached to a chat or knowledge base. 0 disables the protection.'},
+   tip:'Files and stored upload objects younger than this are never treated as orphaned. Uploading and attaching are separate steps in Open WebUI, so this protects uploads not yet attached to a chat or knowledge base, and uploads still being written. 0 disables the protection.'},
  ]},
  {title:'🚦 Speed (this run only)', fields:[
   {k:'scan_rows_per_second',t:'num',label:'Scan speed',unit:'rows/s',val:50000,ph:'valve',
