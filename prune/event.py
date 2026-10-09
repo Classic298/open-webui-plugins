@@ -430,6 +430,7 @@ class PruneLock:
 UUID_PATTERN = re.compile(
     r"^[a-fA-F0-9]{8}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{12}$"
 )
+HASH_BASED_COLLECTION_PATTERN = re.compile(r"[0-9a-f]{63}")
 
 # Any UUID-shaped substring. JSON columns are scanned as raw text and the
 # matches intersected with the real file ids: a strict superset of the old
@@ -1303,6 +1304,79 @@ class ChromaDatabaseCleaner(VectorDatabaseCleaner):
             except Exception:
                 pass
             return -1  # Signal FTS cleanup was skipped
+
+
+class RemoteChromaDatabaseCleaner(ChromaDatabaseCleaner):
+    """ChromaDB on a Chroma server (CHROMA_HTTP_HOST), cleaned through its API."""
+
+    def _orphaned_collection_names(
+        self,
+        active_file_ids: Set[str],
+        active_kb_ids: Set[str],
+        active_user_ids: Optional[Set[str]] = None,
+    ) -> Optional[list[str]]:
+        """Orphans among Open WebUI-named collections; None if listing failed."""
+        expected_collections = self._build_expected_collections(
+            active_file_ids, active_kb_ids, active_user_ids
+        )
+        try:
+            collections = self.vector_db_client.client.list_collections()
+        except Exception as e:
+            log.error(f"ChromaDB collection listing failed: {e}")
+            return None
+        return [
+            collection.name
+            for collection in collections
+            if collection.name not in expected_collections
+            and (
+                collection.name.startswith(("file-", "user-memory-", "web-search-"))
+                or UUID_PATTERN.match(collection.name)
+                or HASH_BASED_COLLECTION_PATTERN.fullmatch(collection.name)
+            )
+        ]
+
+    def count_orphaned_collections(
+        self,
+        active_file_ids: Set[str],
+        active_kb_ids: Set[str],
+        active_user_ids: Optional[Set[str]] = None,
+    ) -> int:
+        """Count orphaned collections on the Chroma server for preview."""
+        orphaned_collections = self._orphaned_collection_names(
+            active_file_ids, active_kb_ids, active_user_ids
+        )
+        return len(orphaned_collections or [])
+
+    def cleanup_orphaned_collections(
+        self,
+        active_file_ids: Set[str],
+        active_kb_ids: Set[str],
+        active_user_ids: Optional[Set[str]] = None,
+    ) -> tuple[int, Optional[str]]:
+        """Delete orphaned collections through the Chroma server."""
+        orphaned_collections = self._orphaned_collection_names(
+            active_file_ids, active_kb_ids, active_user_ids
+        )
+        if orphaned_collections is None:
+            return (0, "ChromaDB collection listing failed")
+
+        deleted_count = 0
+        errors = []
+        for collection_name in orphaned_collections:
+            _prog_tick()
+            try:
+                self.vector_db_client.delete_collection(
+                    collection_name=collection_name
+                )
+                deleted_count += 1
+                log.info(f"Deleted orphaned ChromaDB collection: {collection_name}")
+            except Exception as e:
+                errors.append(f"Failed to delete collection {collection_name}: {e}")
+                log.error(errors[-1])
+
+        if errors:
+            return (deleted_count, "; ".join(errors))
+        return (deleted_count, None)
 
 
 class PGVectorDatabaseCleaner(VectorDatabaseCleaner):
@@ -2909,6 +2983,9 @@ def get_vector_database_cleaner(
     vector_db_type = vector_db_type.lower()
 
     if "chroma" in vector_db_type:
+        if CHROMA_HTTP_HOST:
+            log.debug("Using remote ChromaDB cleaner")
+            return RemoteChromaDatabaseCleaner(vector_db_client, cache_dir)
         log.debug("Using ChromaDB cleaner")
         return ChromaDatabaseCleaner(vector_db_client, cache_dir)
     elif "pgvector" in vector_db_type:
@@ -3105,6 +3182,11 @@ try:
     from open_webui.config import S3_KEY_PREFIX
 except ImportError:
     S3_KEY_PREFIX = ""
+
+try:
+    from open_webui.config import CHROMA_HTTP_HOST
+except ImportError:  # only defined when VECTOR_DB is chroma
+    CHROMA_HTTP_HOST = ""
 
 try:
     from open_webui.models.automations import Automation, AutomationRun
@@ -6759,7 +6841,9 @@ def _run_vacuum_sync(vector_cleaner):
     except Exception as e:
         log.error(f"Failed to vacuum main database: {e}")
 
-    if isinstance(vector_cleaner, ChromaDatabaseCleaner):
+    if isinstance(vector_cleaner, ChromaDatabaseCleaner) and not isinstance(
+        vector_cleaner, RemoteChromaDatabaseCleaner
+    ):
         try:
             with sqlite3.connect(str(vector_cleaner.chroma_db_path)) as conn:
                 conn.execute("VACUUM")

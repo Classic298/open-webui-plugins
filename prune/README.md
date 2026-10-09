@@ -96,6 +96,7 @@ The manual page and the automatic passes share the exact same deletion engine �
 
 - Vector-database cleanup covers **ChromaDB, PGVector, Milvus and Qdrant** (plus Milvus/Qdrant multitenancy). Other vector stores (Elasticsearch, OpenSearch, Pinecone, Weaviate, Valkey, …) are skipped safely — database and storage cleanup still run, only the vector GC no-ops.
 - PGVector with `PGVECTOR_PGCRYPTO`: the orphaned-chunk reconciliation inside active KB collections is skipped (the metadata column is encrypted); per-file chunk cleanup is unaffected. The stale knowledge base embedding check falls back to reading each collection through Open WebUI's vector client instead of SQL.
+- Remote Chroma (`CHROMA_HTTP_HOST`): Prune only deletes collections named the way Open WebUI names its own (`file-…`, `user-memory-…`, `web-search-…`, UUIDs and hash-based names).
 - The dry-run preview reflects the database's current state: when age-based or inactive-user options are enabled, the execute run frees additional orphans mid-run (attachments of the chats it deletes), so it can reclaim more than the preview itemized.
 - Changing `route_prefix` requires a server restart.
 
