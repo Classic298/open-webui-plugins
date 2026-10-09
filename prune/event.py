@@ -3015,7 +3015,19 @@ import os
 import time
 from pathlib import Path
 from typing import Iterator, Optional, Set, Tuple, Callable, Any
-from sqlalchemy import select, text, func, and_, or_, not_, delete, update, cast, Text
+from sqlalchemy import (
+    select,
+    text,
+    func,
+    and_,
+    or_,
+    not_,
+    delete,
+    update,
+    cast,
+    Text,
+    true,
+)
 from sqlalchemy.exc import OperationalError, ProgrammingError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
@@ -3750,6 +3762,26 @@ def _knowledge_age_column(age_field: str):
     return Knowledge.updated_at if age_field == "updated_at" else Knowledge.created_at
 
 
+def _not_deleted_by_age_rules(table, form_data: PruneDataForm):
+    """Filter for rows the age rules leave to the orphan sweep."""
+    kb_days = form_data.delete_knowledge_bases_older_than_days or 0
+    if table is Chat and form_data.days is not None:
+        conditions = [Chat.updated_at < int(time.time()) - form_data.days * 86400]
+        if form_data.exempt_archived_chats:
+            conditions.append(or_(Chat.archived == False, Chat.archived == None))
+        if form_data.exempt_pinned_chats and hasattr(Chat, "pinned"):
+            conditions.append(or_(Chat.pinned == False, Chat.pinned == None))
+        if form_data.exempt_chats_in_folders and hasattr(Chat, "folder_id"):
+            conditions.append(Chat.folder_id == None)
+    elif table is Knowledge and kb_days > 0:
+        age_column = _knowledge_age_column(form_data.knowledge_bases_age_field)
+        conditions = [age_column < int(time.time()) - kb_days * 86400]
+    else:
+        return true()
+    # The age columns are nullable, and a NULL age is not old to the age delete
+    return not_(func.coalesce(and_(*conditions), False))
+
+
 async def count_old_knowledge_bases(
     days: Optional[int], age_field: str = "created_at"
 ) -> int:
@@ -4027,14 +4059,15 @@ async def count_orphaned_records(
                     # SQL IN() binds one parameter per user (breaks past
                     # SQLite's limit on large instances) and SQL NOT IN never
                     # counts NULL owners while execution deletes them.
+                    not_aged_out = _not_deleted_by_age_rules(table_cls, form_data)
                     _prog_stage(
                         f"Counting orphaned {key.replace('_', ' ')}",
-                        await _count_rows(db, table_cls),
+                        await _count_rows(db, table_cls, not_aged_out),
                     )
                     exempt_ids = _shared_exempt.get(key, set())
                     n = 0
                     async for _rid, row_uid in stream_rows(
-                        db, table_cls.id, user_id_col
+                        db, table_cls.id, user_id_col, filter_clause=not_aged_out
                     ):
                         _prog_tick()
                         if (
@@ -4776,13 +4809,19 @@ async def get_preview_detail_page(
         label_column=None,
     ):
         active_user_ids, exempt_ids = await liveness_sets(shared_resource_type, shared_exempt)
-        resume_clause = model.id > resume_after if resume_after is not None else None
+        resume_clause = model.id > resume_after if resume_after is not None else true()
         async with get_async_db_context() as db:
             async def matching_rows():
                 columns = (model.id, owner_column)
                 if label_column is not None:
                     columns += (label_column,)
-                async for row in stream_rows(db, *columns, filter_clause=resume_clause):
+                async for row in stream_rows(
+                    db,
+                    *columns,
+                    filter_clause=and_(
+                        resume_clause, _not_deleted_by_age_rules(model, form_data)
+                    ),
+                ):
                     record_id, owner_id = row[:2]
                     if (
                         str(owner_id) not in active_user_ids
