@@ -3295,9 +3295,18 @@ async def get_kb_file_ids(kb_ids: Set[str]) -> dict:
 
     async def _scan():
         async with get_async_db_context() as db:
-            _prog_stage("Scanning knowledge base links", await _count_rows(db, KnowledgeFile))
+            # The run's junction cleanup already removes links to deleted files; this keeps the preview in step
+            existing_file_links = KnowledgeFile.file_id.in_(select(File.id))
+            _prog_stage(
+                "Scanning knowledge base links",
+                await _count_rows(db, KnowledgeFile, existing_file_links),
+            )
             async for _row_id, kb_id, file_id in stream_rows(
-                db, KnowledgeFile.id, KnowledgeFile.knowledge_id, KnowledgeFile.file_id
+                db,
+                KnowledgeFile.id,
+                KnowledgeFile.knowledge_id,
+                KnowledgeFile.file_id,
+                filter_clause=existing_file_links,
             ):
                 _prog_tick()
                 linked = kb_file_ids.get(str(kb_id))
@@ -3336,8 +3345,19 @@ async def get_stale_kb_file_ids(vector_cleaner, active_kb_ids: Set[str], grace_h
     return stale
 
 
+def _dangling_row_statement(
+    table: str, column: str, parent_table: str
+) -> Tuple[str, str]:
+    """(table, DELETE of rows whose column points at a missing parent row)."""
+    return (
+        table,
+        f"DELETE FROM {table} WHERE NOT EXISTS "
+        f"(SELECT 1 FROM {parent_table} parent WHERE parent.id = {table}.{column})",
+    )
+
+
 async def cleanup_dangling_junction_rows() -> int:
-    """Delete chat_file/knowledge_file/channel_file rows whose parent is gone.
+    """Delete junction rows whose parent or file is gone.
 
     SQLite never enforces the declared ON DELETE CASCADE (Open WebUI does not
     set PRAGMA foreign_keys), so chat/KB/channel deletions strand junction
@@ -3358,6 +3378,12 @@ async def cleanup_dangling_junction_rows() -> int:
             "channel_file",
             "DELETE FROM channel_file WHERE channel_id NOT IN (SELECT id FROM channel)",
         ),
+        _dangling_row_statement("chat_file", "file_id", "file"),
+        _dangling_row_statement("knowledge_file", "file_id", "file"),
+        _dangling_row_statement("channel_file", "file_id", "file"),
+        _dangling_row_statement("knowledge_directory", "knowledge_id", "knowledge"),
+        _dangling_row_statement("channel_member", "channel_id", "channel"),
+        _dangling_row_statement("channel_webhook", "channel_id", "channel"),
     ]
     for table, stmt in statements:
         try:
