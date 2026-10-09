@@ -6724,6 +6724,7 @@ _STATE = {
     "redis_tried": False,
     "function_id": None,
     "app": None,
+    "full_sweep_pending": False,
 }
 
 
@@ -6885,6 +6886,32 @@ def _combined_lock_release() -> None:
 
 PruneLock.acquire = _combined_lock_acquire
 PruneLock.release = _combined_lock_release
+
+
+def _set_full_sweep_pending(pending: bool) -> None:
+    """Kept where the claims live, so whichever worker wins the next pass sees it."""
+    r = _redis()
+    if r is not None:
+        key = f"{_STATE['redis_prefix']}:prune:full-sweep-pending"
+        try:
+            if pending:
+                r.set(key, "1")
+            else:
+                r.delete(key)
+            return
+        except Exception as e:
+            log.warning(f"prune: Redis pending flag failed, using local fallback: {e}")
+    _STATE["full_sweep_pending"] = pending
+
+
+def _full_sweep_pending() -> bool:
+    r = _redis()
+    if r is not None:
+        try:
+            return bool(r.exists(f"{_STATE['redis_prefix']}:prune:full-sweep-pending"))
+        except Exception as e:
+            log.warning(f"prune: Redis pending flag failed, using local fallback: {e}")
+    return _STATE["full_sweep_pending"]
 
 
 def _unclaim(key: str) -> None:
@@ -7054,22 +7081,41 @@ async def _pass_users(v: dict):
         log.info("prune: users pass skipped, prune lock held")
         return
     try:
-        await delete_inactive_users(
+        deleted_users = await delete_inactive_users(
             inactive_days,
             _make_cleaner(),
             v["exempt_admin_users"],
             v["exempt_pending_users"],
         )
+        if deleted_users:
+            _set_full_sweep_pending(True)
     finally:
         PruneLock.release()
+    if deleted_users and _claim_full_sweep(v):
+        await _pass_pending_full(v)
 
 
-async def _pass_full(v: dict):
+async def _pass_full(v: dict) -> bool:
     """Full sweep: everything configured, incl. orphan + vector + storage cleanup."""
     form_data = _form_from_valves(v)
     outcome = await run_prune(form_data)
     if not outcome.get("ok"):
         log.error(f"prune: full pass failed: {outcome.get('error')}")
+    else:
+        _set_full_sweep_pending(False)
+    return bool(outcome.get("ok"))
+
+
+async def _pass_pending_full(v: dict, replaced_pass: Optional[str] = None) -> None:
+    """The pending full sweep after deleted accounts; frees its claims unless it succeeds."""
+    succeeded = False
+    try:
+        succeeded = await _pass_full(v)
+    finally:
+        if not succeeded:
+            _unclaim("full-sweep")
+            if replaced_pass:
+                _unclaim(replaced_pass)
 
 
 # ---- one-shot VACUUM (sync body from standalone Stage 5, run in a thread) ----
@@ -7115,6 +7161,25 @@ def _run_vacuum_sync(vector_cleaner):
 def _full_sweep_ttl(v: dict) -> int:
     hours = int(v["full_sweep_interval_hours"] or 0)
     return hours * 3600 if hours > 0 else 600
+
+
+def _claim_full_sweep(v: dict) -> bool:
+    """Interval claim for an event-triggered full sweep; never with interval 0 (startup only)."""
+    return int(v["full_sweep_interval_hours"] or 0) > 0 and _claim(
+        "full-sweep", _full_sweep_ttl(v)
+    )
+
+
+def _spawn_targeted_pass(v: dict, name: str, factory: Callable) -> None:
+    """Spawn a chats or users pass, or the pending full sweep instead, which runs both."""
+    if _full_sweep_pending() and _claim_full_sweep(v):
+        _spawn(
+            "full",
+            lambda: _pass_pending_full(v, name),
+            on_skip=lambda: (_unclaim("full-sweep"), _unclaim(name)),
+        )
+    else:
+        _spawn(name, factory, on_skip=lambda: _unclaim(name))
 
 
 # ---- manual runs (UI/API); same engine, with per-run log capture ----
@@ -7480,11 +7545,11 @@ class Event:
         )
         event_recheck_minutes: int = Field(
             default=60,
-            description="At most one automatic recheck of old chats and inactive users per this many minutes, triggered by normal activity such as logins and chat updates. 0 = never recheck on events. Full sweeps are controlled by Full Sweep Interval Hours instead.",
+            description="At most one automatic recheck of old chats and inactive users per this many minutes, triggered by normal activity such as logins and chat updates. 0 = never recheck on events. Full sweeps are controlled by Full Sweep Interval Hours instead; a full sweep still pending after inactive users were deleted runs in place of a recheck.",
         )
         full_sweep_interval_hours: int = Field(
             default=24,
-            description="At most one full cleanup sweep (orphaned records, storage, vector collections) per this many hours, triggered at startup or by user and knowledge base deletions. 0 = sweep only at server startup, on every startup.",
+            description="At most one full cleanup sweep (orphaned records, storage, vector collections) per this many hours, triggered at startup, by user and knowledge base deletions, or after the inactive-user check deleted accounts. 0 = sweep only at server startup, on every startup.",
         )
         orphan_file_grace_hours: int = Field(
             default=24,
@@ -7706,7 +7771,7 @@ class Event:
                 )
                 and _claim("chats", cooldown)
             ):
-                _spawn("chats", lambda: _pass_chats(v), on_skip=lambda: _unclaim("chats"))
+                _spawn_targeted_pass(v, "chats", lambda: _pass_chats(v))
 
         elif name in ("auth.login", "user.created"):
             if (
@@ -7714,14 +7779,10 @@ class Event:
                 and _days(v["inactive_user_days"]) is not None
                 and _claim("users", cooldown)
             ):
-                _spawn("users", lambda: _pass_users(v), on_skip=lambda: _unclaim("users"))
+                _spawn_targeted_pass(v, "users", lambda: _pass_users(v))
 
         elif name in ("user.deleted", "knowledge.deleted", "file.deleted_all"):
-            if (
-                event.get("source") != "prune"
-                and int(v["full_sweep_interval_hours"] or 0) > 0
-                and _claim("full-sweep", _full_sweep_ttl(v))
-            ):
+            if event.get("source") != "prune" and _claim_full_sweep(v):
                 _spawn(
                     "full",
                     lambda: _pass_full(v),
