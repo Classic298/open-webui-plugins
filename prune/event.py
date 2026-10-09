@@ -6101,10 +6101,6 @@ async def run_prune(form_data: PruneDataForm) -> dict:
         log.info(f"Found {len(active_kb_ids)} preserved knowledge bases")
         owner_checks = {}
 
-        active_file_ids, _ = await get_active_file_ids(
-            active_user_ids=active_user_ids, preserved_kb_ids=active_kb_ids
-        )
-
         # Shared exemptions for the orphan loops below: resources a living
         # principal can still reach are kept
         shared_models = (
@@ -6147,33 +6143,6 @@ async def run_prune(form_data: PruneDataForm) -> dict:
         # Stage 3: Delete orphaned database records
         log.info("Deleting orphaned database records")
 
-        deleted_files = 0
-        # A file is orphaned only when unreferenced: a deleted uploader's files
-        # can still back another user's live KB or chat. Fresh uploads get a
-        # grace window (upload and first reference are separate requests).
-        grace_cutoff = int(time.time()) - max(
-            0, int(getattr(form_data, "orphan_file_grace_hours", 0) or 0)
-        ) * 3600
-        async with get_async_db() as db:
-            _prog_stage("Sweeping orphaned files", await _count_rows(db, File))
-            async for fid, _uid, created_at in stream_rows(
-                db, File.id, File.user_id, File.created_at
-            ):
-                _prog_tick()
-                if created_at is not None and created_at > grace_cutoff:
-                    continue
-                file_id = str(fid)
-                if file_id not in active_file_ids and not await _file_is_linked(
-                    file_id
-                ):
-                    if await safe_delete_file_by_id(fid, vector_cleaner, db=db):
-                        deleted_files += 1
-                    await db.commit()
-                    await _pace()
-
-        if deleted_files > 0:
-            log.info(f"Deleted {deleted_files} orphaned files")
-
         deleted_kbs = 0
         if form_data.delete_orphaned_knowledge_bases:
             _prog_stage("Deleting orphaned knowledge bases")
@@ -6188,7 +6157,7 @@ async def run_prune(form_data: PruneDataForm) -> dict:
                     # active_kb_ids folds in live owners, the off-flag and the
                     # shared exemption. The owner_id re-check mirrors the sibling
                     # loops and the count path and closes a TOCTOU window: the
-                    # snapshot predates the (long, throttled) file sweep, so a KB
+                    # snapshot predates the (long, throttled) pass, so a KB
                     # a live user creates mid-pass would otherwise be deleted.
                     if str(kb_id) not in active_kb_ids and await _owner_is_gone(
                         owner_id, active_user_ids, owner_checks
@@ -6459,17 +6428,47 @@ async def run_prune(form_data: PruneDataForm) -> dict:
             log.info("Skipping age-based channel message deletion (disabled)")
 
         # Stage 4: Clean up orphaned physical files and vector collections.
-        # Recompute preservation sets after Stage 3 deletions — files that
+        # Compute preservation sets after Stage 3 deletions — files that
         # were only referenced by now-deleted chats/KBs should no longer
         # be considered active.  This is safe with the streaming-based
         # get_active_file_ids() that replaced the OOM-prone ORM version.
-        log.info("Recomputing preservation sets after deletions")
-        _prog_stage("Recomputing preservation set")
+        # Again: KBs, chats and channels deleted above left their link rows behind
+        _prog_stage("Cleaning junction tables")
+        await cleanup_dangling_junction_rows()
+        log.info("Computing preservation sets after deletions")
+        _prog_stage("Computing preservation set")
         active_user_ids = {str(user.id) for user in (await Users.get_users())["users"]}
         active_kb_ids = await get_preserved_kb_ids(form_data, active_user_ids)
         active_file_ids, _ = await get_active_file_ids(
             active_user_ids=active_user_ids, preserved_kb_ids=active_kb_ids
         )
+
+        deleted_files = 0
+        # A file is orphaned only when unreferenced: a deleted uploader's files
+        # can still back another user's live KB or chat. Fresh uploads get a
+        # grace window (upload and first reference are separate requests).
+        grace_cutoff = int(time.time()) - max(
+            0, int(getattr(form_data, "orphan_file_grace_hours", 0) or 0)
+        ) * 3600
+        async with get_async_db() as db:
+            _prog_stage("Sweeping orphaned files", await _count_rows(db, File))
+            async for fid, _uid, created_at in stream_rows(
+                db, File.id, File.user_id, File.created_at
+            ):
+                _prog_tick()
+                if created_at is not None and created_at > grace_cutoff:
+                    continue
+                file_id = str(fid)
+                if file_id not in active_file_ids and not await _file_is_linked(
+                    file_id
+                ):
+                    if await safe_delete_file_by_id(fid, vector_cleaner, db=db):
+                        deleted_files += 1
+                    await db.commit()
+                    await _pace()
+
+        if deleted_files > 0:
+            log.info(f"Deleted {deleted_files} orphaned files")
 
         log.info("Cleaning up orphaned physical files")
 
@@ -6494,8 +6493,8 @@ async def run_prune(form_data: PruneDataForm) -> dict:
         _prog_stage("Cleaning vector collections")
         warnings = []
         # Vector collections follow file ROWS (like storage bytes): any row
-        # that survived stage 3 (referenced, grace-protected, or deferred to
-        # the next run) keeps its embeddings.
+        # that survived the file sweep (referenced or grace-protected) keeps
+        # its embeddings.
         referenced = {}
         load_active_ids = _blocking_on_loop(
             lambda: get_current_active_ids(form_data, referenced)
