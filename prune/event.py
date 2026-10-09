@@ -3750,16 +3750,22 @@ async def count_old_knowledge_bases(
         return 0
 
 
-async def _dereference_knowledge_from_models(deleted_kb_ids: Set[str]) -> int:
-    """Strip deleted KB ids from every model's meta.knowledge list.
+def _knowledge_base_ref_id(entry) -> Optional[str]:
+    """The KB id a model knowledge entry points at, else None."""
+    if not isinstance(entry, dict) or "collection_name" in entry or not entry.get("id"):
+        return None
+    if entry.get("type", "collection") != "collection":
+        return None
+    return str(entry["id"])
 
-    Mirrors Open WebUI's delete_knowledge_by_id router so age-deleted KBs do
+
+async def _dereference_knowledge_from_models() -> int:
+    """Strip KBs that no longer exist from every model's meta.knowledge list.
+
+    Mirrors Open WebUI's delete_knowledge_by_id router so deleted KBs do
     not leave dangling references in workspace models. Best-effort: a failure
-    here never blocks KB deletion.
+    here never blocks the pass.
     """
-    if not deleted_kb_ids:
-        return 0
-
     updated = 0
     try:
         async with get_async_db() as db:
@@ -3769,10 +3775,27 @@ async def _dereference_knowledge_from_models(deleted_kb_ids: Set[str]) -> int:
                 kb_list = meta.get("knowledge")
                 if not isinstance(kb_list, list) or not kb_list:
                     continue
+                referenced_kb_ids = {
+                    kb_id for kb_id in map(_knowledge_base_ref_id, kb_list) if kb_id
+                }
+                if not referenced_kb_ids:
+                    continue
+                result = await db.execute(
+                    select(Knowledge.id).where(Knowledge.id.in_(referenced_kb_ids))
+                )
+                missing_kb_ids = referenced_kb_ids - {str(row[0]) for row in result}
+                if not missing_kb_ids:
+                    continue
+                # Reread right before writing so an edit made during the run is kept
+                result = await db.execute(select(Model.meta).where(Model.id == mid))
+                meta = result.scalar_one_or_none()
+                kb_list = meta.get("knowledge") if isinstance(meta, dict) else None
+                if not isinstance(kb_list, list):
+                    continue
                 new_list = [
                     k
                     for k in kb_list
-                    if not (isinstance(k, dict) and str(k.get("id")) in deleted_kb_ids)
+                    if _knowledge_base_ref_id(k) not in missing_kb_ids
                 ]
                 if len(new_list) != len(kb_list):
                     new_meta = dict(meta)
@@ -3781,7 +3804,8 @@ async def _dereference_knowledge_from_models(deleted_kb_ids: Set[str]) -> int:
                         update(Model).where(Model.id == mid).values(meta=new_meta)
                     )
                     updated += 1
-            await db.commit()
+                    await db.commit()
+                    await _pace()
         if updated:
             log.info(f"De-referenced deleted knowledge bases from {updated} models")
     except Exception as e:
@@ -3796,9 +3820,9 @@ async def delete_old_knowledge_bases(
 
     DANGER: deletes live, owned, in-use KBs regardless of whether the owner
     still exists — a retention policy, not orphan cleanup. Mirrors Open WebUI's
-    own KB deletion: drops the KB vector collection, the KB row, and removes the
-    KB from any model's meta.knowledge. The KB's now-unreferenced files are
-    reclaimed by the normal orphan sweep that runs afterwards.
+    own KB deletion: drops the KB vector collection and the KB row; the pass
+    then removes it from any model's meta.knowledge. The KB's now-unreferenced
+    files are reclaimed by the normal orphan sweep that runs afterwards.
     """
     # days<=0 would delete every KB (see count_old_knowledge_bases)
     if not days or days <= 0:
@@ -3842,7 +3866,6 @@ async def delete_old_knowledge_bases(
                 )
         except Exception as e:
             log.warning(f"Failed to delete KB metadata embeddings: {e}")
-        await _dereference_knowledge_from_models(set(deleted_ids))
         log.info(
             f"Deleted {deleted} knowledge bases older than {days} days (by {age_field})"
         )
@@ -6181,15 +6204,14 @@ async def run_prune(form_data: PruneDataForm) -> dict:
                 await asyncio.to_thread(
                     vector_cleaner.delete_kb_metadata, deleted_kb_ids
                 )
-                # Strip the deleted KBs from every model's meta.knowledge, as
-                # the age-based KB path already does — ghost-owned KBs can be
-                # attached to active users' models.
-                await _dereference_knowledge_from_models(set(deleted_kb_ids))
 
             if deleted_kbs > 0:
                 log.info(f"Deleted {deleted_kbs} orphaned knowledge bases")
         else:
             log.info("Skipping knowledge base deletion (disabled)")
+
+        # Every pass, so links a cancelled or crashed pass left behind heal too
+        await _dereference_knowledge_from_models()
 
         deleted_others = 0
 
