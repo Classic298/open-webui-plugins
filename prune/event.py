@@ -879,6 +879,9 @@ class ChromaDatabaseCleaner(VectorDatabaseCleaner):
         self.vector_db_client = vector_db_client
         self.vector_dir = Path(cache_dir).parent / "vector_db"
         self.chroma_db_path = self.vector_dir / "chroma.sqlite3"
+        # Folders of collections this cleaner deleted; the client leaves them on disk
+        self.deleted_segment_dirs: Set[str] = set()
+        self._segment_dirs_by_name: Optional[dict[str, Set[str]]] = None
 
     def _collection_file_ids(self, collection_name: str) -> Set[str]:
         """Metadata-only fetch; the unified client's get() would load every document too."""
@@ -983,8 +986,8 @@ class ChromaDatabaseCleaner(VectorDatabaseCleaner):
         errors = []
 
         # Delete mapped orphans through the client first: Chroma releases its
-        # segment handles and removes the directory itself, which plain rmtree
-        # cannot do on Windows (an open data_level0.bin locks the directory).
+        # segment handles, so the folder it leaves can be removed below; plain
+        # rmtree fails on Windows (an open data_level0.bin locks the directory).
         client = getattr(self, "vector_db_client", None)
         if client is not None:
             for dir_uuid, collection_name in list(uuid_to_collection.items()):
@@ -994,7 +997,7 @@ class ChromaDatabaseCleaner(VectorDatabaseCleaner):
                     client.delete_collection(collection_name=collection_name)
                     deleted_count += 1
                     _prog_tick()
-                    uuid_to_collection.pop(dir_uuid, None)
+                    self.deleted_segment_dirs.add(dir_uuid)
                     log.info(f"Deleted orphaned ChromaDB collection: {collection_name}")
                 except Exception as e:
                     # Fall through to the directory sweep below
@@ -1002,7 +1005,7 @@ class ChromaDatabaseCleaner(VectorDatabaseCleaner):
 
         # Then clean up orphaned database records
         try:
-            deleted_count += self._cleanup_orphaned_database_records()
+            self._cleanup_orphaned_database_records()
         except Exception as e:
             error_msg = f"ChromaDB database cleanup failed: {e}"
             log.error(error_msg)
@@ -1034,7 +1037,9 @@ class ChromaDatabaseCleaner(VectorDatabaseCleaner):
                 collection_name = uuid_to_collection.get(dir_uuid)
 
                 # Delete if no corresponding collection name or collection is not expected
-                if collection_name is None:
+                if dir_uuid in self.deleted_segment_dirs:
+                    rmtree_or_defer(collection_dir, f"(deleted collection) {dir_uuid}")
+                elif collection_name is None:
                     deleted_count += rmtree_or_defer(collection_dir, f"(no mapping) {dir_uuid}")
                 elif collection_name not in expected_collections:
                     deleted_count += rmtree_or_defer(collection_dir, f"{collection_name} ({dir_uuid})")
@@ -1061,7 +1066,9 @@ class ChromaDatabaseCleaner(VectorDatabaseCleaner):
         try:
             # Attempt to delete via ChromaDB client first
             try:
+                segment_dirs = self._segment_dirs(collection_name)
                 self.vector_db_client.delete_collection(collection_name=collection_name)
+                self.deleted_segment_dirs.update(segment_dirs)
                 log.debug(f"Deleted ChromaDB collection via client: {collection_name}")
             except Exception as e:
                 log.debug(
@@ -1103,6 +1110,20 @@ class ChromaDatabaseCleaner(VectorDatabaseCleaner):
         expected_collections.add(KNOWLEDGE_BASES_COLLECTION)
 
         return expected_collections
+
+    def _segment_dirs(self, collection_name: str) -> Set[str]:
+        """Folder names of one collection's vector segments."""
+        if not self.chroma_db_path.exists():
+            return set()
+        if self._segment_dirs_by_name is None:
+            # Read once per run; a collection created later is swept as unmapped
+            mappings = self._get_collection_mappings()
+            if not mappings:
+                return set()  # a failed read is retried on the next call
+            self._segment_dirs_by_name = {}
+            for dir_uuid, name in mappings.items():
+                self._segment_dirs_by_name.setdefault(name, set()).add(dir_uuid)
+        return self._segment_dirs_by_name.get(collection_name, set())
 
     def _get_collection_mappings(self) -> dict:
         """Get mapping from ChromaDB directory UUID to collection name."""
@@ -1336,6 +1357,9 @@ class ChromaDatabaseCleaner(VectorDatabaseCleaner):
 
 class RemoteChromaDatabaseCleaner(ChromaDatabaseCleaner):
     """ChromaDB on a Chroma server (CHROMA_HTTP_HOST), cleaned through its API."""
+
+    def _segment_dirs(self, collection_name: str) -> Set[str]:
+        return set()  # the server keeps its own folders
 
     def _orphaned_collection_names(
         self, load_active_ids: ActiveIdsLoader
@@ -6018,16 +6042,18 @@ async def run_prune(form_data: PruneDataForm) -> dict:
                 active_file_ids, form_data.orphan_file_grace_hours
             )
             _prog_stage("Scanning vector collections")
+            # A KB or user the run deletes takes its collection along; counted there
+            all_kb_ids = set(await get_kb_user_map())
             orphaned_vector_collections = await asyncio.to_thread(
                 vector_cleaner.count_orphaned_collections,
                 all_file_row_ids,
-                active_kb_ids | hash_based_collections,
-                active_user_ids,
+                all_kb_ids | hash_based_collections,
+                {str(user.id) for user in all_users},
             )
             _prog_stage("Checking the knowledge-base search index")
             orphaned_kb_metadata = (
                 await asyncio.to_thread(
-                    vector_cleaner.count_orphaned_kb_metadata, active_kb_ids
+                    vector_cleaner.count_orphaned_kb_metadata, all_kb_ids
                 )
                 if form_data.delete_orphaned_kb_metadata
                 else 0
