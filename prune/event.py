@@ -3,8 +3,8 @@ title: Prune
 author: classic298
 author_url: https://github.com/Classic298
 funding_url: https://github.com/Classic298/prune-open-webui
-version: 0.11.0
-required_open_webui_version: 0.10.2
+version: 0.12.0
+required_open_webui_version: 0.11.3
 description: Automatic, throttled database and storage cleanup. Configure retention via Valves (0 = disabled); pruning runs event-driven on one worker only, slowly, so a live instance stays responsive.
 """
 # Single-file Event function port of https://github.com/Classic298/prune-open-webui.
@@ -17,6 +17,7 @@ description: Automatic, throttled database and storage cleanup. Configure retent
 import asyncio
 from pydantic import BaseModel, Field
 from fastapi import APIRouter, BackgroundTasks, Depends, Request, Response
+from fastapi import HTTPException
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 
 # Global throttles, set from the valves on every event dispatch. Deletion sites
@@ -143,6 +144,7 @@ class PruneDataForm(BaseModel):
     exempt_shared_orphaned_tools: bool = True
     exempt_shared_orphaned_notes: bool = True
     exempt_shared_orphaned_skills: bool = True
+    exempt_shared_orphaned_folders: bool = True
     # Skip files younger than this in orphan sweeps: upload and first
     # reference (message send / KB add) are separate requests.
     orphan_file_grace_hours: int = 24
@@ -310,7 +312,7 @@ import shutil
 import sqlite3
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Generator, Optional, Set, Tuple
+from typing import Callable, Generator, Optional, Set, Tuple
 from abc import ABC, abstractmethod
 from concurrent.futures import ThreadPoolExecutor
 
@@ -428,6 +430,7 @@ class PruneLock:
 UUID_PATTERN = re.compile(
     r"^[a-fA-F0-9]{8}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{12}$"
 )
+HASH_BASED_COLLECTION_PATTERN = re.compile(r"[0-9a-f]{63}")
 
 # Any UUID-shaped substring. JSON columns are scanned as raw text and the
 # matches intersected with the real file ids: a strict superset of the old
@@ -438,8 +441,20 @@ UUID_ANYWHERE_PATTERN = re.compile(
     r"[a-fA-F0-9]{8}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{12}"
 )
 
+# Hash-based collections hold attached web pages; keep those a chat references.
+HASH_BASED_COLLECTION_REF_PATTERN = re.compile(
+    rf'"collection_name":\s*"({HASH_BASED_COLLECTION_PATTERN.pattern})"'
+)
 
-def collect_file_ids_from_text(text_val, out: Set[str], valid_ids: Set[str], odd_ids=()):
+
+def collect_file_ids_from_text(
+    text_val,
+    out: Set[str],
+    valid_ids: Set[str],
+    odd_ids=(),
+    *,
+    hash_based_collections: Set[str],
+):
     """Collect referenced file ids from a JSON column's raw text."""
     if not text_val:
         return
@@ -447,6 +462,7 @@ def collect_file_ids_from_text(text_val, out: Set[str], valid_ids: Set[str], odd
         text_val = text_val.decode("utf-8", "ignore")  # some drivers CAST json to bytes
     elif not isinstance(text_val, str):
         text_val = str(text_val)
+    hash_based_collections.update(HASH_BASED_COLLECTION_REF_PATTERN.findall(text_val))
     out.update(valid_ids.intersection(UUID_ANYWHERE_PATTERN.findall(text_val)))
     # A non-UUID id with special chars stores escaped in json, raw in jsonb; match
     # both forms. Over-matching only ever preserves a file.
@@ -462,12 +478,19 @@ def _collect_file_ids_from_texts(text_values, valid_ids, odd_ids=()):
     CPU-bound and would otherwise starve the request loop on a live instance
     during a manual preview or run."""
     found: Set[str] = set()
+    hash_based_collections: Set[str] = set()
     for text_val in text_values:
         try:
-            collect_file_ids_from_text(text_val, found, valid_ids, odd_ids)
+            collect_file_ids_from_text(
+                text_val,
+                found,
+                valid_ids,
+                odd_ids,
+                hash_based_collections=hash_based_collections,
+            )
         except Exception as e:
             log.debug(f"Error scanning row text: {e}")
-    return found
+    return found, hash_based_collections
 
 
 # Open WebUI stores one metadata embedding per knowledge base (its name +
@@ -485,6 +508,9 @@ def _file_ids_from_metadatas(metadatas) -> Set[str]:
             if file_id:
                 file_ids.add(str(file_id))
     return file_ids
+
+
+ActiveIdsLoader = Callable[[], Tuple[Set[str], Set[str], Set[str]]]
 
 
 class VectorDatabaseCleaner(ABC):
@@ -523,18 +549,13 @@ class VectorDatabaseCleaner(ABC):
 
     @abstractmethod
     def cleanup_orphaned_collections(
-        self,
-        active_file_ids: Set[str],
-        active_kb_ids: Set[str],
-        active_user_ids: Optional[Set[str]] = None,
+        self, load_active_ids: ActiveIdsLoader
     ) -> tuple[int, Optional[str]]:
         """
         Actually delete orphaned vector collections.
 
         Args:
-            active_file_ids: Set of file IDs that are still referenced
-            active_kb_ids: Set of knowledge base IDs that are still active
-            active_user_ids: Set of user IDs that are still active (optional, for multitenancy)
+            load_active_ids: Reads the active (file, KB, user) ids; call it only after listing the store
 
         Returns:
             Tuple of (deleted_count, error_message)
@@ -625,11 +646,14 @@ class VectorDatabaseCleaner(ABC):
             return 0
         return sum(1 for kb_id in present if kb_id not in active_kb_ids)
 
-    def cleanup_orphaned_kb_metadata(self, active_kb_ids: Set[str]) -> int:
+    def cleanup_orphaned_kb_metadata(
+        self, load_active_kb_ids: Callable[[], Set[str]]
+    ) -> int:
         """Delete KB metadata entries whose knowledge base no longer exists."""
         present = self._kb_metadata_ids()
         if not present:
             return 0
+        active_kb_ids = load_active_kb_ids()
         orphaned = [kb_id for kb_id in present if kb_id not in active_kb_ids]
         if not orphaned:
             return 0
@@ -799,17 +823,18 @@ class VectorDatabaseCleaner(ABC):
             total += sum(1 for pid in present if pid not in valid)
         return total
 
-    def cleanup_orphaned_memories(self, valid_ids_by_user: dict) -> int:
+    def cleanup_orphaned_memories(
+        self, user_ids: Set[str], load_memory_ids: Callable[[str], Set[str]]
+    ) -> int:
         """Delete memories whose database row no longer exists, per active user."""
         client = getattr(self, "vector_db_client", None)
         if client is None:
             return 0
-        valid_ids_by_user = valid_ids_by_user or {}
         deleted = 0
-        for uid, present in self._iter_present_memory_ids(valid_ids_by_user.keys()):
+        for uid, present in self._iter_present_memory_ids(user_ids):
             if not present:
                 continue
-            valid = valid_ids_by_user.get(uid) or set()
+            valid = load_memory_ids(uid)
             orphans = [pid for pid in present if pid not in valid]
             if not orphans:
                 continue
@@ -854,6 +879,9 @@ class ChromaDatabaseCleaner(VectorDatabaseCleaner):
         self.vector_db_client = vector_db_client
         self.vector_dir = Path(cache_dir).parent / "vector_db"
         self.chroma_db_path = self.vector_dir / "chroma.sqlite3"
+        # Folders of collections this cleaner deleted; the client leaves them on disk
+        self.deleted_segment_dirs: Set[str] = set()
+        self._segment_dirs_by_name: Optional[dict[str, Set[str]]] = None
 
     def _collection_file_ids(self, collection_name: str) -> Set[str]:
         """Metadata-only fetch; the unified client's get() would load every document too."""
@@ -934,26 +962,32 @@ class ChromaDatabaseCleaner(VectorDatabaseCleaner):
             log.debug(f"Error iterating orphaned ChromaDB collections: {e}")
 
     def cleanup_orphaned_collections(
-        self,
-        active_file_ids: Set[str],
-        active_kb_ids: Set[str],
-        active_user_ids: Optional[Set[str]] = None,
+        self, load_active_ids: ActiveIdsLoader
     ) -> tuple[int, Optional[str]]:
         """Actually delete orphaned ChromaDB collections and database records."""
         if not self.chroma_db_path.exists():
             return (0, None)
 
-        expected_collections = self._build_expected_collections(
-            active_file_ids, active_kb_ids, active_user_ids
-        )
-        uuid_to_collection = self._get_collection_mappings()
+        try:
+            # List before reading active ids: later additions are never candidates
+            collection_dirs = [
+                path
+                for path in self.vector_dir.iterdir()
+                if path.is_dir() and not path.name.startswith(".")
+            ]
+            uuid_to_collection = self._get_collection_mappings()
+            expected_collections = self._build_expected_collections(*load_active_ids())
+        except Exception as e:
+            error_msg = f"ChromaDB cleanup failed: {e}"
+            log.error(error_msg)
+            return (0, error_msg)
 
         deleted_count = 0
         errors = []
 
         # Delete mapped orphans through the client first: Chroma releases its
-        # segment handles and removes the directory itself, which plain rmtree
-        # cannot do on Windows (an open data_level0.bin locks the directory).
+        # segment handles, so the folder it leaves can be removed below; plain
+        # rmtree fails on Windows (an open data_level0.bin locks the directory).
         client = getattr(self, "vector_db_client", None)
         if client is not None:
             for dir_uuid, collection_name in list(uuid_to_collection.items()):
@@ -963,7 +997,7 @@ class ChromaDatabaseCleaner(VectorDatabaseCleaner):
                     client.delete_collection(collection_name=collection_name)
                     deleted_count += 1
                     _prog_tick()
-                    uuid_to_collection.pop(dir_uuid, None)
+                    self.deleted_segment_dirs.add(dir_uuid)
                     log.info(f"Deleted orphaned ChromaDB collection: {collection_name}")
                 except Exception as e:
                     # Fall through to the directory sweep below
@@ -971,7 +1005,7 @@ class ChromaDatabaseCleaner(VectorDatabaseCleaner):
 
         # Then clean up orphaned database records
         try:
-            deleted_count += self._cleanup_orphaned_database_records()
+            self._cleanup_orphaned_database_records()
         except Exception as e:
             error_msg = f"ChromaDB database cleanup failed: {e}"
             log.error(error_msg)
@@ -994,8 +1028,8 @@ class ChromaDatabaseCleaner(VectorDatabaseCleaner):
                 return 0
 
         try:
-            for collection_dir in self.vector_dir.iterdir():
-                if not collection_dir.is_dir() or collection_dir.name.startswith("."):
+            for collection_dir in collection_dirs:
+                if not collection_dir.is_dir():
                     continue
 
                 _prog_tick()
@@ -1003,7 +1037,9 @@ class ChromaDatabaseCleaner(VectorDatabaseCleaner):
                 collection_name = uuid_to_collection.get(dir_uuid)
 
                 # Delete if no corresponding collection name or collection is not expected
-                if collection_name is None:
+                if dir_uuid in self.deleted_segment_dirs:
+                    rmtree_or_defer(collection_dir, f"(deleted collection) {dir_uuid}")
+                elif collection_name is None:
                     deleted_count += rmtree_or_defer(collection_dir, f"(no mapping) {dir_uuid}")
                 elif collection_name not in expected_collections:
                     deleted_count += rmtree_or_defer(collection_dir, f"{collection_name} ({dir_uuid})")
@@ -1030,7 +1066,9 @@ class ChromaDatabaseCleaner(VectorDatabaseCleaner):
         try:
             # Attempt to delete via ChromaDB client first
             try:
+                segment_dirs = self._segment_dirs(collection_name)
                 self.vector_db_client.delete_collection(collection_name=collection_name)
+                self.deleted_segment_dirs.update(segment_dirs)
                 log.debug(f"Deleted ChromaDB collection via client: {collection_name}")
             except Exception as e:
                 log.debug(
@@ -1072,6 +1110,20 @@ class ChromaDatabaseCleaner(VectorDatabaseCleaner):
         expected_collections.add(KNOWLEDGE_BASES_COLLECTION)
 
         return expected_collections
+
+    def _segment_dirs(self, collection_name: str) -> Set[str]:
+        """Folder names of one collection's vector segments."""
+        if not self.chroma_db_path.exists():
+            return set()
+        if self._segment_dirs_by_name is None:
+            # Read once per run; a collection created later is swept as unmapped
+            mappings = self._get_collection_mappings()
+            if not mappings:
+                return set()  # a failed read is retried on the next call
+            self._segment_dirs_by_name = {}
+            for dir_uuid, name in mappings.items():
+                self._segment_dirs_by_name.setdefault(name, set()).add(dir_uuid)
+        return self._segment_dirs_by_name.get(collection_name, set())
 
     def _get_collection_mappings(self) -> dict:
         """Get mapping from ChromaDB directory UUID to collection name."""
@@ -1303,6 +1355,77 @@ class ChromaDatabaseCleaner(VectorDatabaseCleaner):
             return -1  # Signal FTS cleanup was skipped
 
 
+class RemoteChromaDatabaseCleaner(ChromaDatabaseCleaner):
+    """ChromaDB on a Chroma server (CHROMA_HTTP_HOST), cleaned through its API."""
+
+    def _segment_dirs(self, collection_name: str) -> Set[str]:
+        return set()  # the server keeps its own folders
+
+    def _orphaned_collection_names(
+        self, load_active_ids: ActiveIdsLoader
+    ) -> Optional[list[str]]:
+        """Orphans among Open WebUI-named collections; None if listing failed."""
+        try:
+            collections = self.vector_db_client.client.list_collections()
+        except Exception as e:
+            log.error(f"ChromaDB collection listing failed: {e}")
+            return None
+        expected_collections = self._build_expected_collections(*load_active_ids())
+        return [
+            collection.name
+            for collection in collections
+            if collection.name not in expected_collections
+            and (
+                collection.name.startswith(("file-", "user-memory-", "web-search-"))
+                or UUID_PATTERN.match(collection.name)
+                or HASH_BASED_COLLECTION_PATTERN.fullmatch(collection.name)
+            )
+        ]
+
+    def count_orphaned_collections(
+        self,
+        active_file_ids: Set[str],
+        active_kb_ids: Set[str],
+        active_user_ids: Optional[Set[str]] = None,
+    ) -> int:
+        """Count orphaned collections on the Chroma server for preview."""
+        orphaned_collections = self._orphaned_collection_names(
+            lambda: (active_file_ids, active_kb_ids, active_user_ids)
+        )
+        return len(orphaned_collections or [])
+
+    def cleanup_orphaned_collections(
+        self, load_active_ids: ActiveIdsLoader
+    ) -> tuple[int, Optional[str]]:
+        """Delete orphaned collections through the Chroma server."""
+        try:
+            orphaned_collections = self._orphaned_collection_names(load_active_ids)
+        except Exception as e:
+            error_msg = f"ChromaDB cleanup failed: {e}"
+            log.error(error_msg)
+            return (0, error_msg)
+        if orphaned_collections is None:
+            return (0, "ChromaDB collection listing failed")
+
+        deleted_count = 0
+        errors = []
+        for collection_name in orphaned_collections:
+            _prog_tick()
+            try:
+                self.vector_db_client.delete_collection(
+                    collection_name=collection_name
+                )
+                deleted_count += 1
+                log.info(f"Deleted orphaned ChromaDB collection: {collection_name}")
+            except Exception as e:
+                errors.append(f"Failed to delete collection {collection_name}: {e}")
+                log.error(errors[-1])
+
+        if errors:
+            return (deleted_count, "; ".join(errors))
+        return (deleted_count, None)
+
+
 class PGVectorDatabaseCleaner(VectorDatabaseCleaner):
     """
     PGVector database cleanup implementation.
@@ -1347,7 +1470,7 @@ class PGVectorDatabaseCleaner(VectorDatabaseCleaner):
 
         try:
             orphaned_collections = self._get_orphaned_collections(
-                active_file_ids, active_kb_ids, active_user_ids
+                lambda: (active_file_ids, active_kb_ids, active_user_ids)
             )
             self.session.rollback()  # Read-only transaction
             return len(orphaned_collections)
@@ -1370,7 +1493,7 @@ class PGVectorDatabaseCleaner(VectorDatabaseCleaner):
 
         try:
             orphaned_collections = self._get_orphaned_collections(
-                active_file_ids, active_kb_ids, active_user_ids
+                lambda: (active_file_ids, active_kb_ids, active_user_ids)
             )
             self.session.rollback()
             for name in orphaned_collections:
@@ -1381,10 +1504,7 @@ class PGVectorDatabaseCleaner(VectorDatabaseCleaner):
             log.debug(f"Error iterating orphaned PGVector collections: {e}")
 
     def cleanup_orphaned_collections(
-        self,
-        active_file_ids: Set[str],
-        active_kb_ids: Set[str],
-        active_user_ids: Optional[Set[str]] = None,
+        self, load_active_ids: ActiveIdsLoader
     ) -> tuple[int, Optional[str]]:
         """
         Delete orphaned PGVector collections using the existing client's delete method.
@@ -1398,9 +1518,7 @@ class PGVectorDatabaseCleaner(VectorDatabaseCleaner):
             return (0, error_msg)
 
         try:
-            orphaned_collections = self._get_orphaned_collections(
-                active_file_ids, active_kb_ids, active_user_ids
-            )
+            orphaned_collections = self._get_orphaned_collections(load_active_ids)
 
             if not orphaned_collections:
                 log.debug("No orphaned PGVector collections found")
@@ -1435,7 +1553,7 @@ class PGVectorDatabaseCleaner(VectorDatabaseCleaner):
             # and cannot be referenced from the vector database.
             orphaned_chunks_deleted = 0
             try:
-                if self.session and active_file_ids:
+                if self.session:
                     log.debug("Cleaning orphaned chunks from active KB collections")
                     # First, find all distinct file_ids referenced by chunks
                     file_id_result = self.session.execute(
@@ -1447,6 +1565,9 @@ class PGVectorDatabaseCleaner(VectorDatabaseCleaner):
                     """)
                     )
                     referenced_file_ids = {row[0] for row in file_id_result}
+                    self.session.rollback()
+                    # Reread after listing the chunks: a file embedded since keeps them
+                    active_file_ids, _, _ = load_active_ids()
 
                     # Determine which referenced file_ids are orphaned (not in active set)
                     orphaned_file_ids = referenced_file_ids - active_file_ids
@@ -1466,24 +1587,6 @@ class PGVectorDatabaseCleaner(VectorDatabaseCleaner):
                             )
                             orphaned_chunks_deleted += result.rowcount
                         self.session.commit()
-                    if orphaned_chunks_deleted > 0:
-                        log.info(
-                            f"Deleted {orphaned_chunks_deleted} orphaned chunks from active collections"
-                        )
-                elif self.session:
-                    log.debug(
-                        "Cleaning orphaned chunks from active KB collections (no active files)"
-                    )
-                    # If there are no active file IDs, all chunks with file_id metadata are orphaned
-                    result = self.session.execute(
-                        text("""
-                        DELETE FROM document_chunk dc
-                        WHERE dc.vmetadata ? 'file_id'
-                          AND dc.vmetadata->>'file_id' IS NOT NULL
-                    """)
-                    )
-                    orphaned_chunks_deleted = result.rowcount
-                    self.session.commit()
                     if orphaned_chunks_deleted > 0:
                         log.info(
                             f"Deleted {orphaned_chunks_deleted} orphaned chunks from active collections"
@@ -1524,41 +1627,34 @@ class PGVectorDatabaseCleaner(VectorDatabaseCleaner):
             log.error(f"Error deleting PGVector collection '{collection_name}': {e}")
             return False
 
-    def _get_orphaned_collections(
-        self,
-        active_file_ids: Set[str],
-        active_kb_ids: Set[str],
-        active_user_ids: Optional[Set[str]] = None,
-    ) -> Set[str]:
+    def _get_orphaned_collections(self, load_active_ids: ActiveIdsLoader) -> Set[str]:
         """
         Find collections that exist in PGVector but are no longer referenced.
 
         This is the only "complex" part - discovery. The actual deletion is simple!
         """
         try:
-            expected_collections = self._build_expected_collections(
-                active_file_ids, active_kb_ids, active_user_ids
-            )
-
             # Query distinct collection names from document_chunk table
             result = self.session.execute(
                 text("SELECT DISTINCT collection_name FROM document_chunk")
             ).fetchall()
-
-            existing_collections = {row[0] for row in result}
-            orphaned_collections = existing_collections - expected_collections
-
-            log.debug(
-                f"Found {len(existing_collections)} existing collections, "
-                f"{len(expected_collections)} expected, "
-                f"{len(orphaned_collections)} orphaned"
-            )
-
-            return orphaned_collections
-
+            self.session.rollback()  # no open transaction during the reference scan
         except Exception as e:
             log.error(f"Error finding orphaned PGVector collections: {e}")
             return set()
+        # Outside the catch: a failed id read must not look like "no orphans"
+        expected_collections = self._build_expected_collections(*load_active_ids())
+
+        existing_collections = {row[0] for row in result}
+        orphaned_collections = existing_collections - expected_collections
+
+        log.debug(
+            f"Found {len(existing_collections)} existing collections, "
+            f"{len(expected_collections)} expected, "
+            f"{len(orphaned_collections)} orphaned"
+        )
+
+        return orphaned_collections
 
     def _build_expected_collections(
         self,
@@ -1684,9 +1780,9 @@ class PGVectorDatabaseCleaner(VectorDatabaseCleaner):
 
 
 def _ensure_milvus_default_connection():
-    """utility.*/Collection() use pymilvus' global 'default' alias, which the
-    standard-mode Open WebUI client never opens at init (only lazily in
-    query()). Connect it if missing so cleanup works on a fresh process."""
+    """utility.*/Collection() use pymilvus' global 'default' alias, which
+    Open WebUI's Milvus clients (standard and multitenancy) never open.
+    Connect it if missing so cleanup works on a fresh process."""
     try:
         from pymilvus import connections
 
@@ -1782,20 +1878,15 @@ class MilvusDatabaseCleaner(VectorDatabaseCleaner):
             log.debug(f"Error iterating orphaned Milvus collections: {e}")
 
     def cleanup_orphaned_collections(
-        self,
-        active_file_ids: Set[str],
-        active_kb_ids: Set[str],
-        active_user_ids: Optional[Set[str]] = None,
+        self, load_active_ids: ActiveIdsLoader
     ) -> tuple[int, Optional[str]]:
         """Actually delete orphaned Milvus collections."""
         try:
             _ensure_milvus_default_connection()
-            expected_collections = self._build_expected_collections(
-                active_file_ids, active_kb_ids, active_user_ids
-            )
 
             # List all collections
             all_collections = self.vector_db_client.client.list_collections()
+            expected_collections = self._build_expected_collections(*load_active_ids())
 
             deleted_count = 0
             errors = []
@@ -1950,6 +2041,7 @@ class MilvusMultitenancyDatabaseCleaner(VectorDatabaseCleaner):
         in our expected set across all shared collections.
         """
         try:
+            _ensure_milvus_default_connection()
             expected_resource_ids = self._build_expected_resource_ids(
                 active_file_ids, active_kb_ids, active_user_ids
             )
@@ -2025,6 +2117,7 @@ class MilvusMultitenancyDatabaseCleaner(VectorDatabaseCleaner):
     ) -> Generator[Tuple[str, str], None, None]:
         """Yield (resource_id, shared_collection_name) for each orphaned Milvus MT resource."""
         try:
+            _ensure_milvus_default_connection()
             expected_resource_ids = self._build_expected_resource_ids(
                 active_file_ids, active_kb_ids, active_user_ids
             )
@@ -2066,10 +2159,7 @@ class MilvusMultitenancyDatabaseCleaner(VectorDatabaseCleaner):
             log.debug(f"Error iterating orphaned Milvus MT collections: {e}")
 
     def cleanup_orphaned_collections(
-        self,
-        active_file_ids: Set[str],
-        active_kb_ids: Set[str],
-        active_user_ids: Optional[Set[str]] = None,
+        self, load_active_ids: ActiveIdsLoader
     ) -> tuple[int, Optional[str]]:
         """
         Delete orphaned resource_ids from shared collections.
@@ -2078,17 +2168,13 @@ class MilvusMultitenancyDatabaseCleaner(VectorDatabaseCleaner):
         from the shared collections.
         """
         try:
-            expected_resource_ids = self._build_expected_resource_ids(
-                active_file_ids, active_kb_ids, active_user_ids
-            )
-
+            _ensure_milvus_default_connection()
             deleted_count = 0
             errors = []
+            listed_collections = []
 
             # Import pymilvus utilities
             for shared_collection_name in self.shared_collections:
-                if self._skip_shared_collection(shared_collection_name, active_user_ids):
-                    continue
                 if not utility.has_collection(shared_collection_name):
                     continue
 
@@ -2126,12 +2212,23 @@ class MilvusMultitenancyDatabaseCleaner(VectorDatabaseCleaner):
                     log.info(
                         f"Total resource_ids in {shared_collection_name}: {len(all_resource_ids)}"
                     )
+                    listed_collections.append(
+                        (shared_collection_name, collection, all_resource_ids)
+                    )
 
+                except Exception as e:
+                    error_msg = f"Error processing shared collection {shared_collection_name}: {e}"
+                    log.error(error_msg)
+                    errors.append(error_msg)
+
+            expected_resource_ids = self._build_expected_resource_ids(
+                *load_active_ids()
+            )
+            for shared_collection_name, collection, resource_ids in listed_collections:
+                try:
                     # Get unique orphaned resource_ids
                     orphaned_ids = [
-                        rid
-                        for rid in all_resource_ids
-                        if rid not in expected_resource_ids
+                        rid for rid in resource_ids if rid not in expected_resource_ids
                     ]
 
                     log.info(
@@ -2190,6 +2287,7 @@ class MilvusMultitenancyDatabaseCleaner(VectorDatabaseCleaner):
         the appropriate shared collection.
         """
         try:
+            _ensure_milvus_default_connection()
             # Use the reference implementation's _get_collection_and_resource_id logic
             # to determine which shared collection contains this resource_id
             resource_id = collection_name
@@ -2250,7 +2348,7 @@ class MilvusMultitenancyDatabaseCleaner(VectorDatabaseCleaner):
         - Orphaned knowledge bases (KBs deleted from DB)
         - Orphaned user memories (users deleted from DB)
         - Web-search collections (ephemeral cache, not tracked in DB)
-        - Hash-based collections (temporary content hashes, not tracked in DB)
+        - Hash-based collections that no chat references anymore
 
         This matches ChromaDB/PGVector behavior where ONLY DB-tracked items are preserved.
 
@@ -2284,9 +2382,7 @@ class MilvusMultitenancyDatabaseCleaner(VectorDatabaseCleaner):
         # These are NOT in expected set → will be deleted as orphaned ✓
         # Rationale: Ephemeral caches, not tracked in DB, safe to clean
 
-        # HASH_BASED_COLLECTION: {63-char-hex} patterns
-        # These are NOT in expected set → will be deleted as orphaned ✓
-        # Rationale: Temporary content hashes, not tracked in DB, safe to clean
+        # HASH_BASED_COLLECTION: kept only while a chat references it (active_kb_ids)
 
         return expected_resource_ids
 
@@ -2365,19 +2461,13 @@ class QdrantDatabaseCleaner(VectorDatabaseCleaner):
             log.debug(f"Error iterating orphaned Qdrant collections: {e}")
 
     def cleanup_orphaned_collections(
-        self,
-        active_file_ids: Set[str],
-        active_kb_ids: Set[str],
-        active_user_ids: Optional[Set[str]] = None,
+        self, load_active_ids: ActiveIdsLoader
     ) -> tuple[int, Optional[str]]:
         """Delete orphaned Qdrant collections."""
         try:
-            expected_collections = self._build_expected_collections(
-                active_file_ids, active_kb_ids, active_user_ids
-            )
-
             # Get all collections with our prefix
             all_collections = self.client.get_collections().collections
+            expected_collections = self._build_expected_collections(*load_active_ids())
             deleted_count = 0
             errors = []
 
@@ -2461,7 +2551,7 @@ class QdrantMultitenancyDatabaseCleaner(VectorDatabaseCleaner):
     - {prefix}_files - for file-{file_id}
     - {prefix}_knowledge - for {kb_id} (default)
     - {prefix}_web-search - for web-search-{hash} (ephemeral)
-    - {prefix}_hash-based - for {63-char-hex} (temporary)
+    - {prefix}_hash-based - for {63-char-hex}
 
     Each collection stores points with a tenant_id field. Cleanup deletes
     orphaned tenant_ids (not entire collections).
@@ -2627,10 +2717,7 @@ class QdrantMultitenancyDatabaseCleaner(VectorDatabaseCleaner):
             log.debug(f"Error iterating orphaned Qdrant MT tenant_ids: {e}")
 
     def cleanup_orphaned_collections(
-        self,
-        active_file_ids: Set[str],
-        active_kb_ids: Set[str],
-        active_user_ids: Optional[Set[str]] = None,
+        self, load_active_ids: ActiveIdsLoader
     ) -> tuple[int, Optional[str]]:
         """
         Delete orphaned tenant_ids from shared collections.
@@ -2638,19 +2725,9 @@ class QdrantMultitenancyDatabaseCleaner(VectorDatabaseCleaner):
         Uses scroll() for memory-safe iteration and batched deletions.
         """
         try:
-            expected_tenant_ids = self._build_expected_tenant_ids(
-                active_file_ids, active_kb_ids, active_user_ids or set()
-            )
-
-            log.info(
-                f"Qdrant multitenancy cleanup: {len(active_kb_ids)} active KBs, {len(active_file_ids)} active files, {len(active_user_ids or set())} active users"
-            )
-            log.info(
-                f"Qdrant multitenancy cleanup: Built {len(expected_tenant_ids)} expected tenant_ids"
-            )
-
             deleted_count = 0
             errors = []
+            listed_collections = []
 
             for collection_name in self.shared_collections:
                 if not self.client.collection_exists(collection_name=collection_name):
@@ -2688,7 +2765,29 @@ class QdrantMultitenancyDatabaseCleaner(VectorDatabaseCleaner):
                     log.info(
                         f"Total tenant_ids in {collection_name}: {len(all_tenant_ids)}"
                     )
+                    listed_collections.append((collection_name, all_tenant_ids))
 
+                except Exception as e:
+                    error_msg = (
+                        f"Error processing Qdrant collection {collection_name}: {e}"
+                    )
+                    log.error(error_msg)
+                    errors.append(error_msg)
+
+            active_file_ids, active_kb_ids, active_user_ids = load_active_ids()
+            expected_tenant_ids = self._build_expected_tenant_ids(
+                active_file_ids, active_kb_ids, active_user_ids
+            )
+
+            log.info(
+                f"Qdrant multitenancy cleanup: {len(active_kb_ids)} active KBs, {len(active_file_ids)} active files, {len(active_user_ids)} active users"
+            )
+            log.info(
+                f"Qdrant multitenancy cleanup: Built {len(expected_tenant_ids)} expected tenant_ids"
+            )
+
+            for collection_name, all_tenant_ids in listed_collections:
+                try:
                     # Delete orphaned tenant_ids
                     orphaned_tenant_ids = [
                         tid for tid in all_tenant_ids if tid not in expected_tenant_ids
@@ -2801,7 +2900,7 @@ class QdrantMultitenancyDatabaseCleaner(VectorDatabaseCleaner):
         - {kb_id} for knowledge bases
         - user-memory-{user_id} for memories
         - web-search-{hash} (ephemeral - always orphaned)
-        - {63-char-hex} (temporary - always orphaned)
+        - {63-char-hex}
         """
         expected_tenant_ids = set()
 
@@ -2835,7 +2934,7 @@ class QdrantMultitenancyDatabaseCleaner(VectorDatabaseCleaner):
         if kb_ids_sample:
             log.debug(f"Sample KB IDs added as tenant_ids: {kb_ids_sample}")
 
-        # Note: web-search-* and hash-based are ephemeral/temporary
+        # Note: web-search-* are ephemeral
         # They are NOT added to expected set, so they will be cleaned up
 
         return expected_tenant_ids
@@ -2859,10 +2958,7 @@ class NoOpVectorDatabaseCleaner(VectorDatabaseCleaner):
         return 0
 
     def cleanup_orphaned_collections(
-        self,
-        active_file_ids: Set[str],
-        active_kb_ids: Set[str],
-        active_user_ids: Optional[Set[str]] = None,
+        self, load_active_ids: ActiveIdsLoader
     ) -> tuple[int, Optional[str]]:
         """No collections to cleanup for unsupported databases."""
         return (0, None)
@@ -2903,6 +2999,9 @@ def get_vector_database_cleaner(
     vector_db_type = vector_db_type.lower()
 
     if "chroma" in vector_db_type:
+        if CHROMA_HTTP_HOST:
+            log.debug("Using remote ChromaDB cleaner")
+            return RemoteChromaDatabaseCleaner(vector_db_client, cache_dir)
         log.debug("Using ChromaDB cleaner")
         return ChromaDatabaseCleaner(vector_db_client, cache_dir)
     elif "pgvector" in vector_db_type:
@@ -2940,9 +3039,22 @@ import os
 import time
 from pathlib import Path
 from typing import Iterator, Optional, Set, Tuple, Callable, Any
-from sqlalchemy import select, text, func, and_, or_, not_, delete, update, cast, Text
+from sqlalchemy import (
+    select,
+    text,
+    func,
+    and_,
+    or_,
+    not_,
+    delete,
+    update,
+    cast,
+    Text,
+    true,
+)
 from sqlalchemy.exc import OperationalError, ProgrammingError
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import aliased
 
 log = logging.getLogger(__name__)
 
@@ -3070,12 +3182,13 @@ async def _count_rows(db, table, filter_clause=None) -> int:
 
 
 # Direct Open WebUI imports — this module runs inside the Open WebUI process.
-from open_webui.models.users import User, Users
+from open_webui.models.users import User, UserModel, Users
 from open_webui.models.auths import Auths
 from open_webui.models.chats import Chat, Chats, ChatFile
 from open_webui.models.chat_messages import ChatMessage
 from open_webui.models.messages import Message, MessageReaction, Messages
 from open_webui.models.memories import Memory, Memories
+from open_webui.models.oauth_sessions import OAuthSessions
 from open_webui.models.files import File, Files
 from open_webui.models.notes import Note, Notes
 from open_webui.models.prompts import Prompt, Prompts
@@ -3092,11 +3205,17 @@ from open_webui.config import (
     ENABLE_MILVUS_MULTITENANCY_MODE,
 )
 from open_webui.storage.provider import Storage
+from open_webui.events import EVENTS, publish_event
 
 try:
     from open_webui.config import S3_KEY_PREFIX
 except ImportError:
     S3_KEY_PREFIX = ""
+
+try:
+    from open_webui.config import CHROMA_HTTP_HOST
+except ImportError:  # only defined when VECTOR_DB is chroma
+    CHROMA_HTTP_HOST = ""
 
 try:
     from open_webui.models.automations import Automation, AutomationRun
@@ -3127,6 +3246,23 @@ try:
 except ImportError:
     VECTOR_DB_CLIENT = None
     VECTOR_DB = None
+from open_webui.retrieval.vector.main import VectorDBBase
+
+
+try:
+    # The slim image creates its vector client on first use, after this module loads
+    from open_webui.retrieval.vector.factory import get_vector_db_client
+except ImportError:
+
+    def get_vector_db_client():
+        return VECTOR_DB_CLIENT
+
+
+def get_vector_db_client_or_none() -> Optional[VectorDBBase]:
+    try:
+        return get_vector_db_client()
+    except HTTPException:
+        return None
 
 
 def get_sync_engine():
@@ -3181,10 +3317,28 @@ async def get_kb_user_map() -> dict:
     return await retry_on_db_lock(_scan)
 
 
+async def _get_folder_ids_with_subfolders(
+    db: Optional[AsyncSession], folder_ids: Set[str]
+) -> Set[str]:
+    """The given folders plus every folder below them, at any depth."""
+    children_by_parent = {}
+    async for folder_id, parent_id in stream_rows(db, Folder.id, Folder.parent_id):
+        if parent_id:
+            children_by_parent.setdefault(parent_id, []).append(folder_id)
+    seen = set(folder_ids)
+    pending = list(folder_ids)
+    while pending:
+        for child_id in children_by_parent.get(pending.pop(), []):
+            if child_id not in seen:
+                seen.add(child_id)
+                pending.append(child_id)
+    return seen
+
+
 async def get_shared_resource_ids(
     resource_type: str, active_user_ids: Set[str]
 ) -> Set[str]:
-    """Resource ids of the given type that a LIVING principal can still reach.
+    """Resource ids of the given type (folders with their subfolders) that a LIVING principal can still reach.
 
     A grant keeps a resource shared when its principal is a live user, an
     existing group (groups outlive their members), or the public '*' wildcard.
@@ -3218,6 +3372,8 @@ async def get_shared_resource_ids(
                     shared.add(str(rid))
                 elif ptype == "group" and pid_str in live_group_ids:
                     shared.add(str(rid))
+            if resource_type == "folder" and shared:
+                shared = await _get_folder_ids_with_subfolders(db, shared)
             return shared
     except _TABLE_MISSING_ERRORS as e:
         if _is_table_missing_error(e):
@@ -3268,15 +3424,102 @@ async def get_all_file_row_ids() -> Set[str]:
         return {str(fid) async for (fid,) in stream_rows(db, File.id)}
 
 
+async def get_current_active_kb_ids(form_data: PruneDataForm) -> Set[str]:
+    """Preserved KB ids against the current user list."""
+    active_user_ids = {str(user.id) for user in (await Users.get_users())["users"]}
+    return await get_preserved_kb_ids(form_data, active_user_ids)
+
+
+async def get_current_active_ids(
+    form_data: PruneDataForm, referenced: dict[str, Set[str]]
+) -> Tuple[Set[str], Set[str], Set[str]]:
+    """Current (file row, preserved KB plus referenced web page, user) ids for the vector cleanup."""
+    active_user_ids = {str(user.id) for user in (await Users.get_users())["users"]}
+    active_kb_ids = await get_preserved_kb_ids(form_data, active_user_ids)
+    if "hash_based_collections" not in referenced:  # one reference scan per run
+        _, referenced["hash_based_collections"] = await get_active_file_ids(
+            active_user_ids=active_user_ids, preserved_kb_ids=active_kb_ids
+        )
+        _prog_stage("Cleaning vector collections")  # the scan set its own stages
+    return (
+        await get_all_file_row_ids(),
+        active_kb_ids | referenced["hash_based_collections"],
+        active_user_ids,
+    )
+
+
+async def get_user_memory_ids(user_id: str) -> Set[str]:
+    async def _scan():
+        async with get_async_db_context() as db:
+            result = await db.execute(
+                select(Memory.id).where(Memory.user_id == user_id)
+            )
+            return {str(row[0]) for row in result}
+
+    return await retry_on_db_lock(_scan)
+
+
+def _blocking_on_loop(coroutine_function: Callable[..., Any]) -> Callable[..., Any]:
+    """Blocking version of coroutine_function for the cleaners' worker threads."""
+    loop = asyncio.get_running_loop()
+    return lambda *args: asyncio.run_coroutine_threadsafe(
+        coroutine_function(*args), loop
+    ).result()
+
+
+async def _file_is_linked(file_id: str) -> bool:
+    """Whether a chat, knowledge base or channel links the file right now."""
+
+    async def _scan():
+        async with get_async_db_context() as db:
+            for query in (
+                "SELECT 1 FROM chat_file cf JOIN chat c ON c.id = cf.chat_id "
+                "WHERE cf.file_id = :file_id LIMIT 1",
+                "SELECT 1 FROM knowledge_file kf JOIN knowledge k ON k.id = kf.knowledge_id "
+                "WHERE kf.file_id = :file_id LIMIT 1",
+                "SELECT 1 FROM channel_file cf JOIN channel c ON c.id = cf.channel_id "
+                "WHERE cf.file_id = :file_id AND (cf.message_id IS NULL "
+                "OR EXISTS (SELECT 1 FROM message m WHERE m.id = cf.message_id)) LIMIT 1",
+            ):
+                result = await db.execute(text(query), {"file_id": file_id})
+                if result.first() is not None:
+                    return True
+        return False
+
+    return await retry_on_db_lock(_scan)
+
+
+async def _owner_is_gone(
+    owner_id, active_user_ids: Set[str], owner_checks: dict[str, bool]
+) -> bool:
+    """True when the owner is in neither the snapshot nor the current user list."""
+    owner_id = str(owner_id)
+    if owner_id in active_user_ids:
+        return False
+    if owner_id not in owner_checks:
+        owner = await retry_on_db_lock(lambda: Users.get_user_by_id(owner_id))
+        owner_checks[owner_id] = owner is None
+    return owner_checks[owner_id]
+
+
 async def get_kb_file_ids(kb_ids: Set[str]) -> dict:
     """Return {kb_id: file ids linked in knowledge_file} for the given KBs."""
     kb_file_ids = {kb_id: set() for kb_id in kb_ids}
 
     async def _scan():
         async with get_async_db_context() as db:
-            _prog_stage("Scanning knowledge base links", await _count_rows(db, KnowledgeFile))
+            # The run's junction cleanup already removes links to deleted files; this keeps the preview in step
+            existing_file_links = KnowledgeFile.file_id.in_(select(File.id))
+            _prog_stage(
+                "Scanning knowledge base links",
+                await _count_rows(db, KnowledgeFile, existing_file_links),
+            )
             async for _row_id, kb_id, file_id in stream_rows(
-                db, KnowledgeFile.id, KnowledgeFile.knowledge_id, KnowledgeFile.file_id
+                db,
+                KnowledgeFile.id,
+                KnowledgeFile.knowledge_id,
+                KnowledgeFile.file_id,
+                filter_clause=existing_file_links,
             ):
                 _prog_tick()
                 linked = kb_file_ids.get(str(kb_id))
@@ -3315,8 +3558,19 @@ async def get_stale_kb_file_ids(vector_cleaner, active_kb_ids: Set[str], grace_h
     return stale
 
 
+def _dangling_row_statement(
+    table: str, column: str, parent_table: str
+) -> Tuple[str, str]:
+    """(table, DELETE of rows whose column points at a missing parent row)."""
+    return (
+        table,
+        f"DELETE FROM {table} WHERE NOT EXISTS "
+        f"(SELECT 1 FROM {parent_table} parent WHERE parent.id = {table}.{column})",
+    )
+
+
 async def cleanup_dangling_junction_rows() -> int:
-    """Delete chat_file/knowledge_file/channel_file rows whose parent is gone.
+    """Delete junction rows whose parent or file is gone.
 
     SQLite never enforces the declared ON DELETE CASCADE (Open WebUI does not
     set PRAGMA foreign_keys), so chat/KB/channel deletions strand junction
@@ -3337,6 +3591,20 @@ async def cleanup_dangling_junction_rows() -> int:
             "channel_file",
             "DELETE FROM channel_file WHERE channel_id NOT IN (SELECT id FROM channel)",
         ),
+        _dangling_row_statement("chat_file", "file_id", "file"),
+        _dangling_row_statement("knowledge_file", "file_id", "file"),
+        _dangling_row_statement("channel_file", "file_id", "file"),
+        # On SQLite, Open WebUI's message delete keeps the row, pinning the attachment forever
+        (
+            "channel_file",
+            "DELETE FROM channel_file WHERE message_id IS NOT NULL AND NOT EXISTS "
+            "(SELECT 1 FROM message WHERE message.id = channel_file.message_id)",
+        ),
+        _dangling_row_statement("knowledge_directory", "knowledge_id", "knowledge"),
+        _dangling_row_statement("channel_member", "channel_id", "channel"),
+        _dangling_row_statement("channel_webhook", "channel_id", "channel"),
+        # On SQLite, chats deleted with their folder on 0.11.3 leave share snapshots behind
+        _dangling_row_statement("shared_chat", "chat_id", "chat"),
     ]
     for table, stmt in statements:
         try:
@@ -3383,6 +3651,36 @@ async def get_all_folders(db: Optional[AsyncSession] = None):
         return []
 
 
+def _is_inactive_user(
+    user: UserModel, cutoff_time: int, exempt_admin: bool, exempt_pending: bool
+) -> bool:
+    """The inactive-user rule, shared by count, delete and preview."""
+    if exempt_admin and user.role == "admin":
+        return False
+    if exempt_pending and user.role == "pending":
+        return False
+    return user.last_active_at < cutoff_time
+
+
+def _active_user_ids_excluding_inactive(
+    all_users: list, form_data: PruneDataForm
+) -> Set[str]:
+    """Current user ids minus the users the inactive-user rule would delete."""
+    if form_data.delete_inactive_users_days is None:
+        return {str(user.id) for user in all_users}
+    cutoff_time = int(time.time()) - form_data.delete_inactive_users_days * 86400
+    return {
+        str(user.id)
+        for user in all_users
+        if not _is_inactive_user(
+            user,
+            cutoff_time,
+            form_data.exempt_admin_users,
+            form_data.exempt_pending_users,
+        )
+    }
+
+
 async def count_inactive_users(
     inactive_days: Optional[int],
     exempt_admin: bool,
@@ -3406,11 +3704,7 @@ async def count_inactive_users(
     try:
         if all_users is not None:
             for user in all_users:
-                if exempt_admin and user.role == "admin":
-                    continue
-                if exempt_pending and user.role == "pending":
-                    continue
-                if user.last_active_at < cutoff_time:
+                if _is_inactive_user(user, cutoff_time, exempt_admin, exempt_pending):
                     count += 1
             return count
 
@@ -3476,9 +3770,41 @@ async def count_old_chats(
         return 0
 
 
+async def delete_chat_with_orphan_tags(chat_id: str, db: AsyncSession) -> bool:
+    """Delete a chat plus the tags no other chat of its owner uses, as Open WebUI's chat delete does."""
+    result = await db.execute(select(Chat.user_id, Chat.meta).where(Chat.id == chat_id))
+    chat = result.first()
+    # delete_chat_by_id swallows exceptions and returns False
+    if chat is None or not await Chats.delete_chat_by_id(chat_id, db=db):
+        return False
+    tag_ids = (chat.meta or {}).get("tags", [])
+    await Chats.delete_orphan_tags_for_user(tag_ids, chat.user_id, db=db)
+    return True
+
+
 def _knowledge_age_column(age_field: str):
     """Resolve the timestamp column used for KB age comparisons."""
     return Knowledge.updated_at if age_field == "updated_at" else Knowledge.created_at
+
+
+def _not_deleted_by_age_rules(table, form_data: PruneDataForm):
+    """Filter for rows the age rules leave to the orphan sweep."""
+    kb_days = form_data.delete_knowledge_bases_older_than_days or 0
+    if table is Chat and form_data.days is not None:
+        conditions = [Chat.updated_at < int(time.time()) - form_data.days * 86400]
+        if form_data.exempt_archived_chats:
+            conditions.append(or_(Chat.archived == False, Chat.archived == None))
+        if form_data.exempt_pinned_chats and hasattr(Chat, "pinned"):
+            conditions.append(or_(Chat.pinned == False, Chat.pinned == None))
+        if form_data.exempt_chats_in_folders and hasattr(Chat, "folder_id"):
+            conditions.append(Chat.folder_id == None)
+    elif table is Knowledge and kb_days > 0:
+        age_column = _knowledge_age_column(form_data.knowledge_bases_age_field)
+        conditions = [age_column < int(time.time()) - kb_days * 86400]
+    else:
+        return true()
+    # The age columns are nullable, and a NULL age is not old to the age delete
+    return not_(func.coalesce(and_(*conditions), False))
 
 
 async def count_old_knowledge_bases(
@@ -3507,16 +3833,22 @@ async def count_old_knowledge_bases(
         return 0
 
 
-async def _dereference_knowledge_from_models(deleted_kb_ids: Set[str]) -> int:
-    """Strip deleted KB ids from every model's meta.knowledge list.
+def _knowledge_base_ref_id(entry) -> Optional[str]:
+    """The KB id a model knowledge entry points at, else None."""
+    if not isinstance(entry, dict) or "collection_name" in entry or not entry.get("id"):
+        return None
+    if entry.get("type", "collection") != "collection":
+        return None
+    return str(entry["id"])
 
-    Mirrors Open WebUI's delete_knowledge_by_id router so age-deleted KBs do
+
+async def _dereference_knowledge_from_models() -> int:
+    """Strip KBs that no longer exist from every model's meta.knowledge list.
+
+    Mirrors Open WebUI's delete_knowledge_by_id router so deleted KBs do
     not leave dangling references in workspace models. Best-effort: a failure
-    here never blocks KB deletion.
+    here never blocks the pass.
     """
-    if not deleted_kb_ids:
-        return 0
-
     updated = 0
     try:
         async with get_async_db() as db:
@@ -3526,10 +3858,27 @@ async def _dereference_knowledge_from_models(deleted_kb_ids: Set[str]) -> int:
                 kb_list = meta.get("knowledge")
                 if not isinstance(kb_list, list) or not kb_list:
                     continue
+                referenced_kb_ids = {
+                    kb_id for kb_id in map(_knowledge_base_ref_id, kb_list) if kb_id
+                }
+                if not referenced_kb_ids:
+                    continue
+                result = await db.execute(
+                    select(Knowledge.id).where(Knowledge.id.in_(referenced_kb_ids))
+                )
+                missing_kb_ids = referenced_kb_ids - {str(row[0]) for row in result}
+                if not missing_kb_ids:
+                    continue
+                # Reread right before writing so an edit made during the run is kept
+                result = await db.execute(select(Model.meta).where(Model.id == mid))
+                meta = result.scalar_one_or_none()
+                kb_list = meta.get("knowledge") if isinstance(meta, dict) else None
+                if not isinstance(kb_list, list):
+                    continue
                 new_list = [
                     k
                     for k in kb_list
-                    if not (isinstance(k, dict) and str(k.get("id")) in deleted_kb_ids)
+                    if _knowledge_base_ref_id(k) not in missing_kb_ids
                 ]
                 if len(new_list) != len(kb_list):
                     new_meta = dict(meta)
@@ -3538,7 +3887,8 @@ async def _dereference_knowledge_from_models(deleted_kb_ids: Set[str]) -> int:
                         update(Model).where(Model.id == mid).values(meta=new_meta)
                     )
                     updated += 1
-            await db.commit()
+                    await db.commit()
+                    await _pace()
         if updated:
             log.info(f"De-referenced deleted knowledge bases from {updated} models")
     except Exception as e:
@@ -3553,9 +3903,9 @@ async def delete_old_knowledge_bases(
 
     DANGER: deletes live, owned, in-use KBs regardless of whether the owner
     still exists — a retention policy, not orphan cleanup. Mirrors Open WebUI's
-    own KB deletion: drops the KB vector collection, the KB row, and removes the
-    KB from any model's meta.knowledge. The KB's now-unreferenced files are
-    reclaimed by the normal orphan sweep that runs afterwards.
+    own KB deletion: drops the KB vector collection and the KB row; the pass
+    then removes it from any model's meta.knowledge. The KB's now-unreferenced
+    files are reclaimed by the normal orphan sweep that runs afterwards.
     """
     # days<=0 would delete every KB (see count_old_knowledge_bases)
     if not days or days <= 0:
@@ -3599,7 +3949,6 @@ async def delete_old_knowledge_bases(
                 )
         except Exception as e:
             log.warning(f"Failed to delete KB metadata embeddings: {e}")
-        await _dereference_knowledge_from_models(set(deleted_ids))
         log.info(
             f"Deleted {deleted} knowledge bases older than {days} days (by {age_field})"
         )
@@ -3717,26 +4066,33 @@ async def count_orphaned_records(
                     form_data.delete_orphaned_skills,
                     getattr(form_data, "exempt_shared_orphaned_skills", True),
                 ),
+                (
+                    "folders",
+                    "folder",
+                    form_data.delete_orphaned_folders,
+                    form_data.exempt_shared_orphaned_folders,
+                ),
             ):
-                if enabled_flag and exempt_flag and active_user_ids:
+                if enabled_flag and exempt_flag:
                     _shared_exempt[cnt_key] = await get_shared_resource_ids(
                         rtype, active_user_ids
                     )
 
             for key, table_cls, user_id_col, enabled in _table_flag_map:
-                if enabled and active_user_ids:
+                if enabled:
                     # Stream and filter in Python, matching execution exactly:
                     # SQL IN() binds one parameter per user (breaks past
                     # SQLite's limit on large instances) and SQL NOT IN never
                     # counts NULL owners while execution deletes them.
+                    not_aged_out = _not_deleted_by_age_rules(table_cls, form_data)
                     _prog_stage(
                         f"Counting orphaned {key.replace('_', ' ')}",
-                        await _count_rows(db, table_cls),
+                        await _count_rows(db, table_cls, not_aged_out),
                     )
                     exempt_ids = _shared_exempt.get(key, set())
                     n = 0
                     async for _rid, row_uid in stream_rows(
-                        db, table_cls.id, user_id_col
+                        db, table_cls.id, user_id_col, filter_clause=not_aged_out
                     ):
                         _prog_tick()
                         if (
@@ -3834,15 +4190,19 @@ async def count_orphaned_records(
                     if form_data.delete_orphaned_channels:
                         counts["channels"] = len(orphan_channel_ids)
 
+                    reply_columns = (
+                        [_orphaned_reply_filter()]
+                        if form_data.delete_orphaned_channel_messages
+                        else []
+                    )
                     n = 0
-                    async for _mid, m_ch_id in stream_rows(
-                        db, Message.id, Message.channel_id
+                    async for _mid, m_ch_id, *orphaned in stream_rows(
+                        db, Message.id, Message.channel_id, *reply_columns
                     ):
                         if m_ch_id is None:
                             continue
-                        if (
-                            form_data.delete_orphaned_channel_messages
-                            and m_ch_id not in all_channel_ids
+                        if form_data.delete_orphaned_channel_messages and (
+                            m_ch_id not in all_channel_ids or any(orphaned)
                         ):
                             n += 1
                         elif (
@@ -3953,22 +4313,38 @@ async def _delete_channel_messages_by_ids(db, message_ids: list) -> int:
     return deleted
 
 
+def _is_unpinned(message):
+    return or_(message.is_pinned == False, message.is_pinned == None)
+
+
 def _old_channel_message_filter(cutoff_ns: int, exempt_pinned: bool):
-    """Build the WHERE clause for age-based channel message pruning."""
+    """Build the WHERE clause for age-based channel message pruning, replies of old thread parents included."""
+    skip_pinned = exempt_pinned and hasattr(Message, "is_pinned")
+    thread_parent = aliased(Message)
+    thread_parent_conditions = [
+        thread_parent.id == Message.parent_id,
+        thread_parent.created_at < cutoff_ns,
+    ]
+    if skip_pinned:
+        thread_parent_conditions.append(_is_unpinned(thread_parent))
+    # Postgres, 1.5M old rows: an IN subquery timed out after 60s, this EXISTS took 0.31s
+    old_thread_parent = (
+        select(thread_parent.id).where(*thread_parent_conditions).exists()
+    )
     conditions = [
         Message.channel_id.isnot(None),
         Message.created_at.isnot(None),
-        Message.created_at < cutoff_ns,
+        or_(Message.created_at < cutoff_ns, old_thread_parent),
     ]
-    if exempt_pinned and hasattr(Message, "is_pinned"):
-        conditions.append(or_(Message.is_pinned == False, Message.is_pinned == None))
+    if skip_pinned:
+        conditions.append(_is_unpinned(Message))
     return and_(*conditions)
 
 
 async def count_old_channel_messages(
     max_age_days: Optional[int], exempt_pinned: bool = True
 ) -> int:
-    """Count channel messages older than max_age_days (channel_message.created_at is ns)."""
+    """Count channel messages older than max_age_days, plus newer replies of old thread parents (created_at is ns)."""
     if max_age_days is None or Message is None:
         return 0
     cutoff_ns = (int(time.time()) - max_age_days * 86400) * 1_000_000_000
@@ -3993,7 +4369,7 @@ async def count_old_channel_messages(
 async def delete_old_channel_messages(
     max_age_days: Optional[int], exempt_pinned: bool = True
 ) -> int:
-    """Delete channel messages older than max_age_days. Pinned messages exempt by default."""
+    """Delete channel messages older than max_age_days, plus newer replies of old thread parents. Pinned messages exempt by default."""
     if max_age_days is None or Message is None:
         return 0
     cutoff_ns = (int(time.time()) - max_age_days * 86400) * 1_000_000_000
@@ -4012,7 +4388,7 @@ async def delete_old_channel_messages(
             await db.commit()
             if deleted > 0:
                 log.info(
-                    f"Deleted {deleted} channel messages older than {max_age_days} days"
+                    f"Deleted {deleted} channel messages older than {max_age_days} days or in an old thread"
                 )
             return deleted
     except _TABLE_MISSING_ERRORS as e:
@@ -4025,19 +4401,37 @@ async def delete_old_channel_messages(
         return 0
 
 
+def _orphaned_reply_filter():
+    """Unpinned replies whose thread parent is gone; pinned ones still show in the pinned list."""
+    thread_parent = aliased(Message)
+    conditions = [
+        Message.parent_id.isnot(None),
+        ~select(thread_parent.id).where(thread_parent.id == Message.parent_id).exists(),
+    ]
+    if hasattr(Message, "is_pinned"):
+        conditions.append(_is_unpinned(Message))
+    return and_(*conditions)
+
+
+def _orphaned_channel_message_filter():
+    """Channel messages whose channel is gone, plus orphaned thread replies."""
+    return and_(
+        Message.channel_id.isnot(None),
+        or_(
+            not_(Message.channel_id.in_(select(Channel.id))),
+            _orphaned_reply_filter(),
+        ),
+    )
+
+
 async def count_orphaned_channel_messages() -> int:
-    """Count channel messages whose channel no longer exists (dangling)."""
+    """Count channel messages whose channel or thread parent no longer exists (dangling)."""
     if Message is None or Channel is None:
         return 0
     try:
         async with get_async_db_context() as db:
             result = await db.execute(
-                select(func.count(Message.id)).where(
-                    and_(
-                        Message.channel_id.isnot(None),
-                        not_(Message.channel_id.in_(select(Channel.id))),
-                    )
-                )
+                select(func.count(Message.id)).where(_orphaned_channel_message_filter())
             )
             return result.scalar_one_or_none() or 0
     except _TABLE_MISSING_ERRORS as e:
@@ -4050,18 +4444,13 @@ async def count_orphaned_channel_messages() -> int:
 
 
 async def delete_orphaned_channel_messages() -> int:
-    """Delete channel messages whose channel no longer exists."""
+    """Delete channel messages whose channel or thread parent no longer exists."""
     if Message is None or Channel is None:
         return 0
     try:
         async with get_async_db_context() as db:
             result = await db.execute(
-                select(Message.id).where(
-                    and_(
-                        Message.channel_id.isnot(None),
-                        not_(Message.channel_id.in_(select(Channel.id))),
-                    )
-                )
+                select(Message.id).where(_orphaned_channel_message_filter())
             )
             ids = [row[0] for row in result.fetchall()]
             if not ids:
@@ -4117,8 +4506,9 @@ async def delete_orphaned_channels(active_user_ids: Set[str]) -> int:
     try:
         async with get_async_db_context() as db:
             orphan_ids = []
+            owner_checks = {}
             async for cid, uid in stream_rows(db, Channel.id, Channel.user_id):
-                if str(uid) not in active_user_ids:
+                if await _owner_is_gone(uid, active_user_ids, owner_checks):
                     orphan_ids.append(cid)
             if not orphan_ids:
                 return 0
@@ -4182,14 +4572,26 @@ async def delete_orphaned_channels(active_user_ids: Set[str]) -> int:
         return 0
 
 
-def iter_storage_objects() -> Iterator[Tuple[str, str, Optional[int]]]:
+def _epoch_or_none(moment: Optional[datetime]) -> Optional[float]:
+    return moment.timestamp() if moment is not None else None
+
+
+def _within_grace(modified_at: Optional[float], grace_hours: int) -> bool:
+    """Young or undated objects may be uploads still missing their file row."""
+    return grace_hours > 0 and (
+        modified_at is None or modified_at > time.time() - grace_hours * 3600
+    )
+
+
+def iter_storage_objects() -> Iterator[Tuple[str, str, Optional[int], Optional[float]]]:
     """
-    Yield (ref, display_name, size_bytes) for every object in the configured
+    Yield (ref, display_name, size_bytes, modified_at) for every object in the configured
     storage backend. `ref` matches the format stored in File.path and is safe
     to pass to Storage.delete_file().
 
     size_bytes is best-effort — may be None for remote backends where listing
     pages don't include a byte count (or it's expensive to fetch per-object).
+    modified_at is the last write as epoch seconds, None when unknown.
     """
     provider = (STORAGE_PROVIDER or "local").lower()
 
@@ -4203,10 +4605,11 @@ def iter_storage_objects() -> Iterator[Tuple[str, str, Optional[int]]]:
             if not p.is_file():
                 continue
             try:
-                size = p.stat().st_size
+                stat = p.stat()
+                size, modified_at = stat.st_size, stat.st_mtime
             except OSError:
-                size = None
-            yield (str(p), p.name, size)
+                size = modified_at = None
+            yield (str(p), p.name, size, modified_at)
         return
 
     if provider == "s3":
@@ -4223,7 +4626,12 @@ def iter_storage_objects() -> Iterator[Tuple[str, str, Optional[int]]]:
                 # Mirrors the safety check in S3StorageProvider.delete_all_files
                 if key_prefix and not key.startswith(key_prefix):
                     continue
-                yield (f"s3://{bucket}/{key}", key.rsplit("/", 1)[-1], obj.get("Size"))
+                yield (
+                    f"s3://{bucket}/{key}",
+                    key.rsplit("/", 1)[-1],
+                    obj.get("Size"),
+                    _epoch_or_none(obj.get("LastModified")),
+                )
         return
 
     if provider == "gcs":
@@ -4233,6 +4641,7 @@ def iter_storage_objects() -> Iterator[Tuple[str, str, Optional[int]]]:
                 f"gs://{bucket_name}/{blob.name}",
                 blob.name,
                 getattr(blob, "size", None),
+                _epoch_or_none(getattr(blob, "updated", None)),
             )
         return
 
@@ -4245,7 +4654,12 @@ def iter_storage_objects() -> Iterator[Tuple[str, str, Optional[int]]]:
                 size = blob.size
             except AttributeError:
                 pass
-            yield (f"{endpoint}/{container}/{blob.name}", blob.name, size)
+            yield (
+                f"{endpoint}/{container}/{blob.name}",
+                blob.name,
+                size,
+                _epoch_or_none(getattr(blob, "last_modified", None)),
+            )
         return
 
     log.warning(f"Unknown STORAGE_PROVIDER '{provider}' — orphan storage scan skipped")
@@ -4275,7 +4689,7 @@ async def _get_active_file_paths(active_file_ids: Set[str]) -> Set[str]:
         return active_paths
 
 
-async def count_orphaned_uploads(active_file_ids: Set[str]) -> int:
+async def count_orphaned_uploads(active_file_ids: Set[str], grace_hours: int) -> int:
     """Count orphaned objects in the configured storage backend (local/S3/GCS/Azure)."""
     active_paths = await _get_active_file_paths(active_file_ids)
 
@@ -4283,9 +4697,11 @@ async def count_orphaned_uploads(active_file_ids: Set[str]) -> int:
 
     def _count() -> int:
         n = 0
-        for ref, name, _size in iter_storage_objects():
+        for ref, name, _size, modified_at in iter_storage_objects():
             _prog_tick()
             if ref in active_paths or name in active_paths:
+                continue
+            if _within_grace(modified_at, grace_hours):
                 continue
             # GCS/Azure delete_file cannot round-trip nested blob names and
             # could target the wrong key; skip them (foreign objects anyway)
@@ -4401,7 +4817,7 @@ async def get_preview_detail_page(
         if cached is not None:
             return cached
         all_users = (await Users.get_users())["users"]
-        active_user_ids = {str(user.id) for user in all_users}
+        active_user_ids = _active_user_ids_excluding_inactive(all_users, form_data)
         exempt_ids = set()
         if shared_resource_type and shared_exempt:
             exempt_ids = await get_shared_resource_ids(
@@ -4418,13 +4834,19 @@ async def get_preview_detail_page(
         label_column=None,
     ):
         active_user_ids, exempt_ids = await liveness_sets(shared_resource_type, shared_exempt)
-        resume_clause = model.id > resume_after if resume_after is not None else None
+        resume_clause = model.id > resume_after if resume_after is not None else true()
         async with get_async_db_context() as db:
             async def matching_rows():
                 columns = (model.id, owner_column)
                 if label_column is not None:
                     columns += (label_column,)
-                async for row in stream_rows(db, *columns, filter_clause=resume_clause):
+                async for row in stream_rows(
+                    db,
+                    *columns,
+                    filter_clause=and_(
+                        resume_clause, _not_deleted_by_age_rules(model, form_data)
+                    ),
+                ):
                     record_id, owner_id = row[:2]
                     if (
                         str(owner_id) not in active_user_ids
@@ -4447,9 +4869,12 @@ async def get_preview_detail_page(
                 "role": getattr(user, "role", None) or "",
             }
             for user in users
-            if (not form_data.exempt_admin_users or user.role != "admin")
-            and (not form_data.exempt_pending_users or user.role != "pending")
-            and user.last_active_at < cutoff_time
+            if _is_inactive_user(
+                user,
+                cutoff_time,
+                form_data.exempt_admin_users,
+                form_data.exempt_pending_users,
+            )
         )
         items = list(matching_users)[start : start + page_size]
     elif category == "old_chats":
@@ -4501,7 +4926,7 @@ async def get_preview_detail_page(
             "orphaned_models": (Model, Model.user_id, "model", form_data.exempt_shared_orphaned_models, None),
             "orphaned_notes": (Note, Note.user_id, "note", form_data.exempt_shared_orphaned_notes, None),
             "orphaned_skills": (Skill, Skill.user_id, "skill", form_data.exempt_shared_orphaned_skills, None),
-            "orphaned_folders": (Folder, Folder.user_id, None, True, None),
+            "orphaned_folders": (Folder, Folder.user_id, "folder", form_data.exempt_shared_orphaned_folders, None),
         }
         model, owner_column, shared_type, shared_exempt, label_column = model_map[category]
         items = await owned_rows(
@@ -4536,7 +4961,9 @@ async def get_preview_detail_page(
             automation_sets = _detail_sets_get(run_id, category)
             if automation_sets is None:
                 all_users = (await Users.get_users())["users"]
-                active_user_ids = {str(user.id) for user in all_users}
+                active_user_ids = _active_user_ids_excluding_inactive(
+                    all_users, form_data
+                )
                 all_automation_ids = set()
                 orphaned_automation_ids = set()
                 async with get_async_db_context() as db:
@@ -4582,7 +5009,9 @@ async def get_preview_detail_page(
             channel_sets = _detail_sets_get(run_id, category)
             if channel_sets is None:
                 all_users = (await Users.get_users())["users"]
-                active_user_ids = {str(user.id) for user in all_users}
+                active_user_ids = _active_user_ids_excluding_inactive(
+                    all_users, form_data
+                )
                 all_channel_ids = set()
                 orphaned_channel_ids = set()
                 async with get_async_db_context() as db:
@@ -4608,16 +5037,25 @@ async def get_preview_detail_page(
 
                 else:
                     resume_clause = Message.id > resume_after if resume_after is not None else None
+                    reply_columns = (
+                        [_orphaned_reply_filter()]
+                        if form_data.delete_orphaned_channel_messages
+                        else []
+                    )
 
                     async def matching_rows():
-                        async for message_id, channel_id in stream_rows(
-                            db, Message.id, Message.channel_id, filter_clause=resume_clause
+                        async for message_id, channel_id, *orphaned in stream_rows(
+                            db,
+                            Message.id,
+                            Message.channel_id,
+                            *reply_columns,
+                            filter_clause=resume_clause,
                         ):
                             if channel_id is None:
                                 continue
                             if (
                                 form_data.delete_orphaned_channel_messages
-                                and channel_id not in all_channel_ids
+                                and (channel_id not in all_channel_ids or any(orphaned))
                             ) or (
                                 form_data.delete_orphaned_channels
                                 and channel_id in orphaned_channel_ids
@@ -4635,8 +5073,10 @@ async def get_preview_detail_page(
         def scan_uploads():
             items = []
             index = 0
-            for ref, name, size in iter_storage_objects():
+            for ref, name, size, modified_at in iter_storage_objects():
                 if ref in active_paths or name in active_paths:
+                    continue
+                if _within_grace(modified_at, form_data.orphan_file_grace_hours):
                     continue
                 if provider in ("gcs", "azure") and "/" in name:
                     continue
@@ -4686,7 +5126,7 @@ async def get_preview_detail_page(
 
 async def get_active_file_ids(
     knowledge_bases=None, active_user_ids=None, preserved_kb_ids=None
-) -> Set[str]:
+) -> Tuple[Set[str], Set[str]]:
     """
     Get all file IDs that are actively referenced by knowledge bases, chats, folders, messages, and models.
 
@@ -4699,8 +5139,11 @@ async def get_active_file_ids(
         preserved_kb_ids: When given, the exact KB set whose file references
             count (overrides the ownership filter); pass get_preserved_kb_ids()
             so exemptions and the off-flag protect KB contents consistently.
+
+    Returns the active file ids and the hash-based collections the records reference.
     """
     active_file_ids = set()
+    hash_based_collections = set()
 
     # Defensively normalize to Set[str] — callers may pass UUID objects
     if active_user_ids is not None:
@@ -4829,7 +5272,9 @@ async def get_active_file_ids(
                 result = await db.execute(
                     text(
                         "SELECT cf.file_id FROM channel_file cf "
-                        "JOIN channel c ON c.id = cf.channel_id"
+                        "JOIN channel c ON c.id = cf.channel_id "
+                        "WHERE cf.message_id IS NULL "
+                        "OR EXISTS (SELECT 1 FROM message m WHERE m.id = cf.message_id)"
                     )
                 )
                 while True:
@@ -4868,13 +5313,14 @@ async def get_active_file_ids(
                     async def _flush():
                         if not chunk:
                             return
-                        found = await asyncio.to_thread(
+                        found, found_collections = await asyncio.to_thread(
                             _collect_file_ids_from_texts,
                             chunk,
                             all_file_ids,
                             odd_file_ids,
                         )
                         active_file_ids.update(found)
+                        hash_based_collections.update(found_collections)
                         chunk.clear()
 
                     async for row in stream_rows(
@@ -4963,7 +5409,7 @@ async def get_active_file_ids(
         raise
 
     log.info(f"Found {len(active_file_ids)} active file IDs")
-    return active_file_ids
+    return active_file_ids, hash_based_collections
 
 
 async def safe_delete_file_by_id(
@@ -5046,7 +5492,7 @@ async def safe_delete_file_by_id(
         return False
 
 
-async def cleanup_orphaned_uploads(active_file_ids: Set[str]) -> int:
+async def cleanup_orphaned_uploads(active_file_ids: Set[str], grace_hours: int) -> int:
     """
     Delete orphaned objects from the configured storage backend
     (local/S3/GCS/Azure). An object is orphaned when its storage ref does
@@ -5062,9 +5508,10 @@ async def cleanup_orphaned_uploads(active_file_ids: Set[str]) -> int:
     def _list_orphans():
         return [
             (ref, name)
-            for ref, name, _size in iter_storage_objects()
+            for ref, name, _size, modified_at in iter_storage_objects()
             if ref not in active_paths
             and name not in active_paths
+            and not _within_grace(modified_at, grace_hours)
             # GCS/Azure delete_file extracts the key naively (first segment /
             # basename) and would delete a DIFFERENT, possibly live blob for
             # nested names; never touch those.
@@ -5107,7 +5554,7 @@ async def delete_inactive_users(
 
     Args:
         inactive_days: Number of days of inactivity before deletion
-        vector_cleaner: Unused; kept for call-site compatibility
+        vector_cleaner: Deletes the user's memory embeddings
         exempt_admin: Whether to exempt admin users from deletion
         exempt_pending: Whether to exempt pending users from deletion
 
@@ -5126,14 +5573,7 @@ async def delete_inactive_users(
         all_users = (await Users.get_users())["users"]
 
         for user in all_users:
-            # Skip if user is exempt
-            if exempt_admin and user.role == "admin":
-                continue
-            if exempt_pending and user.role == "pending":
-                continue
-
-            # Check if user is inactive based on last_active_at
-            if user.last_active_at < cutoff_time:
+            if _is_inactive_user(user, cutoff_time, exempt_admin, exempt_pending):
                 users_to_delete.append(user)
 
         # No savepoint: the OWUI managers commit their own sessions in the
@@ -5147,6 +5587,21 @@ async def delete_inactive_users(
                     # Delete user's automations and their runs
                     await delete_user_automations(user.id, db=db)
 
+                    # Removed before the user, so a failed delete is retried next pass
+                    if not (
+                        await OAuthSessions.delete_sessions_by_user_id(user.id, db=db)
+                        and await Memories.delete_memories_by_user_id(user.id, db=db)
+                    ):
+                        log.error(
+                            f"Failed to delete OAuth sessions or memories of user {user.id}; user kept"
+                        )
+                        await _pace()
+                        continue
+                    if vector_cleaner is not None:
+                        await asyncio.to_thread(
+                            vector_cleaner.delete_collection, f"user-memory-{user.id}"
+                        )
+
                     # Auths.delete_auth_by_id wraps Users.delete_user_by_id AND
                     # removes the auth credential row, matching Open WebUI's
                     # own admin delete route; plain Users.delete_user_by_id
@@ -5157,6 +5612,16 @@ async def delete_inactive_users(
                         log.info(
                             f"Deleted inactive user: {user.email} (last active: {user.last_active_at})"
                         )
+                        # Like the admin delete: drops live sessions, notifies webhooks
+                        try:
+                            await publish_event(
+                                _STATE["app"],
+                                EVENTS.USER_DELETED,
+                                subject_id=user.id,
+                                source="prune",
+                            )
+                        except Exception as e:
+                            log.warning(f"Could not announce deleted user {user.id}: {e}")
                     else:
                         log.error(f"Failed to delete user {user.id}")
                 except Exception as e:
@@ -5304,12 +5769,13 @@ async def delete_orphaned_automations(active_user_ids: Set[str]) -> int:
             total_autos_deleted = 0
             total_runs_deleted = 0
             batch = []
+            owner_checks = {}
 
             async for auto_id, auto_uid in stream_rows(
                 db, Automation.id, Automation.user_id
             ):
                 _prog_tick()
-                if str(auto_uid) not in active_user_ids:
+                if await _owner_is_gone(auto_uid, active_user_ids, owner_checks):
                     batch.append(str(auto_id))
 
                 if len(batch) >= batch_size:
@@ -5443,8 +5909,9 @@ async def delete_orphaned_memory_rows(active_user_ids) -> int:
     try:
         async with get_async_db_context() as db:
             batch = []
+            owner_checks = {}
             async for mem_id, mem_uid in stream_rows(db, Memory.id, Memory.user_id):
-                if str(mem_uid) not in active_user_ids:
+                if await _owner_is_gone(mem_uid, active_user_ids, owner_checks):
                     batch.append(mem_id)
                 if len(batch) >= 500:
                     result = await db.execute(delete(Memory).where(Memory.id.in_(batch)))
@@ -5535,7 +6002,7 @@ async def run_prune(form_data: PruneDataForm) -> dict:
         # Get vector database cleaner based on configuration
         vector_cleaner = get_vector_database_cleaner(
             VECTOR_DB,
-            VECTOR_DB_CLIENT,
+            get_vector_db_client_or_none(),
             Path(CACHE_DIR),
             enable_milvus_multitenancy=ENABLE_MILVUS_MULTITENANCY_MODE,
             enable_qdrant_multitenancy=ENABLE_QDRANT_MULTITENANCY_MODE,
@@ -5547,12 +6014,12 @@ async def run_prune(form_data: PruneDataForm) -> dict:
             # Get counts for all enabled operations
             _prog_stage("Loading users")
             all_users = (await Users.get_users())["users"]
-            active_user_ids = {str(user.id) for user in all_users}
+            active_user_ids = _active_user_ids_excluding_inactive(all_users, form_data)
             # Single preservation decision: off-flag and shared exemption
             # protect KB contents (files, vectors, metadata), not just rows
             _prog_stage("Deciding which knowledge bases to keep")
             active_kb_ids = await get_preserved_kb_ids(form_data, active_user_ids)
-            active_file_ids = await get_active_file_ids(
+            active_file_ids, hash_based_collections = await get_active_file_ids(
                 active_user_ids=active_user_ids, preserved_kb_ids=active_kb_ids
             )
             # Vector collections follow file ROWS (like storage bytes), so
@@ -5582,18 +6049,22 @@ async def run_prune(form_data: PruneDataForm) -> dict:
                 form_data.knowledge_bases_age_field,
             )
             _prog_stage("Scanning storage for orphaned uploads")
-            orphaned_uploads = await count_orphaned_uploads(active_file_ids)
+            orphaned_uploads = await count_orphaned_uploads(
+                active_file_ids, form_data.orphan_file_grace_hours
+            )
             _prog_stage("Scanning vector collections")
+            # A KB or user the run deletes takes its collection along; counted there
+            all_kb_ids = set(await get_kb_user_map())
             orphaned_vector_collections = await asyncio.to_thread(
                 vector_cleaner.count_orphaned_collections,
                 all_file_row_ids,
-                active_kb_ids,
-                active_user_ids,
+                all_kb_ids | hash_based_collections,
+                {str(user.id) for user in all_users},
             )
             _prog_stage("Checking the knowledge-base search index")
             orphaned_kb_metadata = (
                 await asyncio.to_thread(
-                    vector_cleaner.count_orphaned_kb_metadata, active_kb_ids
+                    vector_cleaner.count_orphaned_kb_metadata, all_kb_ids
                 )
                 if form_data.delete_orphaned_kb_metadata
                 else 0
@@ -5698,8 +6169,7 @@ async def run_prune(form_data: PruneDataForm) -> dict:
                 async for (chat_id,) in stream_rows(
                     db, Chat.id, filter_clause=conditions
                 ):
-                    # delete_chat_by_id swallows exceptions and returns False
-                    if await Chats.delete_chat_by_id(chat_id, db=db):
+                    if await delete_chat_with_orphan_tags(chat_id, db):
                         deleted += 1
                     _prog_tick()
                     await db.commit()
@@ -5754,10 +6224,7 @@ async def run_prune(form_data: PruneDataForm) -> dict:
 
         active_kb_ids = await get_preserved_kb_ids(form_data, active_user_ids)
         log.info(f"Found {len(active_kb_ids)} preserved knowledge bases")
-
-        active_file_ids = await get_active_file_ids(
-            active_user_ids=active_user_ids, preserved_kb_ids=active_kb_ids
-        )
+        owner_checks = {}
 
         # Shared exemptions for the orphan loops below: resources a living
         # principal can still reach are kept
@@ -5791,33 +6258,15 @@ async def run_prune(form_data: PruneDataForm) -> dict:
             and getattr(form_data, "exempt_shared_orphaned_skills", True)
             else set()
         )
+        shared_folders = (
+            await get_shared_resource_ids("folder", active_user_ids)
+            if form_data.delete_orphaned_folders
+            and form_data.exempt_shared_orphaned_folders
+            else set()
+        )
 
         # Stage 3: Delete orphaned database records
         log.info("Deleting orphaned database records")
-
-        deleted_files = 0
-        # A file is orphaned only when unreferenced: a deleted uploader's files
-        # can still back another user's live KB or chat. Fresh uploads get a
-        # grace window (upload and first reference are separate requests).
-        grace_cutoff = int(time.time()) - max(
-            0, int(getattr(form_data, "orphan_file_grace_hours", 0) or 0)
-        ) * 3600
-        async with get_async_db() as db:
-            _prog_stage("Sweeping orphaned files", await _count_rows(db, File))
-            async for fid, _uid, created_at in stream_rows(
-                db, File.id, File.user_id, File.created_at
-            ):
-                _prog_tick()
-                if created_at is not None and created_at > grace_cutoff:
-                    continue
-                if str(fid) not in active_file_ids:
-                    if await safe_delete_file_by_id(fid, vector_cleaner, db=db):
-                        deleted_files += 1
-                    await db.commit()
-                    await _pace()
-
-        if deleted_files > 0:
-            log.info(f"Deleted {deleted_files} orphaned files")
 
         deleted_kbs = 0
         if form_data.delete_orphaned_knowledge_bases:
@@ -5833,11 +6282,10 @@ async def run_prune(form_data: PruneDataForm) -> dict:
                     # active_kb_ids folds in live owners, the off-flag and the
                     # shared exemption. The owner_id re-check mirrors the sibling
                     # loops and the count path and closes a TOCTOU window: the
-                    # snapshot predates the (long, throttled) file sweep, so a KB
+                    # snapshot predates the (long, throttled) pass, so a KB
                     # a live user creates mid-pass would otherwise be deleted.
-                    if (
-                        str(kb_id) not in active_kb_ids
-                        and str(owner_id) not in active_user_ids
+                    if str(kb_id) not in active_kb_ids and await _owner_is_gone(
+                        owner_id, active_user_ids, owner_checks
                     ):
                         orphan_kb_ids.append(str(kb_id))
                 _prog_tick(0, len(orphan_kb_ids))
@@ -5858,15 +6306,14 @@ async def run_prune(form_data: PruneDataForm) -> dict:
                 await asyncio.to_thread(
                     vector_cleaner.delete_kb_metadata, deleted_kb_ids
                 )
-                # Strip the deleted KBs from every model's meta.knowledge, as
-                # the age-based KB path already does — ghost-owned KBs can be
-                # attached to active users' models.
-                await _dereference_knowledge_from_models(set(deleted_kb_ids))
 
             if deleted_kbs > 0:
                 log.info(f"Deleted {deleted_kbs} orphaned knowledge bases")
         else:
             log.info("Skipping knowledge base deletion (disabled)")
+
+        # Every pass, so links a cancelled or crashed pass left behind heal too
+        await _dereference_knowledge_from_models()
 
         deleted_others = 0
 
@@ -5880,7 +6327,7 @@ async def run_prune(form_data: PruneDataForm) -> dict:
                 )
                 async for chat_id, chat_uid in stream_rows(db, Chat.id, Chat.user_id):
                     _prog_tick()
-                    if str(chat_uid) not in active_user_ids:
+                    if await _owner_is_gone(chat_uid, active_user_ids, owner_checks):
                         if await Chats.delete_chat_by_id(chat_id, db=db):
                             chats_deleted += 1
                             deleted_others += 1
@@ -5897,7 +6344,9 @@ async def run_prune(form_data: PruneDataForm) -> dict:
             async with get_async_db() as db:
                 for tool in await Tools.get_tools(db=db):
                     _prog_tick()
-                    if str(tool.user_id) not in active_user_ids:
+                    if await _owner_is_gone(
+                        tool.user_id, active_user_ids, owner_checks
+                    ):
                         if str(tool.id) in shared_tools:
                             continue
                         await Tools.delete_tool_by_id(tool.id, db=db)
@@ -5916,7 +6365,9 @@ async def run_prune(form_data: PruneDataForm) -> dict:
             async with get_async_db() as db:
                 for function in await Functions.get_functions(db=db):
                     _prog_tick()
-                    if str(function.user_id) not in active_user_ids:
+                    if await _owner_is_gone(
+                        function.user_id, active_user_ids, owner_checks
+                    ):
                         await Functions.delete_function_by_id(function.id, db=db)
                         functions_deleted += 1
                         deleted_others += 1
@@ -5934,7 +6385,7 @@ async def run_prune(form_data: PruneDataForm) -> dict:
                 # Stream raw columns — Notes.get_notes() paginates (limit=50)
                 async for note_id, note_uid in stream_rows(db, Note.id, Note.user_id):
                     _prog_tick()
-                    if str(note_uid) not in active_user_ids:
+                    if await _owner_is_gone(note_uid, active_user_ids, owner_checks):
                         if str(note_id) in shared_notes:
                             continue
                         await Notes.delete_note_by_id(note_id, db=db)
@@ -5953,7 +6404,9 @@ async def run_prune(form_data: PruneDataForm) -> dict:
             async with get_async_db() as db:
                 for skill in await Skills.get_skills(db=db):
                     _prog_tick()
-                    if str(skill.user_id) not in active_user_ids:
+                    if await _owner_is_gone(
+                        skill.user_id, active_user_ids, owner_checks
+                    ):
                         if str(skill.id) in shared_skills:
                             continue
                         await Skills.delete_skill_by_id(skill.id, db=db)
@@ -5976,7 +6429,7 @@ async def run_prune(form_data: PruneDataForm) -> dict:
                     db, Prompt.id, Prompt.command, Prompt.user_id
                 ):
                     _prog_tick()
-                    if str(prompt_uid) not in active_user_ids:
+                    if await _owner_is_gone(prompt_uid, active_user_ids, owner_checks):
                         if str(_pid) in shared_prompts:
                             continue
                         await Prompts.delete_prompt_by_command(command, db=db)
@@ -5995,7 +6448,9 @@ async def run_prune(form_data: PruneDataForm) -> dict:
             async with get_async_db() as db:
                 for model in await Models.get_all_models(db=db):
                     _prog_tick()
-                    if str(model.user_id) not in active_user_ids:
+                    if await _owner_is_gone(
+                        model.user_id, active_user_ids, owner_checks
+                    ):
                         if str(model.id) in shared_models:
                             continue
                         await Models.delete_model_by_id(model.id, db=db)
@@ -6014,10 +6469,22 @@ async def run_prune(form_data: PruneDataForm) -> dict:
             async with get_async_db() as db:
                 for folder in await get_all_folders(db=db):
                     _prog_tick()
-                    if str(folder.user_id) not in active_user_ids:
-                        await Folders.delete_folder_by_id_and_user_id(
-                            folder.id, folder.user_id, db=db
-                        )
+                    if await _owner_is_gone(
+                        folder.user_id, active_user_ids, owner_checks
+                    ):
+                        if folder.id in shared_folders:
+                            continue
+                        # Open WebUI's folder delete would take kept shared subfolders with it
+                        await db.execute(delete(Folder).where(Folder.id == folder.id))
+                        if AccessGrant is not None:
+                            await db.execute(
+                                delete(AccessGrant).where(
+                                    and_(
+                                        AccessGrant.resource_type == "folder",
+                                        AccessGrant.resource_id == folder.id,
+                                    )
+                                )
+                            )
                         folders_deleted += 1
                         deleted_others += 1
                         await db.commit()
@@ -6085,26 +6552,54 @@ async def run_prune(form_data: PruneDataForm) -> dict:
             log.info("Skipping age-based channel message deletion (disabled)")
 
         # Stage 4: Clean up orphaned physical files and vector collections.
-        # Recompute preservation sets after Stage 3 deletions — files that
+        # Compute preservation sets after Stage 3 deletions — files that
         # were only referenced by now-deleted chats/KBs should no longer
         # be considered active.  This is safe with the streaming-based
         # get_active_file_ids() that replaced the OOM-prone ORM version.
-        log.info("Recomputing preservation sets after deletions")
-        _prog_stage("Recomputing preservation set")
+        # Again: KBs, chats and channels deleted above left their link rows behind
+        _prog_stage("Cleaning junction tables")
+        await cleanup_dangling_junction_rows()
+        log.info("Computing preservation sets after deletions")
+        _prog_stage("Computing preservation set")
         active_user_ids = {str(user.id) for user in (await Users.get_users())["users"]}
         active_kb_ids = await get_preserved_kb_ids(form_data, active_user_ids)
-        active_file_ids = await get_active_file_ids(
+        active_file_ids, _ = await get_active_file_ids(
             active_user_ids=active_user_ids, preserved_kb_ids=active_kb_ids
         )
-        # Vector collections follow file ROWS (like storage bytes): any row
-        # that survived stage 3 (referenced, grace-protected, or deferred to
-        # the next run) keeps its embeddings.
-        all_file_row_ids = await get_all_file_row_ids()
+
+        deleted_files = 0
+        # A file is orphaned only when unreferenced: a deleted uploader's files
+        # can still back another user's live KB or chat. Fresh uploads get a
+        # grace window (upload and first reference are separate requests).
+        grace_cutoff = int(time.time()) - max(
+            0, int(getattr(form_data, "orphan_file_grace_hours", 0) or 0)
+        ) * 3600
+        async with get_async_db() as db:
+            _prog_stage("Sweeping orphaned files", await _count_rows(db, File))
+            async for fid, _uid, created_at in stream_rows(
+                db, File.id, File.user_id, File.created_at
+            ):
+                _prog_tick()
+                if created_at is not None and created_at > grace_cutoff:
+                    continue
+                file_id = str(fid)
+                if file_id not in active_file_ids and not await _file_is_linked(
+                    file_id
+                ):
+                    if await safe_delete_file_by_id(fid, vector_cleaner, db=db):
+                        deleted_files += 1
+                    await db.commit()
+                    await _pace()
+
+        if deleted_files > 0:
+            log.info(f"Deleted {deleted_files} orphaned files")
 
         log.info("Cleaning up orphaned physical files")
 
         _prog_stage("Deleting orphaned uploads from storage")
-        deleted_uploads = await cleanup_orphaned_uploads(active_file_ids)
+        deleted_uploads = await cleanup_orphaned_uploads(
+            active_file_ids, form_data.orphan_file_grace_hours
+        )
         if deleted_uploads > 0:
             log.info(f"Deleted {deleted_uploads} orphaned upload files")
 
@@ -6121,11 +6616,15 @@ async def run_prune(form_data: PruneDataForm) -> dict:
         # Use modular vector database cleanup
         _prog_stage("Cleaning vector collections")
         warnings = []
+        # Vector collections follow file ROWS (like storage bytes): any row
+        # that survived the file sweep (referenced or grace-protected) keeps
+        # its embeddings.
+        referenced = {}
+        load_active_ids = _blocking_on_loop(
+            lambda: get_current_active_ids(form_data, referenced)
+        )
         deleted_vector_count, vector_error = await asyncio.to_thread(
-            vector_cleaner.cleanup_orphaned_collections,
-            all_file_row_ids,
-            active_kb_ids,
-            active_user_ids,
+            vector_cleaner.cleanup_orphaned_collections, load_active_ids
         )
         if vector_error:
             warnings.append(f"Vector cleanup warning: {vector_error}")
@@ -6136,7 +6635,8 @@ async def run_prune(form_data: PruneDataForm) -> dict:
         if form_data.delete_orphaned_kb_metadata:
             _prog_stage("Cleaning the knowledge-base search index")
             deleted_kb_meta = await asyncio.to_thread(
-                vector_cleaner.cleanup_orphaned_kb_metadata, active_kb_ids
+                vector_cleaner.cleanup_orphaned_kb_metadata,
+                _blocking_on_loop(lambda: get_current_active_kb_ids(form_data)),
             )
             if deleted_kb_meta > 0:
                 log.info(f"Deleted {deleted_kb_meta} orphaned KB metadata embeddings")
@@ -6162,10 +6662,11 @@ async def run_prune(form_data: PruneDataForm) -> dict:
         # left their vector point behind).
         if form_data.delete_orphaned_memories:
             await delete_orphaned_memory_rows(active_user_ids)
-            memory_ids_by_user = await get_memory_ids_by_user(active_user_ids)
-            _prog_stage("Reconciling memory embeddings", len(memory_ids_by_user))
+            _prog_stage("Reconciling memory embeddings", len(active_user_ids))
             deleted_mem = await asyncio.to_thread(
-                vector_cleaner.cleanup_orphaned_memories, memory_ids_by_user
+                vector_cleaner.cleanup_orphaned_memories,
+                active_user_ids,
+                _blocking_on_loop(get_user_memory_ids),
             )
             if deleted_mem > 0:
                 log.info(f"Deleted {deleted_mem} orphaned memories")
@@ -6208,7 +6709,7 @@ async def run_prune(form_data: PruneDataForm) -> dict:
 # manual admin UI + API (same deletion engine as the automatic passes)
 # ============================================================================
 
-PLUGIN_VERSION = "0.10.10"
+PLUGIN_VERSION = "0.11.0"
 MAX_RUN_LOG_LINES = 4000
 MAX_RUNS_KEPT = 20
 
@@ -6221,6 +6722,9 @@ _STATE = {
     "redis": None,
     "redis_prefix": "open-webui",
     "redis_tried": False,
+    "function_id": None,
+    "app": None,
+    "full_sweep_pending": False,
 }
 
 
@@ -6384,6 +6888,32 @@ PruneLock.acquire = _combined_lock_acquire
 PruneLock.release = _combined_lock_release
 
 
+def _set_full_sweep_pending(pending: bool) -> None:
+    """Kept where the claims live, so whichever worker wins the next pass sees it."""
+    r = _redis()
+    if r is not None:
+        key = f"{_STATE['redis_prefix']}:prune:full-sweep-pending"
+        try:
+            if pending:
+                r.set(key, "1")
+            else:
+                r.delete(key)
+            return
+        except Exception as e:
+            log.warning(f"prune: Redis pending flag failed, using local fallback: {e}")
+    _STATE["full_sweep_pending"] = pending
+
+
+def _full_sweep_pending() -> bool:
+    r = _redis()
+    if r is not None:
+        try:
+            return bool(r.exists(f"{_STATE['redis_prefix']}:prune:full-sweep-pending"))
+        except Exception as e:
+            log.warning(f"prune: Redis pending flag failed, using local fallback: {e}")
+    return _STATE["full_sweep_pending"]
+
+
 def _unclaim(key: str) -> None:
     """Undo a claim whose pass never ran, so the cooldown isn't burned."""
     r = _redis()
@@ -6429,7 +6959,7 @@ def _days(value) -> Optional[int]:
 def _make_cleaner():
     return get_vector_database_cleaner(
         VECTOR_DB,
-        VECTOR_DB_CLIENT,
+        get_vector_db_client_or_none(),
         Path(CACHE_DIR),
         enable_milvus_multitenancy=ENABLE_MILVUS_MULTITENANCY_MODE,
         enable_qdrant_multitenancy=ENABLE_QDRANT_MULTITENANCY_MODE,
@@ -6471,6 +7001,7 @@ def _form_from_valves(v: dict) -> PruneDataForm:
         exempt_shared_orphaned_skills=v.get("exempt_shared_orphaned_skills", True),
         delete_orphaned_skills=v["delete_orphaned_skills"],
         delete_orphaned_folders=v["delete_orphaned_folders"],
+        exempt_shared_orphaned_folders=v.get("exempt_shared_orphaned_folders", True),
         delete_orphaned_chat_messages=v["delete_orphaned_chat_messages"],
         delete_orphaned_automations=v["delete_orphaned_automations"],
         channel_message_max_age_days=_days(v["channel_message_max_age_days"]),
@@ -6507,8 +7038,7 @@ async def _delete_old_chats_paced(
 
         deleted = 0
         async for (chat_id,) in stream_rows(db, Chat.id, filter_clause=conditions):
-            # delete_chat_by_id swallows exceptions and returns False
-            if await Chats.delete_chat_by_id(chat_id, db=db):
+            if await delete_chat_with_orphan_tags(chat_id, db):
                 deleted += 1
             await db.commit()  # release the write lock before sleeping
             await _pace()
@@ -6551,22 +7081,41 @@ async def _pass_users(v: dict):
         log.info("prune: users pass skipped, prune lock held")
         return
     try:
-        await delete_inactive_users(
+        deleted_users = await delete_inactive_users(
             inactive_days,
             _make_cleaner(),
             v["exempt_admin_users"],
             v["exempt_pending_users"],
         )
+        if deleted_users:
+            _set_full_sweep_pending(True)
     finally:
         PruneLock.release()
+    if deleted_users and _claim_full_sweep(v):
+        await _pass_pending_full(v)
 
 
-async def _pass_full(v: dict):
+async def _pass_full(v: dict) -> bool:
     """Full sweep: everything configured, incl. orphan + vector + storage cleanup."""
     form_data = _form_from_valves(v)
     outcome = await run_prune(form_data)
     if not outcome.get("ok"):
         log.error(f"prune: full pass failed: {outcome.get('error')}")
+    else:
+        _set_full_sweep_pending(False)
+    return bool(outcome.get("ok"))
+
+
+async def _pass_pending_full(v: dict, replaced_pass: Optional[str] = None) -> None:
+    """The pending full sweep after deleted accounts; frees its claims unless it succeeds."""
+    succeeded = False
+    try:
+        succeeded = await _pass_full(v)
+    finally:
+        if not succeeded:
+            _unclaim("full-sweep")
+            if replaced_pass:
+                _unclaim(replaced_pass)
 
 
 # ---- one-shot VACUUM (sync body from standalone Stage 5, run in a thread) ----
@@ -6588,7 +7137,9 @@ def _run_vacuum_sync(vector_cleaner):
     except Exception as e:
         log.error(f"Failed to vacuum main database: {e}")
 
-    if isinstance(vector_cleaner, ChromaDatabaseCleaner):
+    if isinstance(vector_cleaner, ChromaDatabaseCleaner) and not isinstance(
+        vector_cleaner, RemoteChromaDatabaseCleaner
+    ):
         try:
             with sqlite3.connect(str(vector_cleaner.chroma_db_path)) as conn:
                 conn.execute("VACUUM")
@@ -6610,6 +7161,25 @@ def _run_vacuum_sync(vector_cleaner):
 def _full_sweep_ttl(v: dict) -> int:
     hours = int(v["full_sweep_interval_hours"] or 0)
     return hours * 3600 if hours > 0 else 600
+
+
+def _claim_full_sweep(v: dict) -> bool:
+    """Interval claim for an event-triggered full sweep; never with interval 0 (startup only)."""
+    return int(v["full_sweep_interval_hours"] or 0) > 0 and _claim(
+        "full-sweep", _full_sweep_ttl(v)
+    )
+
+
+def _spawn_targeted_pass(v: dict, name: str, factory: Callable) -> None:
+    """Spawn a chats or users pass, or the pending full sweep instead, which runs both."""
+    if _full_sweep_pending() and _claim_full_sweep(v):
+        _spawn(
+            "full",
+            lambda: _pass_pending_full(v, name),
+            on_skip=lambda: (_unclaim("full-sweep"), _unclaim(name)),
+        )
+    else:
+        _spawn(name, factory, on_skip=lambda: _unclaim(name))
 
 
 # ---- manual runs (UI/API); same engine, with per-run log capture ----
@@ -6745,6 +7315,8 @@ def mount_routes(app, settings: dict):
         for r in app.router.routes
         if getattr(r, "path", None) == prefix
         or str(getattr(r, "path", "")).startswith(prefix + "/")
+        # never Open WebUI's own routes, e.g. with a route_prefix of /api
+        if hasattr(r, "endpoint") and r.endpoint.__module__ == __name__
     ]
     if stale:
         # Module was re-executed (in-place code update). Starlette can't swap a
@@ -6758,6 +7330,14 @@ def mount_routes(app, settings: dict):
             r for r in app.router.routes if id(r) not in stale_ids
         ]
         log.info("prune: refreshed %d route(s) after code update", len(stale))
+
+    async def get_active_admin(user=Depends(get_admin_user)):
+        # Routes outlive a disable or delete until restart
+        function = await Functions.get_function_by_id(_STATE["function_id"])
+        if function is None or not function.is_active:
+            raise HTTPException(status_code=404)
+        return user
+
     router = APIRouter()
 
     # ---- page: session-gated BEFORE any HTML is served; admins only ----
@@ -6780,13 +7360,14 @@ def mount_routes(app, settings: dict):
                 if header_key == b"set-cookie":
                     redirect.raw_headers.append((header_key, header_value))
             return redirect
+        await get_active_admin(user)
         return HTMLResponse(
             page_html,
             headers={"Cache-Control": "no-store"},
         )
 
     @router.get(f"{prefix}/api/status", include_in_schema=False)
-    async def status(user=Depends(get_admin_user)):
+    async def status(user=Depends(get_active_admin)):
         running = _STATE["lock"] is not None and _STATE["lock"].locked()
         current = next((r for r in _STATE["runs"] if r["status"] == "running"), None)
         return {
@@ -6841,7 +7422,7 @@ def mount_routes(app, settings: dict):
         return {"ok": True, "run_id": run["id"]}
 
     @router.post(f"{prefix}/api/preview", include_in_schema=False)
-    async def preview(request: Request, body: dict, user=Depends(get_admin_user)):
+    async def preview(request: Request, body: dict, user=Depends(get_active_admin)):
         # Same bearer requirement as execute: preview is not destructive but
         # it takes the global run lock and scans the whole database. Runs in
         # the background like execute; poll the run for progress and result.
@@ -6853,7 +7434,7 @@ def mount_routes(app, settings: dict):
         return _start_manual_run(body, user, dry_run=True)
 
     @router.post(f"{prefix}/api/execute", include_in_schema=False)
-    async def execute(request: Request, body: dict, user=Depends(get_admin_user)):
+    async def execute(request: Request, body: dict, user=Depends(get_active_admin)):
         # CSRF hardening: the UI always sends a Bearer header; never accept
         # cookie-only auth for the destructive endpoint.
         if not request.headers.get("authorization", "").lower().startswith("bearer "):
@@ -6870,7 +7451,7 @@ def mount_routes(app, settings: dict):
         category: str,
         page: int = 1,
         page_size: int = 50,
-        user=Depends(get_admin_user),
+        user=Depends(get_active_admin),
     ):
         # Same bearer requirement as preview: whole-database scans must not
         # be reachable with cookie-only auth. The UI always sends the header.
@@ -6896,7 +7477,7 @@ def mount_routes(app, settings: dict):
             )
 
     @router.post(f"{prefix}/api/runs/{{run_id}}/cancel", include_in_schema=False)
-    async def cancel_run(request: Request, run_id: str, user=Depends(get_admin_user)):
+    async def cancel_run(request: Request, run_id: str, user=Depends(get_active_admin)):
         # Bearer-gated like preview/execute: a state-changing control on the run.
         if not request.headers.get("authorization", "").lower().startswith("bearer "):
             return JSONResponse(
@@ -6919,11 +7500,11 @@ def mount_routes(app, settings: dict):
         return {"ok": True, "run_id": run_id, "status": "cancelling"}
 
     @router.get(f"{prefix}/api/runs", include_in_schema=False)
-    async def runs(user=Depends(get_admin_user)):
+    async def runs(user=Depends(get_active_admin)):
         return {"runs": [_run_summary(r, log_tail=5) for r in _STATE["runs"]]}
 
     @router.get(f"{prefix}/api/runs/{{run_id}}", include_in_schema=False)
-    async def run_detail(run_id: str, user=Depends(get_admin_user)):
+    async def run_detail(run_id: str, user=Depends(get_active_admin)):
         for r in _STATE["runs"]:
             if r["id"] == run_id:
                 return _run_summary(r, log_tail=1000)
@@ -6964,15 +7545,15 @@ class Event:
         )
         event_recheck_minutes: int = Field(
             default=60,
-            description="At most one automatic recheck of old chats and inactive users per this many minutes, triggered by normal activity such as logins and chat updates. 0 = never recheck on events. Full sweeps are controlled by Full Sweep Interval Hours instead.",
+            description="At most one automatic recheck of old chats and inactive users per this many minutes, triggered by normal activity such as logins and chat updates. 0 = never recheck on events. Full sweeps are controlled by Full Sweep Interval Hours instead; a full sweep still pending after inactive users were deleted runs in place of a recheck.",
         )
         full_sweep_interval_hours: int = Field(
             default=24,
-            description="At most one full cleanup sweep (orphaned records, storage, vector collections) per this many hours, triggered at startup or by user and knowledge base deletions. 0 = sweep only at server startup, on every startup.",
+            description="At most one full cleanup sweep (orphaned records, storage, vector collections) per this many hours, triggered at startup, by user and knowledge base deletions, or after the inactive-user check deleted accounts. 0 = sweep only at server startup, on every startup.",
         )
         orphan_file_grace_hours: int = Field(
             default=24,
-            description="Never treat files younger than this many hours as orphaned, and never touch knowledge base embeddings of files updated within the window. Protects uploads the user has not yet attached to a chat or knowledge base (0 = no protection).\n\n---\n\n#### 🕒 Age Rules",
+            description="Never treat files or stored upload objects younger than this many hours as orphaned, and never touch knowledge base embeddings of files updated within the window. Protects uploads the user has not yet attached to a chat or knowledge base, and uploads still being written (0 = no protection).\n\n---\n\n#### 🕒 Age Rules",
         )
         chat_max_age_days: int = Field(
             default=0,
@@ -6996,7 +7577,7 @@ class Event:
         )
         inactive_user_days: int = Field(
             default=0,
-            description="\u26a0\ufe0f Delete user accounts inactive for this many days, INCLUDING all their private data (0 = never). Files they uploaded that other users still rely on are kept.",
+            description="\u26a0\ufe0f Delete user accounts inactive for this many days (0 = never), with their chats, automations, memories and OAuth sign-ins. Files they uploaded that other users still rely on are kept.",
         )
         exempt_admin_users: bool = Field(
             default=True,
@@ -7076,21 +7657,25 @@ class Event:
         delete_orphaned_folders: bool = Field(
             default=True, description="Delete folders that belonged to deleted users."
         )
+        exempt_shared_orphaned_folders: bool = Field(
+            default=True,
+            description="\u21b3 Keep them, subfolders included, when a living user, an existing group or a public grant can still access them.",
+        )
         delete_orphaned_automations: bool = Field(
             default=True,
             description="Delete automations, including their run history, that belonged to deleted users.\n\n---\n\n#### 💬 Channels",
         )
         channel_message_max_age_days: int = Field(
             default=0,
-            description="Delete channel messages older than this many days (0 = keep forever).",
+            description="Delete channel messages older than this many days, replies of an old thread included (0 = keep forever).",
         )
         exempt_pinned_channel_messages: bool = Field(
             default=True,
-            description="\u21b3 Never auto-delete pinned channel messages.",
+            description="\u21b3 Never auto-delete pinned channel messages; replies of a pinned thread parent are only deleted by their own age.",
         )
         delete_orphaned_channel_messages: bool = Field(
             default=True,
-            description="Delete channel messages whose channel no longer exists.",
+            description="Delete channel messages whose channel no longer exists, and unpinned thread replies whose thread parent is gone.",
         )
         delete_orphaned_channels: bool = Field(
             default=False,
@@ -7116,6 +7701,7 @@ class Event:
             _STATE["lock"] = asyncio.Lock()
         log.setLevel(logging.INFO)
         PruneLock.init(Path(CACHE_DIR))
+        _STATE["app"] = app
         if app is not None:
             mount_routes(app, v)
         _STATE["started"] = True
@@ -7138,6 +7724,7 @@ class Event:
         _PACE["rows_per_second"] = max(0, int(v["deletion_rows_per_second"] or 0))
         _PACE["scan_rows_per_second"] = max(0, int(v.get("scan_rows_per_second") or 0))
         name = __event_name__ or ""
+        _STATE["function_id"] = __id__
 
         if name == "system.startup.completed":
             self._init(__app__, v)
@@ -7184,7 +7771,7 @@ class Event:
                 )
                 and _claim("chats", cooldown)
             ):
-                _spawn("chats", lambda: _pass_chats(v), on_skip=lambda: _unclaim("chats"))
+                _spawn_targeted_pass(v, "chats", lambda: _pass_chats(v))
 
         elif name in ("auth.login", "user.created"):
             if (
@@ -7192,12 +7779,10 @@ class Event:
                 and _days(v["inactive_user_days"]) is not None
                 and _claim("users", cooldown)
             ):
-                _spawn("users", lambda: _pass_users(v), on_skip=lambda: _unclaim("users"))
+                _spawn_targeted_pass(v, "users", lambda: _pass_users(v))
 
         elif name in ("user.deleted", "knowledge.deleted", "file.deleted_all"):
-            if int(v["full_sweep_interval_hours"] or 0) > 0 and _claim(
-                "full-sweep", _full_sweep_ttl(v)
-            ):
+            if event.get("source") != "prune" and _claim_full_sweep(v):
                 _spawn(
                     "full",
                     lambda: _pass_full(v),
@@ -7316,7 +7901,7 @@ const token = localStorage.getItem('token');
 const SECTIONS = [
  {title:'🛡️ Safety', fields:[
   {k:'orphan_file_grace_hours',t:'num',label:'Protect uploads younger than',unit:'hours',val:24,
-   tip:'Files younger than this are never treated as orphaned. Uploading and attaching are separate steps in Open WebUI, so this protects uploads not yet attached to a chat or knowledge base. 0 disables the protection.'},
+   tip:'Files and stored upload objects younger than this are never treated as orphaned. Uploading and attaching are separate steps in Open WebUI, so this protects uploads not yet attached to a chat or knowledge base, and uploads still being written. 0 disables the protection.'},
  ]},
  {title:'🚦 Speed (this run only)', fields:[
   {k:'scan_rows_per_second',t:'num',label:'Scan speed',unit:'rows/s',val:50000,ph:'valve',
@@ -7338,7 +7923,7 @@ const SECTIONS = [
  ]},
  {title:'👤 Inactive Users', fields:[
   {k:'delete_inactive_users_days',t:'num',label:'Delete users inactive for',unit:'days',
-   tip:'DESTRUCTIVE: deletes the account, its login credentials and all its private data. Files they uploaded that other users still rely on are kept. Empty = off.'},
+   tip:'DESTRUCTIVE: deletes the account, its login, chats, automations, memories and OAuth sign-ins. Files they uploaded that other users still rely on are kept. Empty = off.'},
   {k:'exempt_admin_users',t:'chk',def:true,label:'Never delete admins',
    tip:'Strongly recommended. Admin accounts are never deleted by the rule above.'},
   {k:'exempt_pending_users',t:'chk',def:true,label:'Never delete pending users',
@@ -7383,15 +7968,17 @@ const SECTIONS = [
   {k:'exempt_shared_orphaned_notes',t:'chk',def:true,parent:'delete_orphaned_notes',label:'↳ Keep shared ones',
    tip:'Kept when a living user, an existing group or a public grant can still access them.'},
   {k:'delete_orphaned_folders',t:'chk',def:true,label:'Folders of deleted users',tip:'Chat folders whose owner account no longer exists.'},
+  {k:'exempt_shared_orphaned_folders',t:'chk',def:true,parent:'delete_orphaned_folders',label:'↳ Keep shared ones',
+   tip:'Kept, subfolders included, when a living user, an existing group or a public grant can still access them.'},
   {k:'delete_orphaned_automations',t:'chk',def:true,label:'Automations of deleted users',tip:'Automations and their run history.'},
  ]},
  {title:'💬 Channels', fields:[
   {k:'channel_message_max_age_days',t:'num',label:'Delete channel messages older than',unit:'days',
-   tip:'Age-based cleanup of channel messages; the channels themselves are kept. Empty = off.'},
+   tip:'Age-based cleanup of channel messages, replies of an old thread included; the channels themselves are kept. Empty = off.'},
   {k:'exempt_pinned_channel_messages',t:'chk',def:true,label:'↳ Keep pinned channel messages',
-   tip:'Pinned messages survive the age rule above.'},
+   tip:'Pinned messages survive the age rule above; replies of a pinned thread parent are only deleted by their own age.'},
   {k:'delete_orphaned_channel_messages',t:'chk',def:true,label:'Messages of deleted channels',
-   tip:'Channel messages whose channel no longer exists.'},
+   tip:'Channel messages whose channel no longer exists, and unpinned thread replies whose thread parent is gone.'},
   {k:'delete_orphaned_channels',t:'chk',def:false,label:'Channels of deleted users',
    tip:'Off by default: channels are shared infrastructure, other members may still use them.'},
  ]},
