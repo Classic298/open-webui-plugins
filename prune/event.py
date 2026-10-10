@@ -3,8 +3,8 @@ title: Prune
 author: classic298
 author_url: https://github.com/Classic298
 funding_url: https://github.com/Classic298/prune-open-webui
-version: 0.11.0
-required_open_webui_version: 0.10.2
+version: 0.12.0
+required_open_webui_version: 0.11.3
 description: Automatic, throttled database and storage cleanup. Configure retention via Valves (0 = disabled); pruning runs event-driven on one worker only, slowly, so a live instance stays responsive.
 """
 # Single-file Event function port of https://github.com/Classic298/prune-open-webui.
