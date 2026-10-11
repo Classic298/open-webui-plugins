@@ -5,6 +5,7 @@
 
 import asyncio
 import logging
+import re
 import uuid
 from typing import Any, Optional
 
@@ -21,8 +22,8 @@ ASSET_KEY = "my-plugin"  # fixed, used for asset_register too
 # ===========================================================================
 RELOAD_STATE_ATTR = "_owui_live_reload"  # {key: {active, exec_id, listener}}
 RELOAD_EXEC_ID = uuid.uuid4().hex  # new on every exec of this source
-# Open WebUI executes each function as module "function_<id>".
-RELOAD_FUNCTION_ID = __name__.removeprefix("function_")
+# Open WebUI runs each function as module "function_<id>_<hex>" (older: "function_<id>").
+RELOAD_FUNCTION_ID = re.sub(r"_[0-9a-f]{32}$", "", __name__.removeprefix("function_"))
 
 reload_log = logging.getLogger("owui-live-reload")
 # asyncio only keeps weak references to tasks.

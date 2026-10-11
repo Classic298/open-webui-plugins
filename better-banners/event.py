@@ -3,7 +3,7 @@ title: Better Banners
 author: Classic298
 author_url: https://github.com/Classic298
 funding_url: https://github.com/Classic298
-version: 1.0.1
+version: 1.1.0
 required_open_webui_version: 0.11.3
 description: Shows the banners from Admin Panel → Settings → General → Banners in every chat, at the top of the page or right above the message input. Users can collapse the banners into a small pill and dismiss the dismissible ones, and both choices are remembered. Banner edits reach open tabs live, in each user's language. Inspired by Broadcast Toasts by G30.
 """
@@ -12,6 +12,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import re
 import uuid
 from pathlib import Path
 from typing import Any, Literal, Optional
@@ -30,8 +31,8 @@ ASSET_KEY = "better-banners"  # fixed, used for asset_register too
 # ===========================================================================
 RELOAD_STATE_ATTR = "_owui_live_reload"  # {key: {active, exec_id, listener}}
 RELOAD_EXEC_ID = uuid.uuid4().hex  # new on every exec of this source
-# Open WebUI executes each function as module "function_<id>".
-RELOAD_FUNCTION_ID = __name__.removeprefix("function_")
+# Open WebUI runs each function as module "function_<id>_<hex>" (older: "function_<id>").
+RELOAD_FUNCTION_ID = re.sub(r"_[0-9a-f]{32}$", "", __name__.removeprefix("function_"))
 
 reload_log = logging.getLogger("owui-live-reload")
 # asyncio only keeps weak references to tasks.
