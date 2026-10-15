@@ -51,10 +51,10 @@ def reload_active(app: Any) -> bool:
     return bool(reload_state(app).get("active"))
 
 
-def reload_channel() -> str:
+def reload_channel(key: Optional[str] = None) -> str:
     from open_webui.env import REDIS_KEY_PREFIX
 
-    return f"{REDIS_KEY_PREFIX}:live-reload:{ASSET_KEY}"
+    return f"{REDIS_KEY_PREFIX}:live-reload:{key or ASSET_KEY}"
 
 
 def reload_mark_loaded(app: Any) -> None:
@@ -64,12 +64,12 @@ def reload_mark_loaded(app: Any) -> None:
     state["exec_id"] = RELOAD_EXEC_ID
 
 
-async def reload_publish(app: Any, active: bool) -> None:
+async def reload_publish(app: Any, active: bool, key: Optional[str] = None) -> None:
     redis = getattr(app.state, "redis", None)
     if redis is None:
         return
     try:
-        await redis.publish(reload_channel(), JSONCodec.dumps({"active": active}))
+        await redis.publish(reload_channel(key), JSONCodec.dumps({"active": active}))
     except Exception as e:
         reload_log.warning("[%s] publish failed: %s", ASSET_KEY, type(e).__name__)
 
@@ -188,7 +188,13 @@ async def reload_on_event(
     await reload_ensure_listener(app)
     state = reload_state(app)
 
-    is_own = ((event or {}).get("subject") or {}).get("id") == RELOAD_FUNCTION_ID
+    subject_id = ((event or {}).get("subject") or {}).get("id")
+    asset_withdraw_deleted(app, event, event_name)
+    if event_name == "function.deleted" and subject_id:
+        # Its own listeners on other containers switch its fragment off.
+        await reload_publish(app, False, f"function_{subject_id}")
+
+    is_own = subject_id == RELOAD_FUNCTION_ID
     if is_own and event_name == "function.disable_started":
         state["active"] = False
         await reload_publish(app, False)
@@ -222,8 +228,8 @@ async def reload_on_event(
 #   * Lower `order` composes first (default 0).
 #   * Producers run on the event loop for every request, 304s included: return
 #     a prebuilt string, no I/O, no locks.
-#   * Return "" to withdraw. A deleted plugin never sees its own deletion, so
-#     disable it first.
+#   * Return "" to withdraw. A deleted plugin never sees its own deletion; any
+#     other plugin calling asset_withdraw_deleted() drops its fragments.
 #   * Inline fragments only: <script src> / @import lands after hydration.
 # ===========================================================================
 LOADER_PATH = "/static/loader.js"
@@ -264,6 +270,16 @@ def asset_sort_key(item):
     except (TypeError, ValueError):
         order = 0
     return (order, key)
+
+
+def asset_withdraw_deleted(app: Any, event: Any, event_name: Any) -> None:
+    """Drop a deleted plugin's fragments; call it from your event handler."""
+    if event_name not in ("function.deleted", "tool.deleted"):
+        return
+    kind = event_name.split(".")[0]
+    subject_id = ((event or {}).get("subject") or {}).get("id")
+    for bucket in getattr(app.state, ASSET_REGISTRY_ATTR, {}).values():
+        bucket.pop(f"{kind}_{subject_id}", None)
 
 
 def asset_strip_block(content: str, start_marker: str, end_marker: str) -> str:

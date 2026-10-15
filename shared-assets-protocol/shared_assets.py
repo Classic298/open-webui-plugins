@@ -23,8 +23,8 @@ from typing import Any
 #   * Lower `order` composes first (default 0).
 #   * Producers run on the event loop for every request, 304s included: return
 #     a prebuilt string, no I/O, no locks.
-#   * Return "" to withdraw. A deleted plugin never sees its own deletion, so
-#     disable it first.
+#   * Return "" to withdraw. A deleted plugin never sees its own deletion; any
+#     other plugin calling asset_withdraw_deleted() drops its fragments.
 #   * Inline fragments only: <script src> / @import lands after hydration.
 # ===========================================================================
 LOADER_PATH = "/static/loader.js"
@@ -65,6 +65,16 @@ def asset_sort_key(item):
     except (TypeError, ValueError):
         order = 0
     return (order, key)
+
+
+def asset_withdraw_deleted(app: Any, event: Any, event_name: Any) -> None:
+    """Drop a deleted plugin's fragments; call it from your event handler."""
+    if event_name not in ("function.deleted", "tool.deleted"):
+        return
+    kind = event_name.split(".")[0]
+    subject_id = ((event or {}).get("subject") or {}).get("id")
+    for bucket in getattr(app.state, ASSET_REGISTRY_ATTR, {}).values():
+        bucket.pop(f"{kind}_{subject_id}", None)
 
 
 def asset_strip_block(content: str, start_marker: str, end_marker: str) -> str:

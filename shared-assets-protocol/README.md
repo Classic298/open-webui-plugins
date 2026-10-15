@@ -72,7 +72,8 @@ asset_register(
 | Wrap your JS in its own function with a try/catch. | All fragments end up in one `loader.js`. An uncaught error, a syntax error or a top-level `const` or `let` that another fragment declares too stops the code of every plugin in the file. |
 | Use `order` to sort. | Lower `order` comes first. In `custom.css` that means later plugins win conflicts; in `loader.js` it means running first. The default is `0`. |
 | Keep the producer fast. | It runs for every page load, even when the browser already has the latest file. Return a prepared string, and cache anything slow (file checks, network, locks) so a call costs microseconds. |
-| Return `""` to switch off. | There is no way to unregister. Open WebUI tells a plugin when it is being disabled, but a deleted plugin never finds out, so disable a plugin before deleting it or its code stays until the server restarts. |
+| Return `""` to switch off. | There is no way to unregister. Open WebUI tells a plugin when it is being disabled, but a deleted plugin never finds out. |
+| Call `asset_withdraw_deleted(__app__, event, __event_name__)` from your event handler. | It drops the code of any plugin that was just deleted, which that plugin cannot do itself. One installed event function that calls it is enough to clean up after every other plugin; without one, a deleted plugin's code stays until the server restarts, so disable a plugin before deleting it. Live reload calls it for you and, when the deleted plugin also uses live reload, switches it off on the other containers too. |
 | Put your code inline. | Loading another file with `<script src>` or `@import` arrives too late, after the app has already started. |
 | It covers the main app only. | Pages that a plugin serves on its own do not load these files and need their own code. |
 
@@ -88,7 +89,7 @@ The optional [`live_reload.py`](live_reload.py) add-on makes all three reach eve
 
 Without Redis the add-on does nothing extra. It needs Open WebUI 0.11.0 or newer.
 
-The add-on is separate from the protocol itself and does not change `ASSET_IMPL_VERSION`. Everything in it is scoped to your own plugin, so your copy never affects anybody else's. It has its own `RELOAD_IMPL_VERSION` for the Redis listener: raise it by one whenever you change the listener, and running containers swap the old listener for the new one on the next load instead of keeping it until a restart.
+The add-on is separate from the protocol itself and does not change `ASSET_IMPL_VERSION`. It needs the shared asset block in the same file. Apart from cleaning up after a deleted plugin, everything in it is scoped to your own plugin, so your copy never affects anybody else's. It has its own `RELOAD_IMPL_VERSION` for the Redis listener: raise it by one whenever you change the listener, and running containers swap the old listener for the new one on the next load instead of keeping it until a restart.
 
 1. Copy everything in [`live_reload.py`](live_reload.py) into your event function, above the shared asset block.
 2. Put your `asset_register` calls into a function called `register(app)` and let each producer return `""` when `reload_active(app)` is false.
