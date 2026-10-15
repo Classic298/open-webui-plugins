@@ -1053,8 +1053,11 @@ LOADER_SCRIPT = r"""
 
 
 def register(app: Any) -> None:
-    # Up to 1.0.2 the key was "better-banners": drop that fragment.
+    # Up to 1.0.2 the key was "better-banners": drop that fragment, wake its listeners.
     asset_fragments(app, LOADER_PATH).pop("better-banners", None)
+    task = asyncio.create_task(reload_publish(app, True, "better-banners"))
+    reload_tasks.add(task)
+    task.add_done_callback(reload_tasks.discard)
     asset_register(
         app,
         LOADER_PATH,
