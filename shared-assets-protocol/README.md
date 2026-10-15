@@ -6,7 +6,7 @@ A community standard that lets any number of Open WebUI plugins add their own Ja
 |---|---|
 | **Author** | [Classic298](https://github.com/Classic298) |
 | **Specced with** | G30 (silentoplayz) |
-| **Current version** | `ASSET_IMPL_VERSION = 4` |
+| **Current version** | `ASSET_IMPL_VERSION = 5` |
 | **Reference code** | [`shared_assets.py`](shared_assets.py) |
 | **License** | [BSD 3-Clause](../LICENSE) |
 
@@ -31,7 +31,7 @@ This protocol fixes that. Each plugin hands its piece of code (a "fragment") to 
 
 ## How it works
 
-1. Your plugin registers a fragment under a fixed name (the **key**), together with a function that returns the fragment's code (the **producer**).
+1. Your plugin registers a fragment together with a function that returns the fragment's code (the **producer**). The fragment is stored under your plugin's Open WebUI id (the **key**), which the block reads by itself.
 2. The first plugin to register replaces Open WebUI's static route for that file with a shared route. Later plugins find the route already there and only add their fragment.
 3. On every request for the file, the shared route reads the file from disk, adds every fragment in order and sends the result.
 4. If a plugin ships a newer copy of the protocol code (a higher `ASSET_IMPL_VERSION`), its route replaces the older one. The fragments are kept, so nothing gets lost along the way.
@@ -41,7 +41,7 @@ The list lives in the memory of each Open WebUI process. With several containers
 ## How to use it
 
 1. Copy everything in [`shared_assets.py`](shared_assets.py) into your plugin **byte for byte**. Do not reformat it and do not rename anything. Every plugin ships the same copy, and whichever copy runs serves everybody.
-2. Pick a fixed key for your plugin, for example `"my-plugin"`, and two marker comments that wrap your code.
+2. Pick two marker comments that wrap your code. You do not pick a key: the block uses your plugin's Open WebUI id, and Open WebUI never gives two plugins the same id.
 3. Register your fragment from your plugin's event handler, where Open WebUI passes the app as `__app__`:
 
 ```python
@@ -51,7 +51,6 @@ LOADER_BLOCK_END = "// my-plugin:end"
 asset_register(
     __app__,
     LOADER_PATH,            # or CUSTOM_CSS_PATH for CSS
-    "my-plugin",            # fixed key
     LOADER_BLOCK_START,
     LOADER_BLOCK_END,
     self._loader_fragment,  # returns the code as a string
@@ -69,10 +68,12 @@ asset_register(
 | Rule | Why |
 |---|---|
 | Keep the copied block byte-identical. | Only one copy serves everyone. A changed copy silently changes the behaviour of every other plugin. |
-| Use a fixed string as the key. | A key built from a build number or a function id registers a second fragment on every reload, and the code runs twice. |
-| Use `order` to sort, never the key. | Lower `order` comes first. In `custom.css` that means later plugins win conflicts; in `loader.js` it means running first. The default is `0`. |
+| Do not set a key yourself. | The block keys your fragment by your plugin's Open WebUI id. Ids are unique, so no plugin can overwrite another's fragment. A clone of your plugin gets its own id and its own fragment, so guard JS that must run only once, for example with a `window` flag. Each plugin has one fragment per file, so keep all of your JS in one fragment and all of your CSS in another. |
+| Wrap your JS in its own function with a try/catch. | All fragments end up in one `loader.js`. An uncaught error, a syntax error or a top-level `const` or `let` that another fragment declares too stops the code of every plugin in the file. |
+| Use `order` to sort. | Lower `order` comes first. In `custom.css` that means later plugins win conflicts; in `loader.js` it means running first. The default is `0`. |
 | Keep the producer fast. | It runs for every page load, even when the browser already has the latest file. Return a prepared string, and cache anything slow (file checks, network, locks) so a call costs microseconds. |
-| Return `""` to switch off. | There is no way to unregister. Open WebUI tells a plugin when it is being disabled, but a deleted plugin never finds out, so disable a plugin before deleting it or its code stays until the server restarts. |
+| Return `""` to switch off. | There is no way to unregister. Open WebUI tells a plugin when it is being disabled, but a deleted plugin never finds out. |
+| Call `asset_withdraw_deleted(__app__, event, __event_name__)` from your event handler. | It drops the code of any plugin that was just deleted, which that plugin cannot do itself. One installed event function that calls it is enough to clean up after every other plugin; without one, a deleted plugin's code stays until the server restarts, so disable a plugin before deleting it. Live reload calls it for you and, when the deleted plugin also uses live reload, switches it off on the other containers too. |
 | Put your code inline. | Loading another file with `<script src>` or `@import` arrives too late, after the app has already started. |
 | It covers the main app only. | Pages that a plugin serves on its own do not load these files and need their own code. |
 
@@ -84,23 +85,21 @@ With several Open WebUI containers or workers, a change to your plugin does not 
 - **Changing valves:** the same. Other containers keep the old settings until their next event.
 - **Disabling the plugin:** the other containers never find out. A disabled plugin gets no events there, so its fragment keeps being served until that container restarts.
 
-The optional [`live_reload.py`](live_reload.py) add-on makes all three reach every container within a second. Whenever the plugin loads, is disabled or enabled, or has its valves saved, it tells every other container over Redis. Each one then loads the new code if its copy differs from the database, picks up the new valves and switches the fragment off or on to match. There is nothing to bump. [Better Banners](../better-banners/) uses it.
+The optional [`live_reload.py`](live_reload.py) add-on makes all three reach every container within a second. Whenever the plugin loads, is disabled or enabled, or has its valves saved, it tells every other container over Redis. Each one then loads the new code if its copy differs from the database, picks up the new valves and switches the fragment off or on to match. A code update needs no build number. [Better Banners](../better-banners/) uses it.
 
 Without Redis the add-on does nothing extra. It needs Open WebUI 0.11.0 or newer.
 
-The add-on is separate from the protocol itself and does not change `ASSET_IMPL_VERSION`. Everything in it is scoped to your own plugin, so your copy never affects anybody else's.
+The add-on is separate from the protocol itself and does not change `ASSET_IMPL_VERSION`. It needs the shared asset block in the same file. Apart from cleaning up after a deleted plugin, everything in it is scoped to your own plugin, so your copy never affects anybody else's. It has its own `RELOAD_IMPL_VERSION` for the Redis listener: raise it by one whenever you change the listener, and running containers swap the old listener for the new one on the next load instead of keeping it until a restart.
 
 1. Copy everything in [`live_reload.py`](live_reload.py) into your event function, above the shared asset block.
-2. Set `ASSET_KEY` to a name of your choice that no other plugin uses, for example `"my-plugin"`. Pass the same name to `asset_register`.
-3. Put your `asset_register` calls into a function called `register(app)` and let each producer return `""` when `reload_active(app)` is false.
-4. Wire it into your event class:
+2. Put your `asset_register` calls into a function called `register(app)` and let each producer return `""` when `reload_active(app)` is false.
+3. Wire it into your event class:
 
 ```python
 def register(app):
     asset_register(
         app,
         LOADER_PATH,
-        ASSET_KEY,
         LOADER_BLOCK_START,
         LOADER_BLOCK_END,
         lambda: LOADER_FRAGMENT if reload_active(app) else "",

@@ -3,6 +3,7 @@
 # Spec and rules: https://github.com/Classic298/open-webui-plugins/tree/main/shared-assets-protocol
 
 import hashlib
+import re
 from pathlib import Path
 from typing import Any
 
@@ -17,12 +18,13 @@ from typing import Any
 # Contract:
 #   * ASSET_REGISTRY_ATTR, ASSET_ROUTE_ATTR, the entry shape and the paths are
 #     the interop surface. The route owner's copy serves everyone.
-#   * `key` must be a module-level constant, or a re-exec adds a second entry.
-#   * Lower `order` composes first (default 0). Never encode priority in the key.
+#   * Fragments are keyed by the plugin's module name (ASSET_KEY), which Open
+#     WebUI keeps unique per install.
+#   * Lower `order` composes first (default 0).
 #   * Producers run on the event loop for every request, 304s included: return
 #     a prebuilt string, no I/O, no locks.
-#   * Return "" to withdraw. A deleted plugin never sees its own deletion, so
-#     disable it first.
+#   * Return "" to withdraw. A deleted plugin never sees its own deletion; any
+#     other plugin calling asset_withdraw_deleted() drops its fragments.
 #   * Inline fragments only: <script src> / @import lands after hydration.
 # ===========================================================================
 LOADER_PATH = "/static/loader.js"
@@ -35,7 +37,9 @@ ASSET_REGISTRY_ATTR = "_owui_static_fragments"  # {path: {key: entry}}
 ASSET_ROUTE_ATTR = "_owui_shared_asset"  # set to the path the route serves
 ASSET_IMPL_ATTR = "_owui_shared_asset_impl"  # implementation version of the route
 # Bump on any behaviour change: the newest copy takes over the route.
-ASSET_IMPL_VERSION = 4
+ASSET_IMPL_VERSION = 5
+# "function_<id>" or "tool_<id>"; newer Open WebUI adds a random "_<hex>".
+ASSET_KEY = re.sub(r"^((?:function|tool)_.+?)_[0-9a-f]{32}$", r"\1", __name__)
 
 # Warn once per (path, key, exception type): compose runs on every page load.
 _ASSET_WARNED: set = set()
@@ -61,6 +65,16 @@ def asset_sort_key(item):
     except (TypeError, ValueError):
         order = 0
     return (order, key)
+
+
+def asset_withdraw_deleted(app: Any, event: Any, event_name: Any) -> None:
+    """Drop a deleted plugin's fragments; call it from your event handler."""
+    if event_name not in ("function.deleted", "tool.deleted"):
+        return
+    kind = event_name.split(".")[0]
+    subject_id = ((event or {}).get("subject") or {}).get("id")
+    for bucket in getattr(app.state, ASSET_REGISTRY_ATTR, {}).values():
+        bucket.pop(f"{kind}_{subject_id}", None)
 
 
 def asset_strip_block(content: str, start_marker: str, end_marker: str) -> str:
@@ -96,6 +110,8 @@ def asset_compose(app: Any, path: str) -> str:
         body = ""
 
     ordered = sorted(asset_fragments(app, path).items(), key=asset_sort_key)
+    # A bare newline lets one fragment run into the next: "a\n(b)" is a call.
+    separator = "\n;\n" if path == LOADER_PATH else "\n\n"
     # Strip first: an older file-writing build may have left a block on disk.
     for _key, entry in ordered:
         body = asset_strip_block(body, entry["start"], entry["end"])
@@ -118,18 +134,18 @@ def asset_compose(app: Any, path: str) -> str:
                 )
             continue
         if block:
-            body = (body + "\n\n" if body else "") + block
+            body = (body + separator if body else "") + block
     return body + "\n" if body else ""
 
 
 def asset_register(
-    app: Any, path: str, key: str, start: str, end: str, producer, order: int = 0
+    app: Any, path: str, start: str, end: str, producer, order: int = 0
 ) -> None:
     """Publish a fragment and ensure the route exists. Idempotent."""
     from starlette.responses import Response
     from starlette.routing import Mount, Route
 
-    asset_fragments(app, path)[key] = {
+    asset_fragments(app, path)[ASSET_KEY] = {
         "start": start,
         "end": end,
         "js": producer,
@@ -162,7 +178,8 @@ def asset_register(
             "Cache-Control": "no-cache, must-revalidate, private",
             "ETag": etag,
         }
-        if request.headers.get("if-none-match") == etag:
+        # Gzipping proxies send the tag back weakened to W/"...".
+        if request.headers.get("if-none-match", "").removeprefix("W/") == etag:
             return Response(status_code=304, headers=headers)
         # Starlette only adds charset for text/*.
         return Response(content, media_type=media_type, headers=headers)

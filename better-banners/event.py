@@ -3,7 +3,7 @@ title: Better Banners
 author: Classic298
 author_url: https://github.com/Classic298
 funding_url: https://github.com/Classic298
-version: 1.0.2
+version: 1.0.3
 required_open_webui_version: 0.11.3
 description: Shows the banners from Admin Panel → Settings → General → Banners in every chat, at the top of the page or right above the message input. Users can collapse the banners into a small pill and dismiss the dismissible ones, and both choices are remembered. Banner edits reach open tabs live, in each user's language. Inspired by Broadcast Toasts by G30.
 """
@@ -20,8 +20,6 @@ from typing import Any, Literal, Optional
 from open_webui.utils.json_codec import JSONCodec
 from pydantic import BaseModel, Field
 
-ASSET_KEY = "better-banners"  # fixed, used for asset_register too
-
 # ===========================================================================
 # Live reload broadcast
 # ---------------------------------------------------------------------------
@@ -29,7 +27,9 @@ ASSET_KEY = "better-banners"  # fixed, used for asset_register too
 # database re-executes it. register(app) is yours and must be idempotent; gate
 # each producer on reload_active(app).
 # ===========================================================================
-RELOAD_STATE_ATTR = "_owui_live_reload"  # {key: {active, exec_id, listener}}
+RELOAD_STATE_ATTR = "_owui_live_reload"  # {key: {active, exec_id, listener, impl}}
+# Bump when the listener changes: a newer copy replaces a running listener.
+RELOAD_IMPL_VERSION = 1
 RELOAD_EXEC_ID = uuid.uuid4().hex  # new on every exec of this source
 # Open WebUI runs each function as module "function_<id>_<hex>" (older: "function_<id>").
 RELOAD_FUNCTION_ID = re.sub(r"_[0-9a-f]{32}$", "", __name__.removeprefix("function_"))
@@ -51,10 +51,10 @@ def reload_active(app: Any) -> bool:
     return bool(reload_state(app).get("active"))
 
 
-def reload_channel() -> str:
+def reload_channel(key: Optional[str] = None) -> str:
     from open_webui.env import REDIS_KEY_PREFIX
 
-    return f"{REDIS_KEY_PREFIX}:live-reload:{ASSET_KEY}"
+    return f"{REDIS_KEY_PREFIX}:live-reload:{key or ASSET_KEY}"
 
 
 def reload_mark_loaded(app: Any) -> None:
@@ -64,20 +64,24 @@ def reload_mark_loaded(app: Any) -> None:
     state["exec_id"] = RELOAD_EXEC_ID
 
 
-async def reload_publish(app: Any, active: bool) -> None:
+async def reload_publish(app: Any, active: bool, key: Optional[str] = None) -> None:
     redis = getattr(app.state, "redis", None)
     if redis is None:
         return
     try:
-        await redis.publish(reload_channel(), JSONCodec.dumps({"active": active}))
+        await redis.publish(reload_channel(key), JSONCodec.dumps({"active": active}))
     except Exception as e:
         reload_log.warning("[%s] publish failed: %s", ASSET_KEY, type(e).__name__)
 
 
 async def reload_ensure_listener(app: Any) -> None:
     state = reload_state(app)
-    if state.get("listener") is not None:
-        return
+    listener = state.get("listener")
+    if listener is not None:
+        # True: an older copy is still subscribing; it gets replaced on a later event.
+        if listener is True or state.get("impl", 0) >= RELOAD_IMPL_VERSION:
+            return
+        listener.cancel()
     redis = getattr(app.state, "redis", None)
     if redis is None:
         return
@@ -90,51 +94,66 @@ async def reload_ensure_listener(app: Any) -> None:
         get_functions_cache,
     )
 
-    # Mark before awaiting so a concurrent event() can't double-subscribe.
-    state["listener"] = True
-    try:
-        pubsub = redis.pubsub()
-        await pubsub.subscribe(reload_channel())
-    except Exception as e:
-        state["listener"] = None
-        reload_log.warning("[%s] subscribe failed: %s", ASSET_KEY, type(e).__name__)
-        return
-
     async def listen():
-        try:
-            async for message in pubsub.listen():
-                if message.get("type") != "message":
-                    continue
-                if not JSONCodec.loads(message["data"])["active"]:
-                    state["active"] = False
-                    continue
-                was_active = state.get("active")
-                # Enable broadcasts arrive before is_active commits; bootstrap trusts this flag.
-                state["active"] = True
-                context = SimpleNamespace(app=app)
-                if not was_active:
-                    # Force a fresh exec so its bootstrap registers again.
-                    get_functions_cache(context).pop(RELOAD_FUNCTION_ID, None)
-                try:
-                    function_module, _, _ = await get_function_module_from_cache(
-                        context, RELOAD_FUNCTION_ID
-                    )
-                    # Peers never see a valves save; re-read them like Open WebUI's dispatch does.
-                    if hasattr(function_module, "Valves"):
-                        valves = await Functions.get_function_valves_by_id(
-                            RELOAD_FUNCTION_ID
+        delay = 1
+        while True:
+            pubsub = redis.pubsub()
+            connected_at = None
+            try:
+                await pubsub.subscribe(reload_channel())
+                connected_at = asyncio.get_running_loop().time()
+                async for message in pubsub.listen():
+                    if message.get("type") != "message":
+                        continue
+                    if not JSONCodec.loads(message["data"])["active"]:
+                        state["active"] = False
+                        continue
+                    was_active = state.get("active")
+                    # Enable broadcasts arrive before is_active commits; bootstrap trusts this flag.
+                    state["active"] = True
+                    context = SimpleNamespace(app=app)
+                    if not was_active:
+                        # Force a fresh exec so its bootstrap registers again.
+                        get_functions_cache(context).pop(RELOAD_FUNCTION_ID, None)
+                    try:
+                        function_module, _, _ = await get_function_module_from_cache(
+                            context, RELOAD_FUNCTION_ID
                         )
-                        function_module.valves = function_module.Valves(
-                            **(valves or {})
+                        # Peers never see a valves save; re-read them like Open WebUI's dispatch does.
+                        if hasattr(function_module, "Valves"):
+                            valves = await Functions.get_function_valves_by_id(
+                                RELOAD_FUNCTION_ID
+                            )
+                            function_module.valves = function_module.Valves(
+                                **(valves or {})
+                            )
+                    except Exception as e:
+                        reload_log.warning(
+                            "[%s] reload from db failed: %s",
+                            ASSET_KEY,
+                            type(e).__name__,
                         )
-                except Exception as e:
+            except Exception as e:
+                # Only a link that held for a minute starts a new outage; flaps don't.
+                now = asyncio.get_running_loop().time()
+                if connected_at is not None and now - connected_at > 60:
+                    delay = 1
+                if delay == 1:
                     reload_log.warning(
-                        "[%s] reload from db failed: %s", ASSET_KEY, type(e).__name__
+                        "[%s] listener failed: %s, retrying until Redis is back",
+                        ASSET_KEY,
+                        type(e).__name__,
                     )
-        except Exception as e:
-            reload_log.warning("[%s] listener stopped: %s", ASSET_KEY, type(e).__name__)
+            finally:
+                try:
+                    await pubsub.aclose()
+                except Exception:
+                    pass
+            await asyncio.sleep(delay)
+            delay = min(delay * 2, 60)
 
     state["listener"] = asyncio.create_task(listen())
+    state["impl"] = RELOAD_IMPL_VERSION
 
 
 def reload_bootstrap() -> None:
@@ -169,7 +188,13 @@ async def reload_on_event(
     await reload_ensure_listener(app)
     state = reload_state(app)
 
-    is_own = ((event or {}).get("subject") or {}).get("id") == RELOAD_FUNCTION_ID
+    subject_id = ((event or {}).get("subject") or {}).get("id")
+    asset_withdraw_deleted(app, event, event_name)
+    if event_name == "function.deleted" and subject_id:
+        # Its own listeners on other containers switch its fragment off.
+        await reload_publish(app, False, f"function_{subject_id}")
+
+    is_own = subject_id == RELOAD_FUNCTION_ID
     if is_own and event_name == "function.disable_started":
         state["active"] = False
         await reload_publish(app, False)
@@ -198,12 +223,13 @@ async def reload_on_event(
 # Contract:
 #   * ASSET_REGISTRY_ATTR, ASSET_ROUTE_ATTR, the entry shape and the paths are
 #     the interop surface. The route owner's copy serves everyone.
-#   * `key` must be a module-level constant, or a re-exec adds a second entry.
-#   * Lower `order` composes first (default 0). Never encode priority in the key.
+#   * Fragments are keyed by the plugin's module name (ASSET_KEY), which Open
+#     WebUI keeps unique per install.
+#   * Lower `order` composes first (default 0).
 #   * Producers run on the event loop for every request, 304s included: return
 #     a prebuilt string, no I/O, no locks.
-#   * Return "" to withdraw. A deleted plugin never sees its own deletion, so
-#     disable it first.
+#   * Return "" to withdraw. A deleted plugin never sees its own deletion; any
+#     other plugin calling asset_withdraw_deleted() drops its fragments.
 #   * Inline fragments only: <script src> / @import lands after hydration.
 # ===========================================================================
 LOADER_PATH = "/static/loader.js"
@@ -216,7 +242,9 @@ ASSET_REGISTRY_ATTR = "_owui_static_fragments"  # {path: {key: entry}}
 ASSET_ROUTE_ATTR = "_owui_shared_asset"  # set to the path the route serves
 ASSET_IMPL_ATTR = "_owui_shared_asset_impl"  # implementation version of the route
 # Bump on any behaviour change: the newest copy takes over the route.
-ASSET_IMPL_VERSION = 4
+ASSET_IMPL_VERSION = 5
+# "function_<id>" or "tool_<id>"; newer Open WebUI adds a random "_<hex>".
+ASSET_KEY = re.sub(r"^((?:function|tool)_.+?)_[0-9a-f]{32}$", r"\1", __name__)
 
 # Warn once per (path, key, exception type): compose runs on every page load.
 _ASSET_WARNED: set = set()
@@ -242,6 +270,16 @@ def asset_sort_key(item):
     except (TypeError, ValueError):
         order = 0
     return (order, key)
+
+
+def asset_withdraw_deleted(app: Any, event: Any, event_name: Any) -> None:
+    """Drop a deleted plugin's fragments; call it from your event handler."""
+    if event_name not in ("function.deleted", "tool.deleted"):
+        return
+    kind = event_name.split(".")[0]
+    subject_id = ((event or {}).get("subject") or {}).get("id")
+    for bucket in getattr(app.state, ASSET_REGISTRY_ATTR, {}).values():
+        bucket.pop(f"{kind}_{subject_id}", None)
 
 
 def asset_strip_block(content: str, start_marker: str, end_marker: str) -> str:
@@ -277,6 +315,8 @@ def asset_compose(app: Any, path: str) -> str:
         body = ""
 
     ordered = sorted(asset_fragments(app, path).items(), key=asset_sort_key)
+    # A bare newline lets one fragment run into the next: "a\n(b)" is a call.
+    separator = "\n;\n" if path == LOADER_PATH else "\n\n"
     # Strip first: an older file-writing build may have left a block on disk.
     for _key, entry in ordered:
         body = asset_strip_block(body, entry["start"], entry["end"])
@@ -299,18 +339,18 @@ def asset_compose(app: Any, path: str) -> str:
                 )
             continue
         if block:
-            body = (body + "\n\n" if body else "") + block
+            body = (body + separator if body else "") + block
     return body + "\n" if body else ""
 
 
 def asset_register(
-    app: Any, path: str, key: str, start: str, end: str, producer, order: int = 0
+    app: Any, path: str, start: str, end: str, producer, order: int = 0
 ) -> None:
     """Publish a fragment and ensure the route exists. Idempotent."""
     from starlette.responses import Response
     from starlette.routing import Mount, Route
 
-    asset_fragments(app, path)[key] = {
+    asset_fragments(app, path)[ASSET_KEY] = {
         "start": start,
         "end": end,
         "js": producer,
@@ -343,7 +383,8 @@ def asset_register(
             "Cache-Control": "no-cache, must-revalidate, private",
             "ETag": etag,
         }
-        if request.headers.get("if-none-match") == etag:
+        # Gzipping proxies send the tag back weakened to W/"...".
+        if request.headers.get("if-none-match", "").removeprefix("W/") == etag:
             return Response(status_code=304, headers=headers)
         # Starlette only adds charset for text/*.
         return Response(content, media_type=media_type, headers=headers)
@@ -1012,10 +1053,14 @@ LOADER_SCRIPT = r"""
 
 
 def register(app: Any) -> None:
+    # Up to 1.0.2 the key was "better-banners": drop that fragment, wake its listeners.
+    asset_fragments(app, LOADER_PATH).pop("better-banners", None)
+    task = asyncio.create_task(reload_publish(app, True, "better-banners"))
+    reload_tasks.add(task)
+    task.add_done_callback(reload_tasks.discard)
     asset_register(
         app,
         LOADER_PATH,
-        ASSET_KEY,
         LOADER_BLOCK_START,
         LOADER_BLOCK_END,
         lambda: Event.instance._loader_fragment() if reload_active(app) else "",

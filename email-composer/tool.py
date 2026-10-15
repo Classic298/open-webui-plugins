@@ -176,7 +176,7 @@ body{background:var(--bg);font-family:-apple-system,BlinkMacSystemFont,'Segoe UI
 .cc-toggle button:hover{color:var(--text2)}
 
 .subject-row{border-top:1px solid var(--border-light) !important}
-.subject-input{flex:1;border:none;outline:none;background:transparent;font-size:13px;font-weight:600;color:var(--text);font-family:inherit;padding:2px 0}
+.subject-input{width:100%;box-sizing:border-box;border:none;outline:none;background:transparent;font-size:13px;font-weight:600;color:var(--text);font-family:inherit;padding:2px 0}
 .subject-input::placeholder{color:var(--text3);font-weight:400}
 
 .toolbar{display:flex;align-items:center;gap:2px;padding:6px 14px;border-top:1px solid var(--border-light);flex-wrap:wrap}
