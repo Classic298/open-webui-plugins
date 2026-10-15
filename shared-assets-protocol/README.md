@@ -6,7 +6,7 @@ A community standard that lets any number of Open WebUI plugins add their own Ja
 |---|---|
 | **Author** | [Classic298](https://github.com/Classic298) |
 | **Specced with** | G30 (silentoplayz) |
-| **Current version** | `ASSET_IMPL_VERSION = 4` |
+| **Current version** | `ASSET_IMPL_VERSION = 5` |
 | **Reference code** | [`shared_assets.py`](shared_assets.py) |
 | **License** | [BSD 3-Clause](../LICENSE) |
 

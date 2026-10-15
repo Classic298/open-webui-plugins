@@ -35,7 +35,7 @@ ASSET_REGISTRY_ATTR = "_owui_static_fragments"  # {path: {key: entry}}
 ASSET_ROUTE_ATTR = "_owui_shared_asset"  # set to the path the route serves
 ASSET_IMPL_ATTR = "_owui_shared_asset_impl"  # implementation version of the route
 # Bump on any behaviour change: the newest copy takes over the route.
-ASSET_IMPL_VERSION = 4
+ASSET_IMPL_VERSION = 5
 
 # Warn once per (path, key, exception type): compose runs on every page load.
 _ASSET_WARNED: set = set()
@@ -162,7 +162,8 @@ def asset_register(
             "Cache-Control": "no-cache, must-revalidate, private",
             "ETag": etag,
         }
-        if request.headers.get("if-none-match") == etag:
+        # Gzipping proxies send the tag back weakened to W/"...".
+        if request.headers.get("if-none-match", "").removeprefix("W/") == etag:
             return Response(status_code=304, headers=headers)
         # Starlette only adds charset for text/*.
         return Response(content, media_type=media_type, headers=headers)
