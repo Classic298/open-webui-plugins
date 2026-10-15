@@ -69,6 +69,7 @@ asset_register(
 |---|---|
 | Keep the copied block byte-identical. | Only one copy serves everyone. A changed copy silently changes the behaviour of every other plugin. |
 | Do not set a key yourself. | The block keys your fragment by your plugin's Open WebUI id. Ids are unique, so no plugin can overwrite another's fragment. A clone of your plugin gets its own id and its own fragment, so guard JS that must run only once, for example with a `window` flag. Each plugin has one fragment per file, so keep all of your JS in one fragment and all of your CSS in another. |
+| Wrap your JS in its own function with a try/catch. | All fragments end up in one `loader.js`. An uncaught error, a syntax error or a top-level `const` or `let` that another fragment declares too stops the code of every plugin in the file. |
 | Use `order` to sort. | Lower `order` comes first. In `custom.css` that means later plugins win conflicts; in `loader.js` it means running first. The default is `0`. |
 | Keep the producer fast. | It runs for every page load, even when the browser already has the latest file. Return a prepared string, and cache anything slow (file checks, network, locks) so a call costs microseconds. |
 | Return `""` to switch off. | There is no way to unregister. Open WebUI tells a plugin when it is being disabled, but a deleted plugin never finds out, so disable a plugin before deleting it or its code stays until the server restarts. |

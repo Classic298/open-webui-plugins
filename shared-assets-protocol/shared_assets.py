@@ -100,6 +100,8 @@ def asset_compose(app: Any, path: str) -> str:
         body = ""
 
     ordered = sorted(asset_fragments(app, path).items(), key=asset_sort_key)
+    # A bare newline lets one fragment run into the next: "a\n(b)" is a call.
+    separator = "\n;\n" if path == LOADER_PATH else "\n\n"
     # Strip first: an older file-writing build may have left a block on disk.
     for _key, entry in ordered:
         body = asset_strip_block(body, entry["start"], entry["end"])
@@ -122,7 +124,7 @@ def asset_compose(app: Any, path: str) -> str:
                 )
             continue
         if block:
-            body = (body + "\n\n" if body else "") + block
+            body = (body + separator if body else "") + block
     return body + "\n" if body else ""
 
 
