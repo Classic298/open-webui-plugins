@@ -147,7 +147,7 @@ def _build_tool_result_params(call_result) -> dict:
     return params
 
 
-def _build_csp_meta_tag(csp: dict) -> str:
+def _build_csp_meta_tag(csp: dict, allow_worker_scripts: bool = False) -> str:
     """Build a <meta> CSP tag from a server-declared _meta.ui.csp object.
 
     Per the MCP Apps spec (SEP-1865), the csp object has:
@@ -155,13 +155,22 @@ def _build_csp_meta_tag(csp: dict) -> str:
       resourceDomains  -> script-src, style-src, img-src, font-src, media-src
       frameDomains     -> frame-src
       baseUriDomains   -> base-uri
+
+    ``allow_worker_scripts`` (off by default, not part of the spec) additionally
+    lets the app run script and web workers from ``blob:`` and ``data:`` URLs.
+    Apps that bundle their worker into a single HTML file (pdf.js, for example)
+    need it; without it the browser refuses the worker.
     """
+    # script-src additions and the worker-src directive, only when opted in.
+    ws = " blob: data:" if allow_worker_scripts else ""
+    wk = "worker-src 'self' blob: data:; " if allow_worker_scripts else ""
     if not csp:
         # Restrictive default per spec: block all outbound, allow inline scripts/styles
         return (
             '<meta http-equiv="Content-Security-Policy" content="'
             "default-src 'none'; "
-            "script-src 'self' 'unsafe-inline'; "
+            f"script-src 'self' 'unsafe-inline'{ws}; "
+            f"{wk}"
             "style-src 'self' 'unsafe-inline'; "
             "img-src 'self' data:; "
             "media-src 'self' data:; "
@@ -185,7 +194,8 @@ def _build_csp_meta_tag(csp: dict) -> str:
 
     policy = (
         f"default-src 'none'; "
-        f"script-src 'self' 'unsafe-inline'{rd}; "
+        f"script-src 'self' 'unsafe-inline'{ws}{rd}; "
+        f"{wk}"
         f"style-src 'self' 'unsafe-inline'{rd}; "
         f"img-src 'self' data:{rd}; "
         f"font-src 'self'{rd}; "
@@ -673,6 +683,10 @@ class Tools:
             default="",
             description="Comma-separated tool names to hide from the model and block from execution.",
         )
+        allow_worker_scripts: bool = Field(
+            default=False,
+            description="Let apps run scripts and web workers from blob: and data: URLs (adds them to script-src and a worker-src directive). Off by default, which follows the MCP Apps spec's CSP. Turn it on for apps that bundle a worker into their HTML, such as the PDF viewer (pdf.js).",
+        )
 
     def __init__(self):
         self.valves = self.Valves()
@@ -1155,7 +1169,7 @@ class Tools:
             # Prepended, so the CSP applies before any of the server's markup parses.
             app_html = (
                 "<!DOCTYPE html>\n"
-                + _build_csp_meta_tag(csp_data)
+                + _build_csp_meta_tag(csp_data, self.valves.allow_worker_scripts)
                 + min_height_style
                 + data_script
                 + height_script
