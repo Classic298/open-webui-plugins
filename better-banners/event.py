@@ -90,49 +90,63 @@ async def reload_ensure_listener(app: Any) -> None:
         get_functions_cache,
     )
 
-    # Mark before awaiting so a concurrent event() can't double-subscribe.
-    state["listener"] = True
-    try:
-        pubsub = redis.pubsub()
-        await pubsub.subscribe(reload_channel())
-    except Exception as e:
-        state["listener"] = None
-        reload_log.warning("[%s] subscribe failed: %s", ASSET_KEY, type(e).__name__)
-        return
-
     async def listen():
-        try:
-            async for message in pubsub.listen():
-                if message.get("type") != "message":
-                    continue
-                if not JSONCodec.loads(message["data"])["active"]:
-                    state["active"] = False
-                    continue
-                was_active = state.get("active")
-                # Enable broadcasts arrive before is_active commits; bootstrap trusts this flag.
-                state["active"] = True
-                context = SimpleNamespace(app=app)
-                if not was_active:
-                    # Force a fresh exec so its bootstrap registers again.
-                    get_functions_cache(context).pop(RELOAD_FUNCTION_ID, None)
-                try:
-                    function_module, _, _ = await get_function_module_from_cache(
-                        context, RELOAD_FUNCTION_ID
-                    )
-                    # Peers never see a valves save; re-read them like Open WebUI's dispatch does.
-                    if hasattr(function_module, "Valves"):
-                        valves = await Functions.get_function_valves_by_id(
-                            RELOAD_FUNCTION_ID
+        delay = 1
+        while True:
+            pubsub = redis.pubsub()
+            connected_at = None
+            try:
+                await pubsub.subscribe(reload_channel())
+                connected_at = asyncio.get_running_loop().time()
+                async for message in pubsub.listen():
+                    if message.get("type") != "message":
+                        continue
+                    if not JSONCodec.loads(message["data"])["active"]:
+                        state["active"] = False
+                        continue
+                    was_active = state.get("active")
+                    # Enable broadcasts arrive before is_active commits; bootstrap trusts this flag.
+                    state["active"] = True
+                    context = SimpleNamespace(app=app)
+                    if not was_active:
+                        # Force a fresh exec so its bootstrap registers again.
+                        get_functions_cache(context).pop(RELOAD_FUNCTION_ID, None)
+                    try:
+                        function_module, _, _ = await get_function_module_from_cache(
+                            context, RELOAD_FUNCTION_ID
                         )
-                        function_module.valves = function_module.Valves(
-                            **(valves or {})
+                        # Peers never see a valves save; re-read them like Open WebUI's dispatch does.
+                        if hasattr(function_module, "Valves"):
+                            valves = await Functions.get_function_valves_by_id(
+                                RELOAD_FUNCTION_ID
+                            )
+                            function_module.valves = function_module.Valves(
+                                **(valves or {})
+                            )
+                    except Exception as e:
+                        reload_log.warning(
+                            "[%s] reload from db failed: %s",
+                            ASSET_KEY,
+                            type(e).__name__,
                         )
-                except Exception as e:
+            except Exception as e:
+                # Only a link that held for a minute starts a new outage; flaps don't.
+                now = asyncio.get_running_loop().time()
+                if connected_at is not None and now - connected_at > 60:
+                    delay = 1
+                if delay == 1:
                     reload_log.warning(
-                        "[%s] reload from db failed: %s", ASSET_KEY, type(e).__name__
+                        "[%s] listener failed: %s, retrying until Redis is back",
+                        ASSET_KEY,
+                        type(e).__name__,
                     )
-        except Exception as e:
-            reload_log.warning("[%s] listener stopped: %s", ASSET_KEY, type(e).__name__)
+            finally:
+                try:
+                    await pubsub.aclose()
+                except Exception:
+                    pass
+            await asyncio.sleep(delay)
+            delay = min(delay * 2, 60)
 
     state["listener"] = asyncio.create_task(listen())
 
