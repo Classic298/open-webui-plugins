@@ -84,11 +84,11 @@ With several Open WebUI containers or workers, a change to your plugin does not 
 - **Changing valves:** the same. Other containers keep the old settings until their next event.
 - **Disabling the plugin:** the other containers never find out. A disabled plugin gets no events there, so its fragment keeps being served until that container restarts.
 
-The optional [`live_reload.py`](live_reload.py) add-on makes all three reach every container within a second. Whenever the plugin loads, is disabled or enabled, or has its valves saved, it tells every other container over Redis. Each one then loads the new code if its copy differs from the database, picks up the new valves and switches the fragment off or on to match. There is nothing to bump. [Better Banners](../better-banners/) uses it.
+The optional [`live_reload.py`](live_reload.py) add-on makes all three reach every container within a second. Whenever the plugin loads, is disabled or enabled, or has its valves saved, it tells every other container over Redis. Each one then loads the new code if its copy differs from the database, picks up the new valves and switches the fragment off or on to match. A code update needs no build number. [Better Banners](../better-banners/) uses it.
 
 Without Redis the add-on does nothing extra. It needs Open WebUI 0.11.0 or newer.
 
-The add-on is separate from the protocol itself and does not change `ASSET_IMPL_VERSION`. Everything in it is scoped to your own plugin, so your copy never affects anybody else's.
+The add-on is separate from the protocol itself and does not change `ASSET_IMPL_VERSION`. Everything in it is scoped to your own plugin, so your copy never affects anybody else's. It has its own `RELOAD_IMPL_VERSION` for the Redis listener: raise it by one whenever you change the listener, and running containers swap the old listener for the new one on the next load instead of keeping it until a restart.
 
 1. Copy everything in [`live_reload.py`](live_reload.py) into your event function, above the shared asset block.
 2. Set `ASSET_KEY` to a name of your choice that no other plugin uses, for example `"my-plugin"`. Pass the same name to `asset_register`.

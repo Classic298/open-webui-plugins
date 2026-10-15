@@ -29,7 +29,9 @@ ASSET_KEY = "better-banners"  # fixed, used for asset_register too
 # database re-executes it. register(app) is yours and must be idempotent; gate
 # each producer on reload_active(app).
 # ===========================================================================
-RELOAD_STATE_ATTR = "_owui_live_reload"  # {key: {active, exec_id, listener}}
+RELOAD_STATE_ATTR = "_owui_live_reload"  # {key: {active, exec_id, listener, impl}}
+# Bump when the listener changes: a newer copy replaces a running listener.
+RELOAD_IMPL_VERSION = 1
 RELOAD_EXEC_ID = uuid.uuid4().hex  # new on every exec of this source
 # Open WebUI runs each function as module "function_<id>_<hex>" (older: "function_<id>").
 RELOAD_FUNCTION_ID = re.sub(r"_[0-9a-f]{32}$", "", __name__.removeprefix("function_"))
@@ -76,8 +78,12 @@ async def reload_publish(app: Any, active: bool) -> None:
 
 async def reload_ensure_listener(app: Any) -> None:
     state = reload_state(app)
-    if state.get("listener") is not None:
-        return
+    listener = state.get("listener")
+    if listener is not None:
+        # True: an older copy is still subscribing; it gets replaced on a later event.
+        if listener is True or state.get("impl", 0) >= RELOAD_IMPL_VERSION:
+            return
+        listener.cancel()
     redis = getattr(app.state, "redis", None)
     if redis is None:
         return
@@ -149,6 +155,7 @@ async def reload_ensure_listener(app: Any) -> None:
             delay = min(delay * 2, 60)
 
     state["listener"] = asyncio.create_task(listen())
+    state["impl"] = RELOAD_IMPL_VERSION
 
 
 def reload_bootstrap() -> None:
