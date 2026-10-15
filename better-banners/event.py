@@ -20,8 +20,6 @@ from typing import Any, Literal, Optional
 from open_webui.utils.json_codec import JSONCodec
 from pydantic import BaseModel, Field
 
-ASSET_KEY = "better-banners"  # fixed, used for asset_register too
-
 # ===========================================================================
 # Live reload broadcast
 # ---------------------------------------------------------------------------
@@ -219,8 +217,9 @@ async def reload_on_event(
 # Contract:
 #   * ASSET_REGISTRY_ATTR, ASSET_ROUTE_ATTR, the entry shape and the paths are
 #     the interop surface. The route owner's copy serves everyone.
-#   * `key` must be a module-level constant, or a re-exec adds a second entry.
-#   * Lower `order` composes first (default 0). Never encode priority in the key.
+#   * Fragments are keyed by the plugin's module name (ASSET_KEY), which Open
+#     WebUI keeps unique per install.
+#   * Lower `order` composes first (default 0).
 #   * Producers run on the event loop for every request, 304s included: return
 #     a prebuilt string, no I/O, no locks.
 #   * Return "" to withdraw. A deleted plugin never sees its own deletion, so
@@ -238,6 +237,8 @@ ASSET_ROUTE_ATTR = "_owui_shared_asset"  # set to the path the route serves
 ASSET_IMPL_ATTR = "_owui_shared_asset_impl"  # implementation version of the route
 # Bump on any behaviour change: the newest copy takes over the route.
 ASSET_IMPL_VERSION = 5
+# "function_<id>" or "tool_<id>"; newer Open WebUI adds a random "_<hex>".
+ASSET_KEY = re.sub(r"^((?:function|tool)_.+?)_[0-9a-f]{32}$", r"\1", __name__)
 
 # Warn once per (path, key, exception type): compose runs on every page load.
 _ASSET_WARNED: set = set()
@@ -325,13 +326,13 @@ def asset_compose(app: Any, path: str) -> str:
 
 
 def asset_register(
-    app: Any, path: str, key: str, start: str, end: str, producer, order: int = 0
+    app: Any, path: str, start: str, end: str, producer, order: int = 0
 ) -> None:
     """Publish a fragment and ensure the route exists. Idempotent."""
     from starlette.responses import Response
     from starlette.routing import Mount, Route
 
-    asset_fragments(app, path)[key] = {
+    asset_fragments(app, path)[ASSET_KEY] = {
         "start": start,
         "end": end,
         "js": producer,
@@ -1034,10 +1035,11 @@ LOADER_SCRIPT = r"""
 
 
 def register(app: Any) -> None:
+    # Up to 1.0.2 the key was "better-banners": drop that fragment.
+    asset_fragments(app, LOADER_PATH).pop("better-banners", None)
     asset_register(
         app,
         LOADER_PATH,
-        ASSET_KEY,
         LOADER_BLOCK_START,
         LOADER_BLOCK_END,
         lambda: Event.instance._loader_fragment() if reload_active(app) else "",

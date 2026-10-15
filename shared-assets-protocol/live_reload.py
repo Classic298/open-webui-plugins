@@ -11,8 +11,6 @@ from typing import Any, Optional
 
 from open_webui.utils.json_codec import JSONCodec
 
-ASSET_KEY = "my-plugin"  # fixed, used for asset_register too
-
 # ===========================================================================
 # Live reload broadcast
 # ---------------------------------------------------------------------------
