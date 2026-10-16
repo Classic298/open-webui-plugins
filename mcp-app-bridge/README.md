@@ -61,7 +61,7 @@ The bridge honors the MCP Apps spec security model:
 | `frameDomains` | Maps to `frame-src` directive |
 | `baseUriDomains` | Maps to `base-uri` directive |
 | No CSP declared | Restrictive default: blocks all outbound, allows only inline scripts/styles |
-| `allow_worker_scripts` valve (not part of the spec, off by default) | Adds `blob:` and `data:` to `script-src` and adds `worker-src 'self' blob: data:`. See [Apps that need a worker](#apps-that-need-a-worker) |
+| Web workers (not covered by the spec) | `script-src` always allows `blob:` and `data:`, so apps that bundle a web worker into their HTML (pdf.js, for example) can start it. A worker's network requests still follow `connect-src`. The spec's reference host allows the same |
 | Iframe sandboxing | The app runs in its own nested iframe without `allow-same-origin`, so it never shares an origin with Open WebUI, whatever the same-origin toggle says |
 | Tool visibility (`_meta.ui.visibility`) | App-only tools are hidden from the model and cannot be called by it. Model-only tools cannot be called by the app |
 | App calls to its server | Sent through an Open WebUI route, checked against the user's access to the tool, and logged on the server. See the note below for which user they run as |
@@ -107,12 +107,6 @@ Not supported, or only partly, in Open WebUI:
 > [!NOTE]
 > With the same-origin toggle off, an app can call its server for 15 minutes after the tool ran; after that its calls fail with "App expired. Run the tool again." App calls go through a route the bridge registers in the worker process that ran the tool. After a restart, or on a multi-worker or multi-node deployment without sticky sessions, such a call can land on a worker that has not run the tool yet and fail. With a single worker, running the tool again resolves it. With the same-origin toggle off, the app's calls carry no cookies, so cookie-based sticky sessions do not help and a cookie-based auth proxy in front of Open WebUI (oauth2-proxy, Cloudflare Access, Authelia) rejects them.
 
-### Apps that need a worker
-
-The spec's default CSP has no `worker-src` and no `blob:` or `data:` source for scripts. Some apps bundle a web worker into a single HTML file and start it from a `data:` or `blob:` URL; pdf.js in the MCP `pdf-server` example does. With the default CSP the browser refuses the worker and the app fails with `Setting up fake worker failed: "Importing a module script failed."`. The browser console shows `Refused to load blob:... because it does not appear in the worker-src directive` and `Refused to load data:text/javascript;base64,... because it does not appear in the script-src directive`.
-
-Turn on the `allow_worker_scripts` valve to allow them. It applies to every app this tool opens, not to one app, and it lets an app run script from `blob:` and `data:` URLs, so leave it off unless an app needs it. Apps still run in their sandboxed iframe and `connect-src` is unchanged.
-
 ## Setup
 
 Requires Open WebUI 0.11.4 or newer.
@@ -130,8 +124,7 @@ Requires Open WebUI 0.11.4 or newer.
 2. Set **mcp_server_url** to your MCP server's streamable HTTP endpoint
 3. Pick an **auth_method** (see [Authentication](#authentication)) and fill in the matching valves
 4. Set **tool_blocklist** to a comma-separated list of tool names to hide from the model and block from execution (optional)
-5. Turn on **allow_worker_scripts** only if an app needs to run a web worker or script from a `blob:` or `data:` URL, such as the PDF viewer (see [Apps that need a worker](#apps-that-need-a-worker)) (optional, off by default)
-6. Save
+5. Save
 
 ### 3. Attach to a Model
 
