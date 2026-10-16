@@ -29,7 +29,7 @@ from pydantic import BaseModel, Field
 # ===========================================================================
 RELOAD_STATE_ATTR = "_owui_live_reload"  # {key: {active, exec_id, listener, impl}}
 # Bump when the listener changes: a newer copy replaces a running listener.
-RELOAD_IMPL_VERSION = 1
+RELOAD_IMPL_VERSION = 2
 RELOAD_EXEC_ID = uuid.uuid4().hex  # new on every exec of this source
 # Open WebUI runs each function as module "function_<id>_<hex>" (older: "function_<id>").
 RELOAD_FUNCTION_ID = re.sub(r"_[0-9a-f]{32}$", "", __name__.removeprefix("function_"))
@@ -107,7 +107,9 @@ async def reload_ensure_listener(app: Any) -> None:
                         continue
                     if not JSONCodec.loads(message["data"])["active"]:
                         state["active"] = False
+                        state["disabled"] = True
                         continue
+                    state["disabled"] = False
                     was_active = state.get("active")
                     # Enable broadcasts arrive before is_active commits; bootstrap trusts this flag.
                     state["active"] = True
@@ -197,7 +199,13 @@ async def reload_on_event(
     is_own = subject_id == RELOAD_FUNCTION_ID
     if is_own and event_name == "function.disable_started":
         state["active"] = False
+        state["disabled"] = True
         await reload_publish(app, False)
+        return
+    if is_own and event_name == "function.enable_started":
+        state["disabled"] = False
+    elif state.get("disabled"):
+        # Events read the function list before is_active commits and still arrive.
         return
     if is_own and event_name == "function.valves_updated":
         await reload_publish(app, True)
