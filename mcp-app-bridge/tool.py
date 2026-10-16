@@ -685,7 +685,7 @@ class Tools:
         )
         allow_worker_scripts: bool = Field(
             default=False,
-            description="Let apps run scripts and web workers from blob: and data: URLs (adds them to script-src and a worker-src directive). Off by default, which follows the MCP Apps spec's CSP. Turn it on for apps that bundle a worker into their HTML, such as the PDF viewer (pdf.js).",
+            description="Let apps run web workers and scripts from blob: and data: URLs. Needed by apps that bundle a worker, such as pdf.js.",
         )
 
     def __init__(self):
