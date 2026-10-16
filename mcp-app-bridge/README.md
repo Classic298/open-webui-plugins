@@ -61,6 +61,7 @@ The bridge honors the MCP Apps spec security model:
 | `frameDomains` | Maps to `frame-src` directive |
 | `baseUriDomains` | Maps to `base-uri` directive |
 | No CSP declared | Restrictive default: blocks all outbound, allows only inline scripts/styles |
+| Web workers (not covered by the spec) | `script-src` always allows `blob:` and `data:`, so apps that bundle a web worker into their HTML (pdf.js, for example) can start it. A worker's network requests still follow `connect-src`. The spec's reference host allows the same |
 | Iframe sandboxing | The app runs in its own nested iframe without `allow-same-origin`, so it never shares an origin with Open WebUI, whatever the same-origin toggle says |
 | Tool visibility (`_meta.ui.visibility`) | App-only tools are hidden from the model and cannot be called by it. Model-only tools cannot be called by the app |
 | App calls to its server | Sent through an Open WebUI route, checked against the user's access to the tool, and logged on the server. See the note below for which user they run as |

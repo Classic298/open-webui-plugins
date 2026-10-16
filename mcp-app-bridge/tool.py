@@ -155,13 +155,15 @@ def _build_csp_meta_tag(csp: dict) -> str:
       resourceDomains  -> script-src, style-src, img-src, font-src, media-src
       frameDomains     -> frame-src
       baseUriDomains   -> base-uri
+
+    script-src also allows blob: and data: so apps can start a bundled web worker.
     """
     if not csp:
         # Restrictive default per spec: block all outbound, allow inline scripts/styles
         return (
             '<meta http-equiv="Content-Security-Policy" content="'
             "default-src 'none'; "
-            "script-src 'self' 'unsafe-inline'; "
+            "script-src 'self' 'unsafe-inline' blob: data:; "
             "style-src 'self' 'unsafe-inline'; "
             "img-src 'self' data:; "
             "media-src 'self' data:; "
@@ -185,7 +187,7 @@ def _build_csp_meta_tag(csp: dict) -> str:
 
     policy = (
         f"default-src 'none'; "
-        f"script-src 'self' 'unsafe-inline'{rd}; "
+        f"script-src 'self' 'unsafe-inline' blob: data:{rd}; "
         f"style-src 'self' 'unsafe-inline'{rd}; "
         f"img-src 'self' data:{rd}; "
         f"font-src 'self'{rd}; "
