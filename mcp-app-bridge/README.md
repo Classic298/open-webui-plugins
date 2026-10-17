@@ -124,7 +124,8 @@ Requires Open WebUI 0.11.4 or newer.
 2. Set **mcp_server_url** to your MCP server's streamable HTTP endpoint
 3. Pick an **auth_method** (see [Authentication](#authentication)) and fill in the matching valves
 4. Set **tool_blocklist** to a comma-separated list of tool names to hide from the model and block from execution (optional)
-5. Save
+5. Turn on **forward_user_info** if the MCP server (or a gateway in front of it) should know who is asking (optional, see [Forwarding the signed-in user](#forwarding-the-signed-in-user))
+6. Save
 
 ### 3. Attach to a Model
 
@@ -145,6 +146,15 @@ The `auth_method` valve picks how the bridge authenticates against the MCP serve
 | `bearer` (default) | Sends a single static token for every user. Leave `auth_token` empty for an unauthenticated server. | `auth_token` |
 | `oauth_2.1` | Each user signs in to the MCP server themselves. The bridge registers itself at the authorization server with dynamic client registration (RFC 7591). | `oauth_server_url`, `oauth_scope`, `oauth_resource_parameter` |
 | `oauth_2.1_static` | Same per-user sign-in, but with a client id and secret you registered by hand. | `oauth_client_id`, `oauth_client_secret`, `oauth_server_url`, `oauth_scope`, `oauth_resource_parameter` |
+
+### Forwarding the signed-in user
+
+With `bearer` the bridge sends one static token for everyone, so the MCP server cannot tell users apart. Turn on the `forward_user_info` valve (off by default) and every request to the MCP server also carries the signed-in user's identity, the same way Open WebUI forwards it to its own tool connections:
+
+- `X-OpenWebUI-User-Id`, `X-OpenWebUI-User-Email`, `X-OpenWebUI-User-Name` (percent-encoded) and `X-OpenWebUI-User-Role`, or
+- one signed JWT header, `X-OpenWebUI-User-Jwt`, when `FORWARD_USER_INFO_HEADER_JWT_SECRET` is set on the Open WebUI server. Prefer this when the MCP server can verify it: plain headers can be forged by anyone who can reach the server directly.
+
+Header names follow Open WebUI's `FORWARD_USER_INFO_HEADER_*` settings. The valve is independent of `ENABLE_FORWARD_USER_INFO_HEADERS`, which switches the same forwarding on for every outbound connection, model providers included. It works with every `auth_method`, and the identity is sent on the apps' own tool calls and resource reads as well as on the model's. On an Open WebUI that predates the shared helper the bridge falls back to the four plain headers.
 
 ### How the OAuth 2.1 flow works
 
