@@ -44,7 +44,7 @@ The **tool** mounts the visualization frame and renders what the model writes. T
 ## Setup
 
 > [!NOTE]
-> Works best with fast, strong models that follow instructions precisely. Verified on Claude Sonnet 4.5, Claude Opus 4.7, GPT-5.4, Gemini 3.1 Pro and Qwen 3.5 27B.
+> Works best with fast, strong models that follow instructions precisely. Verified on Claude Sonnet 5.5, Claude Opus 5.5, GPT-6, Gemini 4 Argon and Qwen 3.8 27B.
 
 ### 1. Install the tool
 
@@ -62,15 +62,15 @@ The **tool** mounts the visualization frame and renders what the model writes. T
 > [!TIP]
 > You can also drag `SKILL.md` into the import field on **Workspace → Skills**. The name and description are filled in for you, just click **Save**.
 
-### 3. Attach to your model
+### 3. Raise "Skill Read Limit"
 
-1. **Admin Panel → Settings → Models** → edit the model you want
-2. Under **Tools**, enable **Inline Visualizer**
-3. Under **Skills**, attach **visualize**
-4. Check **Function Calling** is **not** set to `Legacy` (Advanced Params). `Default` and `Native` both work, and `Default` has been native since Open WebUI `0.10.0`
-5. Save
+1. **Admin Settings → General → Skill Read Limit** → set to `50000` or higher
+2. Save
 
-### 4. Enable same-origin access (required)
+By default, the "Skill Read Limit" is set to only 20000 chars, which prevents the model from seeing the full content of the skill.
+The model would then either read only part of the skill and attempt to build the visulization anyways or has to read it in multiple tool calls.
+
+### 3. Enable same-origin access (required)
 
 1. **User Settings → Interface**
 2. Enable **iframe Sandbox Allow Same Origin**
