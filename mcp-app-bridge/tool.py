@@ -3,7 +3,7 @@ title: MCP App Bridge
 author: Classic298
 author_url: https://github.com/Classic298
 funding_url: https://github.com/Classic298
-version: 1.0.1
+version: 1.1.0
 required_open_webui_version: 0.11.4
 description: Wraps MCP server tools and renders MCP App UI resources (ui://) as Rich UI embeds using Open WebUI's existing embed system. Context-efficient discovery: paginated summary listing plus keyword search, so full schemas are only loaded for the top matching tools. Acts as an MCP Apps (2026-01-26) host: each app runs isolated in a nested sandbox with its server-declared CSP, gets the ui/initialize handshake, tool input and tool result, and can call its server's tools, read its resources, open links and send chat messages. Authenticates with a static bearer token or with per-user OAuth 2.1 (dynamic client registration or static credentials), reusing Open WebUI's own MCP OAuth machinery. No middleware changes needed.
 """
@@ -14,7 +14,9 @@ import json
 import logging
 import secrets
 import time
+from types import SimpleNamespace
 from typing import Literal
+from urllib.parse import quote
 from contextlib import AsyncExitStack
 
 import jwt
@@ -671,6 +673,10 @@ class Tools:
             default="",
             description="Managed automatically: encrypted OAuth client registration. Clear this to force re-registration.",
         )
+        forward_user_info: bool = Field(
+            default=False,
+            description="Send the signed-in user's identity to the MCP server, the way Open WebUI does for its own tool connections: X-OpenWebUI-User-Id/-Email/-Name/-Role headers, or one signed JWT header when FORWARD_USER_INFO_HEADER_JWT_SECRET is set. Header names follow the FORWARD_USER_INFO_HEADER_* settings. Lets a server or gateway pick per-user behaviour while the bridge keeps one static token. Works with every auth_method. Off by default.",
+        )
         tool_blocklist: str = Field(
             default="",
             description="Comma-separated tool names to hide from the model and block from execution.",
@@ -784,7 +790,43 @@ class Tools:
         base_url = str(webui_url or request.base_url).rstrip("/")
         return f"{base_url}/oauth/clients/{client_key}/authorize"
 
+    def _with_user_info(self, headers: dict | None, request, user: dict | None) -> dict | None:
+        """Add the user-info headers when the forward_user_info valve is on."""
+        if not self.valves.forward_user_info or not user:
+            return headers
+        headers = dict(headers or {})
+        user_obj = SimpleNamespace(
+            id=str(user.get("id") or ""),
+            email=str(user.get("email") or ""),
+            name=str(user.get("name") or ""),
+            role=str(user.get("role") or ""),
+        )
+        try:
+            from open_webui.utils.headers import include_user_info_headers
+        except ImportError:
+            # Older Open WebUI without the shared helper: send the plain headers.
+            headers.update(
+                {
+                    "X-OpenWebUI-User-Name": quote(user_obj.name.strip(), safe=" "),
+                    "X-OpenWebUI-User-Id": user_obj.id,
+                    "X-OpenWebUI-User-Email": user_obj.email.strip(),
+                    "X-OpenWebUI-User-Role": user_obj.role,
+                }
+            )
+            return headers
+        return include_user_info_headers(headers, user_obj, request=request)
+
     async def _build_headers(
+        self,
+        request=None,
+        user: dict | None = None,
+        tool_id: str | None = None,
+        force_refresh: bool = False,
+    ) -> dict | None:
+        headers = await self._build_auth_headers(request, user, tool_id, force_refresh)
+        return self._with_user_info(headers, request, user)
+
+    async def _build_auth_headers(
         self,
         request=None,
         user: dict | None = None,
