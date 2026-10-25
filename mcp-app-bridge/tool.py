@@ -8,6 +8,7 @@ required_open_webui_version: 0.11.4
 description: Wraps MCP server tools and renders MCP App UI resources (ui://) as Rich UI embeds using Open WebUI's existing embed system. Context-efficient discovery: paginated summary listing plus keyword search, so full schemas are only loaded for the top matching tools. Acts as an MCP Apps (2026-01-26) host: each app runs isolated in a nested sandbox with its server-declared CSP, gets the ui/initialize handshake, tool input and tool result, and can call its server's tools, read its resources, open links and send chat messages. Authenticates with a static bearer token or with per-user OAuth 2.1 (dynamic client registration or static credentials), reusing Open WebUI's own MCP OAuth machinery. No middleware changes needed.
 """
 
+import asyncio
 import base64
 import hashlib
 import json
@@ -244,6 +245,11 @@ class _AppsClientSession(ClientSession):
                 MCP_APPS_EXTENSION: {"mimeTypes": [MCP_APPS_MIME_TYPE]}
             }
         return await super().send_request(request, *args, **kwargs)
+
+
+# Token requests are serialized per (user, OAuth client); see _build_auth_headers.
+_TOKEN_LOCKS: dict = {}
+_RECENT_REFRESH: dict = {}
 
 
 async def _connect_mcp(url: str, headers: dict | None) -> tuple[AsyncExitStack, ClientSession]:
@@ -803,9 +809,24 @@ class Tools:
             )
 
         client_key = await self._register_oauth_client(request, tool_id)
-        token = await request.app.state.oauth_client_manager.get_oauth_token(
-            user_id, client_key, force_refresh=force_refresh
-        )
+        # The bridge makes several MCP requests at once. When the access token has expired,
+        # each of them would refresh it. An authorization server that rotates the refresh
+        # token on use accepts only the first; the rest get invalid_grant, and Open WebUI
+        # then deletes the user's whole OAuth session, forcing a new sign-in. Waiting in line
+        # per user lets the first caller refresh and the others find a valid token. A forced
+        # refresh (the 401 retry) right after another caller's refresh reuses that fresh
+        # token instead of spending the refresh token again. Process-local: it assumes one
+        # Open WebUI worker, which is how the app runs by default.
+        key = (user_id, client_key)
+        lock = _TOKEN_LOCKS.setdefault(key, asyncio.Lock())
+        async with lock:
+            if force_refresh and time.monotonic() - _RECENT_REFRESH.get(key, 0.0) < 60:
+                force_refresh = False
+            token = await request.app.state.oauth_client_manager.get_oauth_token(
+                user_id, client_key, force_refresh=force_refresh
+            )
+            if force_refresh and token:
+                _RECENT_REFRESH[key] = time.monotonic()
         if not token or not token.get("access_token"):
             raise AuthorizationRequired(await self._authorize_url(request, client_key))
         return {"Authorization": f"Bearer {token['access_token']}"}
