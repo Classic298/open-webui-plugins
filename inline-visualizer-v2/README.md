@@ -184,9 +184,11 @@ The tool's only request of its own goes to your own instance: if a script in a v
 
 The **Offline** level guarantees that no request leaves your Open WebUI host.
 
-**Without libraries (no setup):** set `security_level` to `offline`. Diagrams, themed HTML, KPI cards and clickable drill-downs all keep working. Only library charts (Chart.js, D3, ECharts, Plotly, Vega-Lite, vis-network, Tone.js) need a CDN. Optionally remove the **CDN libraries** section from `SKILL.md` so the model does not try to use them.
+**Default (CDN):** leave `security_level` at `strict`. The pinned CDN libraries in `SKILL.md` load without any static-file setup.
 
-**With libraries (self-hosted):**
+**Offline without libraries:** set `security_level` to `offline`. Diagrams, themed HTML, KPI cards, inline SVG charts and clickable drill-downs keep working. Library-based charts need self-hosted libraries; optionally remove the **CDN libraries** section from `SKILL.md` so the model does not try to load blocked CDNs.
+
+**With libraries (self-hosted, optional):** The pinned CDN examples remain the default; use this setup only when you want libraries served from your own instance.
 
 1. Set `security_level` to `offline`
 2. Download the libraries you need (the same pinned builds as in `SKILL.md`):
@@ -213,16 +215,25 @@ docker run -d ... -v /path/on/host/iv-libs:/app/backend/open_webui/static/iv-lib
    For a bare-metal/pip install, copy it into the `static/` folder of the installed `open_webui` package (or wherever `STATIC_DIR` points).
 
 4. Check that `https://<your-instance>/static/iv-libs/chart.umd.min.js` shows JavaScript in your browser
-5. In `SKILL.md`, replace the CDN URLs with your local paths before importing it:
+5. In `SKILL.md`, replace the CDN script tag with the dynamic `ivStaticUrl()` loader before importing it:
 
 ```html
 <!-- before -->
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
 <!-- after -->
-<script src="/static/iv-libs/chart.umd.min.js"></script>
+<script>
+var chartLibrary = document.createElement('script');
+chartLibrary.src = ivStaticUrl('iv-libs/chart.umd.min.js');
+chartLibrary.onload = function () {
+  // Initialize the chart after Chart.js is ready.
+};
+document.head.appendChild(chartLibrary);
+</script>
 ```
 
-If Open WebUI runs under a sub-path (e.g. `https://example.com/webui/`), use `/webui/static/iv-libs/…` instead.
+`ivStaticUrl()` is injected by `tool.py` and builds an absolute URL from the current Open WebUI origin, so the same Tool and Skill work on production and test hosts. The helper targets a root-level `/static/` route; if Open WebUI runs under a URL subpath, include that prefix in the helper's route.
+
+When downloading a visualization as HTML, root-relative `/static/` asset URLs are converted to absolute URLs for the Open WebUI instance that generated the file. The downloaded file still needs access to that instance to load self-hosted libraries.
 
 ---
 

@@ -5,6 +5,10 @@ description: Render rich interactive visuals — SVG diagrams, HTML widgets, Cha
 
 # Inline Visualizer
 
+### Library loading defaults
+
+Use the pinned CDN URLs in the chart and library examples by default. Use `ivStaticUrl()` only when the user or administrator specifically chooses self-hosted libraries or offline mode. When self-hosting JavaScript libraries, set `security_level` to `offline` and wait for the dynamically loaded script's `onload` event before using the library.
+
 This is the handbook/tutorial on how to use the visualizer tool.
 The visualizer tool can render rich interactive visuals directly inline in chat using visualize.
 
@@ -48,7 +52,7 @@ As you can see, each query token attends to all key tokens simultaneously.
 
 ## What's auto-injected
 
-- Theme CSS, SVG classes, color ramps, height reporting, sendPrompt() bridge, and openLink() bridge
+- Theme CSS, SVG classes, color ramps, height reporting, `ivStaticUrl()` helper, sendPrompt() bridge, and openLink() bridge
 - Pre-styled bare-tag form elements (see below) — saves tokens on simple forms
 - Consider making diagrams **conversational** with sendPrompt() — see the "sendPrompt bridge" section further below for patterns and examples
 
@@ -693,6 +697,25 @@ Common picks:
 
 Anything else on those three CDNs is fair game — apexcharts, d3-force,
 konva, flatpickr, etc. Pick whatever fits the topic.
+
+### Optional: self-hosted libraries
+
+Use the pinned CDN URLs above by default. For an offline/self-hosted setup, the tool exposes `ivStaticUrl(path)`, which creates an absolute URL from the current Open WebUI origin and the `/static/` route. Pass a path relative to the Open WebUI static directory; do not hard-code the production or test hostname.
+
+Load a self-hosted script dynamically and initialize the library only after it loads:
+
+```html
+<script>
+var chartLibrary = document.createElement('script');
+chartLibrary.src = ivStaticUrl('iv-libs/chart.umd.min.js');
+chartLibrary.onload = function () {
+  // Initialize the chart here.
+};
+document.head.appendChild(chartLibrary);
+</script>
+```
+
+The helper targets a root-level `/static/` route. If Open WebUI is hosted under a URL subpath, include that prefix in the helper's route.
 
 ---
 

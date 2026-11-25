@@ -3,7 +3,7 @@ title: Inline Visualizer
 author: Classic298
 author_url: https://github.com/Classic298
 funding_url: https://github.com/Classic298
-version: 2.2.3
+version: 2.2.4
 required_open_webui_version: 0.10.2
 description: Renders interactive HTML/SVG visualizations inline in chat. Requires "iframe Sandbox Allow Same Origin" to be enabled in Open WebUI Settings -> Interface. For design instructions, the model should call view_skill("visualize").
 """
@@ -15,7 +15,7 @@ from typing import Literal
 # Build marker embedded into the rendered iframe so the running
 # version can be verified at runtime (search DevTools for
 # `data-iv-build` on <html>).  Keep in sync with the frontmatter version.
-_IV_BUILD = "2.2.3"
+_IV_BUILD = "2.2.4"
 
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field
@@ -873,6 +873,24 @@ window.addEventListener('load', function() {
 });
 
 // --- sendPrompt bridge (requires iframe Sandbox Allow Same Origin) ---
+// Build same-origin absolute URLs for assets served by Open WebUI's /static route.
+// The current origin follows each instance, so the same tool works on prod and test.
+function ivStaticUrl(path) {
+  var cleanPath = String(path == null ? '' : path).replace(/^\/+/, '');
+  var exportOriginMeta = document.querySelector('meta[name="iv-static-origin"]');
+  var baseOrigin = exportOriginMeta && exportOriginMeta.content
+    ? exportOriginMeta.content
+    : '';
+  if (!baseOrigin || baseOrigin === 'null') {
+    baseOrigin = window.location.origin;
+  }
+  if (!baseOrigin || baseOrigin === 'null') {
+    try { baseOrigin = parent.location.origin; } catch(e) {}
+  }
+  return new URL('/static/' + cleanPath, baseOrigin).href;
+}
+window.ivStaticUrl = ivStaticUrl;
+
 function sendPrompt(text) {
   try {
     // Open WebUI's native prompt-submit postMessage — queues if the
@@ -1804,6 +1822,56 @@ function _ivDownload() {
       bodyClone.appendChild(imported[i]);
     }
   }
+
+  // Root-relative static paths work in the live Open WebUI iframe, but
+  // a downloaded HTML file has a file:// origin. Pin its static assets
+  // to the Open WebUI origin that produced the export.
+  var exportOrigin = '';
+  try { exportOrigin = parent.location.origin; } catch(e) {}
+  if (!exportOrigin || exportOrigin === 'null') exportOrigin = window.location.origin;
+  if (exportOrigin && exportOrigin !== 'null' &&
+      (exportOrigin.indexOf('http://') === 0 || exportOrigin.indexOf('https://') === 0)) {
+    var staticAssetNodes = docClone.querySelectorAll(
+      '[src^="/static/"], [href^="/static/"], [poster^="/static/"]'
+    );
+    var staticAssetAttrs = ['src', 'href', 'poster'];
+    for (var n = 0; n < staticAssetNodes.length; n++) {
+      for (var a = 0; a < staticAssetAttrs.length; a++) {
+        var attr = staticAssetAttrs[a];
+        var value = staticAssetNodes[n].getAttribute(attr);
+        if (value && value.indexOf('/static/') === 0) {
+          staticAssetNodes[n].setAttribute(attr, new URL(value, exportOrigin).href);
+        }
+      }
+    }
+
+    if (headClone) {
+      var originMeta = headClone.querySelector('meta[name="iv-static-origin"]');
+      if (!originMeta) {
+        originMeta = document.createElement('meta');
+        originMeta.setAttribute('name', 'iv-static-origin');
+        headClone.insertBefore(originMeta, headClone.firstChild);
+      }
+      originMeta.setAttribute('content', exportOrigin);
+
+      var cspMeta = headClone.querySelector('meta[http-equiv="Content-Security-Policy"]');
+      if (cspMeta) {
+        var cspSources = ['script-src', 'style-src', 'img-src', 'font-src', 'media-src'];
+        var policies = (cspMeta.getAttribute('content') || '').split(';').map(function(policy) {
+          var trimmed = policy.trim();
+          for (var d = 0; d < cspSources.length; d++) {
+            var directive = cspSources[d];
+            if (trimmed.indexOf(directive + ' ') === 0 && trimmed.indexOf(exportOrigin) === -1) {
+              return trimmed + ' ' + exportOrigin;
+            }
+          }
+          return trimmed;
+        });
+        cspMeta.setAttribute('content', policies.join('; '));
+      }
+    }
+  }
+
   var html = '<!DOCTYPE html>\\n' + docClone.outerHTML;
 
   if (dlWrap) document.body.appendChild(dlWrap);
