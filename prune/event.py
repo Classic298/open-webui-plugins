@@ -3777,8 +3777,10 @@ async def delete_chat_with_orphan_tags(chat_id: str, db: AsyncSession) -> bool:
     # delete_chat_by_id swallows exceptions and returns False
     if chat is None or not await Chats.delete_chat_by_id(chat_id, db=db):
         return False
-    tag_ids = (chat.meta or {}).get("tags", [])
-    await Chats.delete_orphan_tags_for_user(tag_ids, chat.user_id, db=db)
+    # Open WebUI 0.13.5+ removes unused tags inside delete_chat_by_id
+    if hasattr(Chats, "delete_orphan_tags_for_user"):
+        tag_ids = (chat.meta or {}).get("tags", [])
+        await Chats.delete_orphan_tags_for_user(tag_ids, chat.user_id, db=db)
     return True
 
 
