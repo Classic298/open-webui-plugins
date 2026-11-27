@@ -3416,6 +3416,47 @@ async def get_preserved_kb_ids(form_data, active_user_ids: Set[str]) -> Set[str]
     return preserved
 
 
+async def get_preserved_folder_ids(
+    form_data: PruneDataForm, active_user_ids: Set[str]
+) -> Set[str]:
+    """Folders living users own plus shared folders this run keeps, with subfolders."""
+    preserved_folder_ids = set()
+    if (
+        not form_data.delete_orphaned_folders
+        or form_data.exempt_shared_orphaned_folders
+    ):
+        preserved_folder_ids = await get_shared_resource_ids("folder", active_user_ids)
+
+    owned_folder_ids = set()
+    async with get_async_db_context() as db:
+        async for folder_id, owner_id in stream_rows(db, Folder.id, Folder.user_id):
+            if str(owner_id) in active_user_ids:
+                owned_folder_ids.add(str(folder_id))
+        preserved_folder_ids |= await _get_folder_ids_with_subfolders(
+            db, owned_folder_ids
+        )
+    return preserved_folder_ids
+
+
+async def get_preserved_note_ids(
+    form_data: PruneDataForm,
+    active_user_ids: Set[str],
+    preserved_folder_ids: Set[str],
+) -> Set[str]:
+    """Notes to keep: shared while their toggle is on, or in a kept folder."""
+    preserved = set()
+    if form_data.exempt_shared_orphaned_notes:
+        preserved = await get_shared_resource_ids("note", active_user_ids)
+    if not hasattr(Note, "folder_id"):
+        return preserved
+
+    async with get_async_db_context() as db:
+        async for note_id, folder_id in stream_rows(db, Note.id, Note.folder_id):
+            if folder_id and str(folder_id) in preserved_folder_ids:
+                preserved.add(str(note_id))
+    return preserved
+
+
 async def get_all_file_row_ids() -> Set[str]:
     """Return the ids of ALL existing file rows.
 
@@ -4069,28 +4110,27 @@ async def count_orphaned_records(
                     getattr(form_data, "exempt_shared_orphaned_tools", True),
                 ),
                 (
-                    "notes",
-                    "note",
-                    form_data.delete_orphaned_notes,
-                    getattr(form_data, "exempt_shared_orphaned_notes", True),
-                ),
-                (
                     "skills",
                     "skill",
                     form_data.delete_orphaned_skills,
                     getattr(form_data, "exempt_shared_orphaned_skills", True),
-                ),
-                (
-                    "folders",
-                    "folder",
-                    form_data.delete_orphaned_folders,
-                    form_data.exempt_shared_orphaned_folders,
                 ),
             ):
                 if enabled_flag and exempt_flag:
                     _shared_exempt[cnt_key] = await get_shared_resource_ids(
                         rtype, active_user_ids
                     )
+            preserved_folder_ids = set()
+            if form_data.delete_orphaned_notes or form_data.delete_orphaned_folders:
+                preserved_folder_ids = await get_preserved_folder_ids(
+                    form_data, active_user_ids
+                )
+            if form_data.delete_orphaned_notes:
+                _shared_exempt["notes"] = await get_preserved_note_ids(
+                    form_data, active_user_ids, preserved_folder_ids
+                )
+            if form_data.delete_orphaned_folders:
+                _shared_exempt["folders"] = preserved_folder_ids
 
             for key, table_cls, user_id_col, enabled in _table_flag_map:
                 if enabled:
@@ -4833,7 +4873,15 @@ async def get_preview_detail_page(
         all_users = (await Users.get_users())["users"]
         active_user_ids = _active_user_ids_excluding_inactive(all_users, form_data)
         exempt_ids = set()
-        if shared_resource_type and shared_exempt:
+        if shared_resource_type == "note":
+            exempt_ids = await get_preserved_note_ids(
+                form_data,
+                active_user_ids,
+                await get_preserved_folder_ids(form_data, active_user_ids),
+            )
+        elif shared_resource_type == "folder":
+            exempt_ids = await get_preserved_folder_ids(form_data, active_user_ids)
+        elif shared_resource_type and shared_exempt:
             exempt_ids = await get_shared_resource_ids(
                 shared_resource_type, active_user_ids
             )
@@ -6284,22 +6332,22 @@ async def run_prune(form_data: PruneDataForm) -> dict:
             and form_data.exempt_shared_orphaned_tools
             else set()
         )
-        shared_notes = (
-            await get_shared_resource_ids("note", active_user_ids)
+        preserved_folder_ids = (
+            await get_preserved_folder_ids(form_data, active_user_ids)
+            if form_data.delete_orphaned_notes or form_data.delete_orphaned_folders
+            else set()
+        )
+        preserved_note_ids = (
+            await get_preserved_note_ids(
+                form_data, active_user_ids, preserved_folder_ids
+            )
             if form_data.delete_orphaned_notes
-            and getattr(form_data, "exempt_shared_orphaned_notes", True)
             else set()
         )
         shared_skills = (
             await get_shared_resource_ids("skill", active_user_ids)
             if form_data.delete_orphaned_skills
             and getattr(form_data, "exempt_shared_orphaned_skills", True)
-            else set()
-        )
-        shared_folders = (
-            await get_shared_resource_ids("folder", active_user_ids)
-            if form_data.delete_orphaned_folders
-            and form_data.exempt_shared_orphaned_folders
             else set()
         )
 
@@ -6424,7 +6472,7 @@ async def run_prune(form_data: PruneDataForm) -> dict:
                 async for note_id, note_uid in stream_rows(db, Note.id, Note.user_id):
                     _prog_tick()
                     if await _owner_is_gone(note_uid, active_user_ids, owner_checks):
-                        if str(note_id) in shared_notes:
+                        if str(note_id) in preserved_note_ids:
                             continue
                         await Notes.delete_note_by_id(note_id, db=db)
                         notes_deleted += 1
@@ -6510,7 +6558,7 @@ async def run_prune(form_data: PruneDataForm) -> dict:
                     if await _owner_is_gone(
                         folder.user_id, active_user_ids, owner_checks
                     ):
-                        if folder.id in shared_folders:
+                        if folder.id in preserved_folder_ids:
                             continue
                         # Open WebUI's folder delete would take kept shared subfolders with it
                         await db.execute(delete(Folder).where(Folder.id == folder.id))
@@ -7686,18 +7734,20 @@ class Event:
             description="\u21b3 Keep them when a living user, an existing group or a public grant can still access them.\n\n---\n\n#### 🗂 Orphaned: Notes, Folders & Automations",
         )
         delete_orphaned_notes: bool = Field(
-            default=True, description="Delete notes that belonged to deleted users."
+            default=True,
+            description="Delete notes that belonged to deleted users, except notes in or below a folder a living user owns, or in or below a shared folder while Delete Orphaned Folders is off or Exempt Shared Orphaned Folders is on.",
         )
         exempt_shared_orphaned_notes: bool = Field(
             default=True,
             description="\u21b3 Keep them when a living user, an existing group or a public grant can still access them.",
         )
         delete_orphaned_folders: bool = Field(
-            default=True, description="Delete folders that belonged to deleted users."
+            default=True,
+            description="Delete folders that belonged to deleted users, except those below a folder a living user owns.",
         )
         exempt_shared_orphaned_folders: bool = Field(
             default=True,
-            description="\u21b3 Keep them, subfolders included, when a living user, an existing group or a public grant can still access them.",
+            description="\u21b3 Keep them, with their subfolders and the deleted users' notes inside, when a living user, an existing group or a public grant can still access them.",
         )
         delete_orphaned_automations: bool = Field(
             default=True,
