@@ -116,7 +116,6 @@ def _prog_end():
 # ============================================================================
 
 from typing import Optional
-from pydantic import BaseModel
 
 
 class PruneDataForm(BaseModel):
@@ -246,10 +245,6 @@ class PrunePreviewResult(BaseModel):
             + self.audio_cache_files
         )
 
-    def has_items(self) -> bool:
-        """Check if any items would be deleted."""
-        return self.total_items() > 0
-
     def get_summary_dict(self) -> dict:
         """Get summary as dictionary for display."""
         return {
@@ -312,7 +307,7 @@ import shutil
 import sqlite3
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Callable, Generator, Optional, Set, Tuple
+from typing import Callable, Generator, Set, Tuple
 from abc import ABC, abstractmethod
 from concurrent.futures import ThreadPoolExecutor
 
@@ -577,30 +572,6 @@ class VectorDatabaseCleaner(ABC):
         """
         pass
 
-    def iter_orphaned_collections(
-        self,
-        active_file_ids: Set[str],
-        active_kb_ids: Set[str],
-        active_user_ids: Optional[Set[str]] = None,
-    ) -> Generator[Tuple[str, str], None, None]:
-        """
-        Yield (orphaned_id, context) for each orphaned vector item.
-
-        Used by the export feature to list individual orphaned items.
-        Default implementation yields nothing. Subclasses override to
-        provide actual iteration.
-
-        Args:
-            active_file_ids: Set of file IDs that are still referenced
-            active_kb_ids: Set of knowledge base IDs that are still active
-            active_user_ids: Set of user IDs that are still active
-
-        Yields:
-            (orphaned_id, context_string) — e.g. ("file-abc-123", "chromadb")
-        """
-        return
-        yield  # pragma: no cover — makes this a generator
-
     # ── Knowledge base metadata embeddings (shared 'knowledge-bases' collection) ──
     #
     # These default implementations work for any backend whose client follows
@@ -661,15 +632,6 @@ class VectorDatabaseCleaner(ABC):
         if deleted:
             log.info(f"Deleted {deleted} orphaned knowledge base metadata embeddings")
         return deleted
-
-    def iter_orphaned_kb_metadata(
-        self, active_kb_ids: Set[str]
-    ) -> Generator[Tuple[str, str], None, None]:
-        """Yield (kb_id, context) for each orphaned KB metadata entry."""
-        present = self._kb_metadata_ids() or set()
-        for kb_id in present:
-            if kb_id not in active_kb_ids:
-                yield (kb_id, KNOWLEDGE_BASES_COLLECTION)
 
     # ── Stale file embeddings inside live knowledge base collections ──
     # A file removed from a KB whose chunks were left behind keeps being cited.
@@ -848,20 +810,6 @@ class VectorDatabaseCleaner(ABC):
             log.info(f"Deleted {deleted} orphaned memories")
         return deleted
 
-    def iter_orphaned_memories(
-        self, valid_ids_by_user: dict
-    ) -> Generator[Tuple[str, str], None, None]:
-        """Yield (point_id, context) for each orphaned memory."""
-        valid_ids_by_user = valid_ids_by_user or {}
-        # Export listing, not the progress-tracked prune stage: don't tick.
-        for uid, present in self._iter_present_memory_ids(
-            valid_ids_by_user.keys(), tick=False
-        ):
-            valid = valid_ids_by_user.get(uid) or set()
-            for pid in present:
-                if pid not in valid:
-                    yield (pid, f"user-memory-{uid}")
-
 
 class ChromaDatabaseCleaner(VectorDatabaseCleaner):
     """
@@ -931,37 +879,6 @@ class ChromaDatabaseCleaner(VectorDatabaseCleaner):
             log.debug(f"Error counting orphaned ChromaDB collections: {e}")
 
         return count
-
-    def iter_orphaned_collections(
-        self,
-        active_file_ids: Set[str],
-        active_kb_ids: Set[str],
-        active_user_ids: Optional[Set[str]] = None,
-    ) -> Generator[Tuple[str, str], None, None]:
-        """Yield (collection_name, context) for each orphaned ChromaDB collection."""
-        if not self.chroma_db_path.exists():
-            return
-
-        expected_collections = self._build_expected_collections(
-            active_file_ids, active_kb_ids, active_user_ids
-        )
-        uuid_to_collection = self._get_collection_mappings()
-
-        try:
-            for collection_dir in self.vector_dir.iterdir():
-                if not collection_dir.is_dir() or collection_dir.name.startswith("."):
-                    continue
-
-                dir_uuid = collection_dir.name
-                collection_name = uuid_to_collection.get(dir_uuid)
-
-                if (
-                    collection_name is None
-                    or collection_name not in expected_collections
-                ):
-                    yield (collection_name or dir_uuid, "chromadb")
-        except Exception as e:
-            log.debug(f"Error iterating orphaned ChromaDB collections: {e}")
 
     def cleanup_orphaned_collections(
         self, load_active_ids: ActiveIdsLoader
@@ -1409,28 +1326,6 @@ class PGVectorDatabaseCleaner(VectorDatabaseCleaner):
             log.error(f"Error counting orphaned PGVector collections: {e}")
             return 0
 
-    def iter_orphaned_collections(
-        self,
-        active_file_ids: Set[str],
-        active_kb_ids: Set[str],
-        active_user_ids: Optional[Set[str]] = None,
-    ) -> Generator[Tuple[str, str], None, None]:
-        """Yield (collection_name, context) for each orphaned PGVector collection."""
-        if not self.session:
-            return
-
-        try:
-            orphaned_collections = self._get_orphaned_collections(
-                lambda: (active_file_ids, active_kb_ids, active_user_ids)
-            )
-            self.session.rollback()
-            for name in orphaned_collections:
-                yield (name, "pgvector")
-        except Exception as e:
-            if self.session:
-                self.session.rollback()
-            log.debug(f"Error iterating orphaned PGVector collections: {e}")
-
     def cleanup_orphaned_collections(
         self, load_active_ids: ActiveIdsLoader
     ) -> tuple[int, Optional[str]]:
@@ -1780,31 +1675,6 @@ class MilvusDatabaseCleaner(VectorDatabaseCleaner):
             log.error(f"Error counting orphaned Milvus collections: {e}")
             return 0
 
-    def iter_orphaned_collections(
-        self,
-        active_file_ids: Set[str],
-        active_kb_ids: Set[str],
-        active_user_ids: Optional[Set[str]] = None,
-    ) -> Generator[Tuple[str, str], None, None]:
-        """Yield (original_name, full_collection_name) for each orphaned Milvus collection."""
-        try:
-            expected_collections = self._build_expected_collections(
-                active_file_ids, active_kb_ids, active_user_ids
-            )
-            all_collections = self.vector_db_client.client.list_collections()
-
-            prefix = f"{self.collection_prefix}_"
-            prefix_len = len(self.collection_prefix) + 1
-            for collection_name in all_collections:
-                if collection_name.startswith(prefix):
-                    original_name = collection_name[prefix_len:]
-                    original_name = original_name.replace("_", "-")
-
-                    if original_name not in expected_collections:
-                        yield (original_name, collection_name)
-        except Exception as e:
-            log.debug(f"Error iterating orphaned Milvus collections: {e}")
-
     def cleanup_orphaned_collections(
         self, load_active_ids: ActiveIdsLoader
     ) -> tuple[int, Optional[str]]:
@@ -2036,55 +1906,6 @@ class MilvusMultitenancyDatabaseCleaner(VectorDatabaseCleaner):
         except Exception as e:
             log.error(f"Error counting orphaned Milvus multitenancy collections: {e}")
             return 0
-
-    def iter_orphaned_collections(
-        self,
-        active_file_ids: Set[str],
-        active_kb_ids: Set[str],
-        active_user_ids: Optional[Set[str]] = None,
-    ) -> Generator[Tuple[str, str], None, None]:
-        """Yield (resource_id, shared_collection_name) for each orphaned Milvus MT resource."""
-        try:
-            _ensure_milvus_default_connection()
-            expected_resource_ids = self._build_expected_resource_ids(
-                active_file_ids, active_kb_ids, active_user_ids
-            )
-
-            for shared_collection_name in self.shared_collections:
-                if self._skip_shared_collection(shared_collection_name, active_user_ids):
-                    continue
-                if not utility.has_collection(shared_collection_name):
-                    continue
-
-                try:
-                    collection = Collection(shared_collection_name)
-                    collection.load()
-
-                    all_resource_ids = set()
-                    iterator = collection.query_iterator(
-                        expr="",
-                        output_fields=["resource_id"],
-                        batch_size=1000,
-                    )
-
-                    while True:
-                        results = iterator.next()
-                        if not results:
-                            iterator.close()
-                            break
-                        all_resource_ids.update(res["resource_id"] for res in results)
-
-                    for resource_id in all_resource_ids:
-                        if resource_id not in expected_resource_ids:
-                            yield (resource_id, shared_collection_name)
-
-                except Exception as e:
-                    log.debug(
-                        f"Error iterating shared collection {shared_collection_name}: {e}"
-                    )
-
-        except Exception as e:
-            log.debug(f"Error iterating orphaned Milvus MT collections: {e}")
 
     def cleanup_orphaned_collections(
         self, load_active_ids: ActiveIdsLoader
@@ -2364,30 +2185,6 @@ class QdrantDatabaseCleaner(VectorDatabaseCleaner):
 
         return count
 
-    def iter_orphaned_collections(
-        self,
-        active_file_ids: Set[str],
-        active_kb_ids: Set[str],
-        active_user_ids: Optional[Set[str]] = None,
-    ) -> Generator[Tuple[str, str], None, None]:
-        """Yield (original_name, full_collection_name) for each orphaned Qdrant collection."""
-        try:
-            expected_collections = self._build_expected_collections(
-                active_file_ids, active_kb_ids, active_user_ids
-            )
-            all_collections = self.client.get_collections().collections
-
-            prefix = f"{self.collection_prefix}_"
-            prefix_len = len(self.collection_prefix) + 1
-            for collection in all_collections:
-                collection_name = collection.name
-                if collection_name.startswith(prefix):
-                    original_name = collection_name[prefix_len:]
-                    if original_name not in expected_collections:
-                        yield (original_name, collection_name)
-        except Exception as e:
-            log.debug(f"Error iterating orphaned Qdrant collections: {e}")
-
     def cleanup_orphaned_collections(
         self, load_active_ids: ActiveIdsLoader
     ) -> tuple[int, Optional[str]]:
@@ -2590,59 +2387,6 @@ class QdrantMultitenancyDatabaseCleaner(VectorDatabaseCleaner):
             return 0
 
         return orphaned_count
-
-    def iter_orphaned_collections(
-        self,
-        active_file_ids: Set[str],
-        active_kb_ids: Set[str],
-        active_user_ids: Optional[Set[str]] = None,
-    ) -> Generator[Tuple[str, str], None, None]:
-        """Yield (tenant_id, shared_collection_name) for each orphaned Qdrant MT tenant."""
-        try:
-            expected_tenant_ids = self._build_expected_tenant_ids(
-                active_file_ids, active_kb_ids, active_user_ids or set()
-            )
-
-            for collection_name in self.shared_collections:
-                if not self.client.collection_exists(collection_name=collection_name):
-                    continue
-
-                try:
-                    all_tenant_ids = set()
-                    offset = None
-
-                    while True:
-                        scroll_result = self.client.scroll(
-                            collection_name=collection_name,
-                            limit=1000,
-                            offset=offset,
-                            with_payload=True,
-                            with_vectors=False,
-                        )
-
-                        points, next_offset = scroll_result
-                        if not points:
-                            break
-
-                        for point in points:
-                            if "tenant_id" in point.payload:
-                                all_tenant_ids.add(point.payload["tenant_id"])
-
-                        if next_offset is None:
-                            break
-                        offset = next_offset
-
-                    for tenant_id in all_tenant_ids:
-                        if tenant_id not in expected_tenant_ids:
-                            yield (tenant_id, collection_name)
-
-                except Exception as e:
-                    log.debug(
-                        f"Error iterating Qdrant collection {collection_name}: {e}"
-                    )
-
-        except Exception as e:
-            log.debug(f"Error iterating orphaned Qdrant MT tenant_ids: {e}")
 
     def cleanup_orphaned_collections(
         self, load_active_ids: ActiveIdsLoader
@@ -2960,13 +2704,9 @@ def get_vector_database_cleaner(
 # Operations (from prune_operations.py, throttled)
 # ============================================================================
 
-import asyncio
 import inspect
-import logging
-import os
 import time
-from pathlib import Path
-from typing import Iterator, Optional, Set, Tuple, Callable, Any
+from typing import Iterator, Any
 from sqlalchemy import (
     select,
     text,
@@ -2983,8 +2723,6 @@ from sqlalchemy import (
 from sqlalchemy.exc import OperationalError, ProgrammingError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
-
-log = logging.getLogger(__name__)
 
 # Exception types raised for missing tables across database dialects.
 # SQLite raises OperationalError; PostgreSQL raises ProgrammingError.
@@ -3112,9 +2850,9 @@ async def _count_rows(db, table, filter_clause=None) -> int:
 # Direct Open WebUI imports — this module runs inside the Open WebUI process.
 from open_webui.models.users import User, UserModel, Users
 from open_webui.models.auths import Auths
-from open_webui.models.chats import Chat, Chats, ChatFile
+from open_webui.models.chats import Chat, Chats
 from open_webui.models.chat_messages import ChatMessage
-from open_webui.models.messages import Message, MessageReaction, Messages
+from open_webui.models.messages import Message, MessageReaction
 from open_webui.models.memories import Memory, Memories
 from open_webui.models.oauth_sessions import OAuthSessions
 from open_webui.models.files import File, Files
@@ -3156,10 +2894,9 @@ try:
         Channel,
         ChannelMember,
         ChannelFile,
-        Channels,
     )
 except ImportError:
-    Channel = ChannelMember = ChannelFile = Channels = None
+    Channel = ChannelMember = ChannelFile = None
 try:
     from open_webui.models.channels import ChannelWebhook
 except ImportError:
@@ -4214,25 +3951,6 @@ async def count_orphaned_records(
     return counts
 
 
-async def count_orphaned_chat_messages() -> int:
-    """Count orphaned chat_message rows whose parent chat no longer exists.
-
-    These are left behind on SQLite because it does not enforce
-    ON DELETE CASCADE unless PRAGMA foreign_keys is enabled.
-    """
-    try:
-        async with get_async_db_context() as db:
-            result = await db.execute(
-                select(func.count(ChatMessage.id)).where(
-                    not_(ChatMessage.chat_id.in_(select(Chat.id)))
-                )
-            )
-            return result.scalar_one_or_none() or 0
-    except Exception as e:
-        log.debug(f"Error counting orphaned chat_messages: {e}")
-        return 0
-
-
 async def delete_orphaned_chat_messages() -> int:
     """Delete chat_message rows whose parent chat no longer exists.
 
@@ -4415,25 +4133,6 @@ def _orphaned_channel_message_filter():
     )
 
 
-async def count_orphaned_channel_messages() -> int:
-    """Count channel messages whose channel or thread parent no longer exists (dangling)."""
-    if Message is None or Channel is None:
-        return 0
-    try:
-        async with get_async_db_context() as db:
-            result = await db.execute(
-                select(func.count(Message.id)).where(_orphaned_channel_message_filter())
-            )
-            return result.scalar_one_or_none() or 0
-    except _TABLE_MISSING_ERRORS as e:
-        if _is_table_missing_error(e):
-            return 0
-        raise
-    except Exception as e:
-        log.debug(f"Error counting orphaned channel messages: {e}")
-        return 0
-
-
 async def delete_orphaned_channel_messages() -> int:
     """Delete channel messages whose channel or thread parent no longer exists."""
     if Message is None or Channel is None:
@@ -4459,27 +4158,6 @@ async def delete_orphaned_channel_messages() -> int:
         raise
     except Exception as e:
         log.error(f"Error deleting orphaned channel messages: {e}")
-        return 0
-
-
-async def count_orphaned_channels(active_user_ids: Set[str]) -> int:
-    """Count channels whose owner is no longer an active user."""
-    if Channel is None or not active_user_ids:
-        return 0
-    try:
-        async with get_async_db_context() as db:
-            result = await db.execute(
-                select(func.count())
-                .select_from(Channel)
-                .where(not_(Channel.user_id.in_(active_user_ids)))
-            )
-            return result.scalar_one_or_none() or 0
-    except _TABLE_MISSING_ERRORS as e:
-        if _is_table_missing_error(e):
-            return 0
-        raise
-    except Exception as e:
-        log.debug(f"Error counting orphaned channels: {e}")
         return 0
 
 
@@ -4656,7 +4334,7 @@ def iter_storage_objects() -> Iterator[Tuple[str, str, Optional[int], Optional[f
     log.warning(f"Unknown STORAGE_PROVIDER '{provider}' — orphan storage scan skipped")
 
 
-async def _get_active_file_paths(active_file_ids: Set[str]) -> Set[str]:
+async def _get_active_file_paths() -> Set[str]:
     """Return the storage refs of ALL existing file rows.
 
     Any file row (referenced or not) protects its storage object; the DB
@@ -4680,9 +4358,9 @@ async def _get_active_file_paths(active_file_ids: Set[str]) -> Set[str]:
         return active_paths
 
 
-async def count_orphaned_uploads(active_file_ids: Set[str], grace_hours: int) -> int:
+async def count_orphaned_uploads(grace_hours: int) -> int:
     """Count orphaned objects in the configured storage backend (local/S3/GCS/Azure)."""
-    active_paths = await _get_active_file_paths(active_file_ids)
+    active_paths = await _get_active_file_paths()
 
     provider = (STORAGE_PROVIDER or "local").lower()
 
@@ -5066,7 +4744,7 @@ async def get_preview_detail_page(
         # Positional paging: storage listings have no primary key to keyset on,
         # so every page re-enumerates the backend. Exports of huge buckets are
         # size-confirmed in the UI.
-        active_paths = await _get_active_file_paths(set())
+        active_paths = await _get_active_file_paths()
         provider = (STORAGE_PROVIDER or "local").lower()
 
         def scan_uploads():
@@ -5124,7 +4802,7 @@ async def get_preview_detail_page(
 
 
 async def get_active_file_ids(
-    knowledge_bases=None, active_user_ids=None, preserved_kb_ids=None
+    active_user_ids=None, preserved_kb_ids=None
 ) -> Tuple[Set[str], Set[str]]:
     """
     Get all file IDs that are actively referenced by knowledge bases, chats, folders, messages, and models.
@@ -5133,7 +4811,6 @@ async def get_active_file_ids(
     loading full ORM objects with large JSONB payload into memory.
 
     Args:
-        knowledge_bases: Deprecated, ignored.  Kept for call-site compatibility.
         active_user_ids: Optional set of active user IDs to filter knowledge bases
         preserved_kb_ids: When given, the exact KB set whose file references
             count (overrides the ownership filter); pass get_preserved_kb_ids()
@@ -5515,7 +5192,7 @@ async def safe_delete_file_by_id(
         return False
 
 
-async def cleanup_orphaned_uploads(active_file_ids: Set[str], grace_hours: int) -> int:
+async def cleanup_orphaned_uploads(grace_hours: int) -> int:
     """
     Delete orphaned objects from the configured storage backend
     (local/S3/GCS/Azure). An object is orphaned when its storage ref does
@@ -5523,7 +5200,7 @@ async def cleanup_orphaned_uploads(active_file_ids: Set[str], grace_hours: int) 
 
     Returns the number of objects deleted.
     """
-    active_paths = await _get_active_file_paths(active_file_ids)
+    active_paths = await _get_active_file_paths()
     deleted_count = 0
 
     provider = (STORAGE_PROVIDER or "local").lower()
@@ -6073,7 +5750,7 @@ async def run_prune(form_data: PruneDataForm) -> dict:
             )
             _prog_stage("Scanning storage for orphaned uploads")
             orphaned_uploads = await count_orphaned_uploads(
-                active_file_ids, form_data.orphan_file_grace_hours
+                form_data.orphan_file_grace_hours
             )
             _prog_stage("Scanning vector collections")
             # A KB or user the run deletes takes its collection along; counted there
@@ -6621,7 +6298,7 @@ async def run_prune(form_data: PruneDataForm) -> dict:
 
         _prog_stage("Deleting orphaned uploads from storage")
         deleted_uploads = await cleanup_orphaned_uploads(
-            active_file_ids, form_data.orphan_file_grace_hours
+            form_data.orphan_file_grace_hours
         )
         if deleted_uploads > 0:
             log.info(f"Deleted {deleted_uploads} orphaned upload files")
@@ -6646,7 +6323,7 @@ async def run_prune(form_data: PruneDataForm) -> dict:
         load_active_ids = _blocking_on_loop(
             lambda: get_current_active_ids(form_data, referenced)
         )
-        deleted_vector_count, vector_error = await asyncio.to_thread(
+        _, vector_error = await asyncio.to_thread(
             vector_cleaner.cleanup_orphaned_collections, load_active_ids
         )
         if vector_error:
