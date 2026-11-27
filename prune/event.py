@@ -910,6 +910,8 @@ class ChromaDatabaseCleaner(VectorDatabaseCleaner):
             active_file_ids, active_kb_ids, active_user_ids
         )
         uuid_to_collection = self._get_collection_mappings()
+        if uuid_to_collection is None:
+            return 0
 
         count = 0
         try:
@@ -976,6 +978,8 @@ class ChromaDatabaseCleaner(VectorDatabaseCleaner):
                 if path.is_dir() and not path.name.startswith(".")
             ]
             uuid_to_collection = self._get_collection_mappings()
+            if uuid_to_collection is None:
+                return (0, "ChromaDB cleanup failed: could not read ChromaDB metadata")
             expected_collections = self._build_expected_collections(*load_active_ids())
         except Exception as e:
             error_msg = f"ChromaDB cleanup failed: {e}"
@@ -1125,7 +1129,7 @@ class ChromaDatabaseCleaner(VectorDatabaseCleaner):
                 self._segment_dirs_by_name.setdefault(name, set()).add(dir_uuid)
         return self._segment_dirs_by_name.get(collection_name, set())
 
-    def _get_collection_mappings(self) -> dict:
+    def _get_collection_mappings(self) -> Optional[dict]:
         """Get mapping from ChromaDB directory UUID to collection name."""
         uuid_to_collection = {}
 
@@ -1150,6 +1154,7 @@ class ChromaDatabaseCleaner(VectorDatabaseCleaner):
 
         except Exception as e:
             log.error(f"Error reading ChromaDB metadata: {e}")
+            return None
 
         return uuid_to_collection
 
