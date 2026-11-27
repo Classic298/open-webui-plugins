@@ -5404,6 +5404,10 @@ async def get_active_file_ids(
         else:
             log.debug("Note.data attribute not present — skipping note scan")
 
+        await scan_text_refs(
+            "Scanning profile banners", User, User.id, [User.profile_banner_image_url]
+        )
+
         # chat_message mirror (v0.6.41+): redundant with Chat.chat today, cheap
         # insurance should a future version stop mirroring into Chat.chat.
         chat_message_cols = [c for c in (getattr(ChatMessage, "files", None),
