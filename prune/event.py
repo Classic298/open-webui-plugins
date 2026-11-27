@@ -3746,7 +3746,7 @@ async def count_old_chats(
     try:
         async with get_async_db_context() as db:
             # Build filter conditions
-            conditions = [Chat.updated_at < cutoff_time]
+            conditions = [_old_chat_filter(cutoff_time)]
 
             if exempt_archived:
                 conditions.append(or_(Chat.archived == False, Chat.archived == None))
@@ -3784,6 +3784,14 @@ async def delete_chat_with_orphan_tags(chat_id: str, db: AsyncSession) -> bool:
     return True
 
 
+def _old_chat_filter(cutoff_time: int):
+    """Chats neither updated nor read since cutoff_time."""
+    return and_(
+        Chat.updated_at < cutoff_time,
+        or_(Chat.last_read_at == None, Chat.last_read_at < cutoff_time),
+    )
+
+
 def _knowledge_age_column(age_field: str):
     """Resolve the timestamp column used for KB age comparisons."""
     return Knowledge.updated_at if age_field == "updated_at" else Knowledge.created_at
@@ -3793,7 +3801,7 @@ def _not_deleted_by_age_rules(table, form_data: PruneDataForm):
     """Filter for rows the age rules leave to the orphan sweep."""
     kb_days = form_data.delete_knowledge_bases_older_than_days or 0
     if table is Chat and form_data.days is not None:
-        conditions = [Chat.updated_at < int(time.time()) - form_data.days * 86400]
+        conditions = [_old_chat_filter(int(time.time()) - form_data.days * 86400)]
         if form_data.exempt_archived_chats:
             conditions.append(or_(Chat.archived == False, Chat.archived == None))
         if form_data.exempt_pinned_chats and hasattr(Chat, "pinned"):
@@ -4884,7 +4892,7 @@ async def get_preview_detail_page(
             items = []
         else:
             cutoff_time = int(time.time()) - form_data.days * 86400
-            conditions = [Chat.updated_at < cutoff_time]
+            conditions = [_old_chat_filter(cutoff_time)]
             if form_data.exempt_archived_chats:
                 conditions.append(or_(Chat.archived == False, Chat.archived == None))
             if form_data.exempt_pinned_chats and hasattr(Chat, "pinned"):
@@ -6155,7 +6163,7 @@ async def run_prune(form_data: PruneDataForm) -> dict:
             cutoff_time = int(time.time()) - (form_data.days * 86400)
 
             async with get_async_db() as db:
-                conditions = Chat.updated_at < cutoff_time
+                conditions = _old_chat_filter(cutoff_time)
                 if form_data.exempt_archived_chats:
                     conditions &= or_(Chat.archived == False, Chat.archived == None)
                 if form_data.exempt_pinned_chats and hasattr(Chat, "pinned"):
@@ -6178,10 +6186,10 @@ async def run_prune(form_data: PruneDataForm) -> dict:
                     await _pace()
                 if deleted > 0:
                     log.info(
-                        f"Deleting {deleted} old chats (older than {form_data.days} days)"
+                        f"Deleting {deleted} old chats (idle for {form_data.days} days)"
                     )
                 else:
-                    log.info(f"No chats found older than {form_data.days} days")
+                    log.info(f"No chats found idle for {form_data.days} days")
         else:
             log.info("Skipping chat deletion (days parameter is None)")
 
@@ -7030,7 +7038,7 @@ async def _delete_old_chats_paced(
 ) -> int:
     cutoff_time = int(time.time()) - (days * 86400)
     async with get_async_db() as db:
-        conditions = Chat.updated_at < cutoff_time
+        conditions = _old_chat_filter(cutoff_time)
         if exempt_archived:
             conditions &= or_(Chat.archived == False, Chat.archived == None)
         if exempt_pinned and hasattr(Chat, "pinned"):
@@ -7045,7 +7053,7 @@ async def _delete_old_chats_paced(
             await db.commit()  # release the write lock before sleeping
             await _pace()
     if deleted:
-        log.info(f"Deleted {deleted} chats older than {days} days")
+        log.info(f"Deleted {deleted} chats idle for {days} days")
     return deleted
 
 
@@ -7559,7 +7567,7 @@ class Event:
         )
         chat_max_age_days: int = Field(
             default=0,
-            description="Delete chats older than this many days (0 = keep forever).",
+            description="Delete chats not updated or opened by their owner for this many days (0 = keep forever).",
         )
         exempt_archived_chats: bool = Field(
             default=True,
@@ -7913,7 +7921,7 @@ const SECTIONS = [
  ]},
  {title:'🕒 Age Rules', fields:[
   {k:'days',t:'num',label:'Delete chats older than',unit:'days',
-   tip:'Chats whose last update is older than this are deleted. Empty = off.'},
+   tip:'Chats not updated or opened by their owner for this long are deleted. Empty = off.'},
   {k:'exempt_archived_chats',t:'chk',def:true,label:'Keep archived chats',
    tip:'Archived chats survive the age rule above.'},
   {k:'exempt_pinned_chats',t:'chk',def:true,label:'Keep pinned chats',
