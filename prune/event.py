@@ -3758,10 +3758,19 @@ async def delete_chat_with_orphan_tags(chat_id: str, db: AsyncSession) -> bool:
 
 
 def _old_chat_filter(cutoff_time: int):
-    """Chats neither updated nor read since cutoff_time."""
+    """Chats idle since cutoff_time, except pending timers and their chats."""
+    timer_chat = aliased(Chat)
     return and_(
         Chat.updated_at < cutoff_time,
         or_(Chat.last_read_at == None, Chat.last_read_at < cutoff_time),
+        Chat.timer_at == None,
+        ~select(timer_chat.id)
+        .where(
+            timer_chat.timer_at != None,
+            timer_chat.user_id == Chat.user_id,
+            timer_chat.meta["parent_chat_id"].as_string() == Chat.id,
+        )
+        .exists(),
     )
 
 
@@ -7571,7 +7580,7 @@ class Event:
         )
         chat_max_age_days: int = Field(
             default=0,
-            description="Delete chats not updated or opened by their owner for this many days (0 = keep forever).",
+            description="Delete chats not updated or opened by their owner for this many days, except timers still waiting to fire and the chats they were set in (0 = keep forever).",
         )
         exempt_archived_chats: bool = Field(
             default=True,
@@ -8083,7 +8092,7 @@ const SECTIONS = [
   {k:'days',t:'num',label:'Delete chats idle for',unit:'days',
    desc:'Chats not updated or opened by their owner for this long. Empty = off.',
    tip:{deletes:'Chats their owner has neither updated nor opened for this many days, admins’ chats included, with their messages. Files only these chats used go in the same run, once older than the grace window.',
-    keeps:'Archived and pinned chats while their toggles are on, and chats in folders when that toggle is on.',
+    keeps:'Archived and pinned chats while their toggles are on, chats in folders when that toggle is on, and timers that have not fired yet along with the chats they were set in.',
     example:'90 means a chat last opened in March is deleted in June.'}},
   {k:'exempt_archived_chats',t:'chk',def:true,label:'Keep archived chats',
    desc:'Archived chats survive the age rule above.',
