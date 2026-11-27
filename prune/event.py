@@ -1185,7 +1185,20 @@ class ChromaDatabaseCleaner(VectorDatabaseCleaner):
                     f"Cleaning up {orphaned_embeddings} orphaned ChromaDB embeddings and related data"
                 )
 
-                # Delete orphaned embedding_metadata first (child records)
+                # Full-text rows are keyed by embedding id
+                cursor = conn.execute(
+                    """
+                    DELETE FROM embedding_fulltext_search
+                    WHERE rowid IN (
+                        SELECT id FROM embeddings
+                        WHERE segment_id NOT IN (SELECT id FROM segments)
+                    )
+                """
+                )
+                fts_deleted = cursor.rowcount
+                cleaned_records += fts_deleted
+
+                # Delete orphaned embedding_metadata (child records)
                 cursor = conn.execute(
                     """
                     DELETE FROM embedding_metadata
@@ -1207,10 +1220,6 @@ class ChromaDatabaseCleaner(VectorDatabaseCleaner):
                 )
                 embeddings_deleted = cursor.rowcount
                 cleaned_records += embeddings_deleted
-
-                # Selectively clean FTS while preserving active content
-                fts_cleaned = self._cleanup_fts_selectively(conn)
-                log.info(f"FTS cleanup: preserved {fts_cleaned} valid text entries")
 
                 # Clean up orphaned collection and segment metadata
                 cursor = conn.execute(
@@ -1251,6 +1260,7 @@ class ChromaDatabaseCleaner(VectorDatabaseCleaner):
 
                 log.info(
                     f"ChromaDB cleanup: {embeddings_deleted} embeddings, {metadata_deleted} metadata, "
+                    f"{fts_deleted} full-text entries, "
                     f"{collection_meta_deleted} collection metadata, {segment_meta_deleted} segment metadata, "
                     f"{seq_id_deleted} sequence IDs"
                 )
@@ -1266,93 +1276,6 @@ class ChromaDatabaseCleaner(VectorDatabaseCleaner):
             raise
 
         return cleaned_records
-
-    def _cleanup_fts_selectively(self, conn) -> int:
-        """
-        Selectively clean FTS content with atomic operations, preserving only data from active embeddings.
-
-        This method prevents destroying valid search data by:
-        1. Creating and validating temporary table with valid content
-        2. Using atomic transactions for DELETE/INSERT operations
-        3. Rolling back on failure to preserve existing data
-        4. Conservative fallback: skip FTS cleanup if validation fails
-
-        Returns:
-            Number of valid FTS entries preserved, or -1 if FTS cleanup was skipped
-        """
-        try:
-            # Step 1: Create temporary table with valid content
-            conn.execute(
-                """
-                CREATE TEMPORARY TABLE temp_valid_fts AS
-                SELECT DISTINCT em.string_value
-                FROM embedding_metadata em
-                JOIN embeddings e ON em.id = e.id
-                JOIN segments s ON e.segment_id = s.id
-                WHERE em.string_value IS NOT NULL
-                  AND em.string_value != ''
-            """
-            )
-
-            # Step 2: Validate temp table creation and count records
-            cursor = conn.execute("SELECT COUNT(*) FROM temp_valid_fts")
-            valid_count = cursor.fetchone()[0]
-
-            # Step 3: Validate temp table is accessible
-            try:
-                conn.execute("SELECT 1 FROM temp_valid_fts LIMIT 1")
-                temp_table_ok = True
-            except Exception:
-                temp_table_ok = False
-
-            # Step 4: Only proceed if validation passed
-            if not temp_table_ok:
-                log.warning(
-                    "FTS temp table validation failed, skipping FTS cleanup for safety"
-                )
-                conn.execute("DROP TABLE IF EXISTS temp_valid_fts")
-                return -1  # Signal FTS cleanup was skipped
-
-            # Step 5: FTS cleanup operation (already in transaction)
-            try:
-                # Delete all FTS content
-                conn.execute("DELETE FROM embedding_fulltext_search")
-
-                # Re-insert only valid content if any exists
-                if valid_count > 0:
-                    conn.execute(
-                        """
-                        INSERT INTO embedding_fulltext_search(string_value)
-                        SELECT string_value FROM temp_valid_fts
-                    """
-                    )
-                    log.debug(f"Preserved {valid_count} valid FTS entries")
-                else:
-                    log.debug("No valid FTS content found, cleared all entries")
-
-                # Rebuild FTS index
-                conn.execute(
-                    "INSERT INTO embedding_fulltext_search(embedding_fulltext_search) VALUES('rebuild')"
-                )
-
-            except Exception as e:
-                log.error(f"FTS cleanup failed: {e}")
-                conn.execute("DROP TABLE IF EXISTS temp_valid_fts")
-                return -1  # Signal FTS cleanup failed
-
-            # Step 6: Clean up temporary table
-            conn.execute("DROP TABLE IF EXISTS temp_valid_fts")
-
-            return valid_count
-
-        except Exception as e:
-            log.error(f"FTS cleanup validation failed, leaving FTS untouched: {e}")
-            # Conservative approach: don't touch FTS if anything goes wrong
-            try:
-                conn.execute("DROP TABLE IF EXISTS temp_valid_fts")
-            except Exception:
-                pass
-            return -1  # Signal FTS cleanup was skipped
 
 
 class RemoteChromaDatabaseCleaner(ChromaDatabaseCleaner):
