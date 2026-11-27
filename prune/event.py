@@ -7652,7 +7652,7 @@ class Event:
         )
         delete_orphaned_functions: bool = Field(
             default=False,
-            description="Delete functions that belonged to deleted users. Functions are server-side code, so this is off by default; review before enabling.",
+            description="Delete every function whose owner was deleted, active or not. This includes global filters, pipes and actions all users rely on, and Prune itself when the admin who installed it is deleted. Off by default; review before enabling.",
         )
         delete_orphaned_skills: bool = Field(
             default=False, description="Delete skills that belonged to deleted users."
@@ -7695,7 +7695,7 @@ class Event:
         )
         delete_orphaned_channels: bool = Field(
             default=False,
-            description="Delete channels that belonged to deleted users. Channels are shared infrastructure, so this is off by default.\n\n---\n\n#### 📚 Knowledge Base Retention",
+            description="Delete every channel whose creator was deleted, with all messages of every member, reactions, members, file links and webhooks. This includes public channels, group channels and direct messages living users still use. There is no shared exemption for channels. Off by default.\n\n---\n\n#### 📚 Knowledge Base Retention",
         )
         knowledge_base_max_age_days: int = Field(
             default=0,
@@ -7974,7 +7974,7 @@ const SECTIONS = [
   {k:'delete_orphaned_tools',t:'chk',def:false,label:'Tools of deleted users',tip:'Off by default: tools are server-side code.'},
   {k:'exempt_shared_orphaned_tools',t:'chk',def:true,parent:'delete_orphaned_tools',label:'↳ Keep shared ones',
    tip:'Kept when a living user, an existing group or a public grant can still access them.'},
-  {k:'delete_orphaned_functions',t:'chk',def:false,label:'Functions of deleted users',tip:'Off by default: functions are server-side code.'},
+  {k:'delete_orphaned_functions',t:'chk',def:false,label:'Functions of deleted users',tip:'Off by default. Deletes every function whose owner was deleted, active or not, including global filters, pipes, actions and Prune itself.'},
   {k:'delete_orphaned_skills',t:'chk',def:false,label:'Skills of deleted users',tip:'Off by default.'},
   {k:'exempt_shared_orphaned_skills',t:'chk',def:true,parent:'delete_orphaned_skills',label:'↳ Keep shared ones',
    tip:'Kept when a living user, an existing group or a public grant can still access them.'},
@@ -7996,7 +7996,7 @@ const SECTIONS = [
   {k:'delete_orphaned_channel_messages',t:'chk',def:true,label:'Messages of deleted channels',
    tip:'Channel messages whose channel no longer exists, and unpinned thread replies whose thread parent is gone.'},
   {k:'delete_orphaned_channels',t:'chk',def:false,label:'Channels of deleted users',
-   tip:'Off by default: channels are shared infrastructure, other members may still use them.'},
+   tip:'Off by default. Deletes every channel whose creator was deleted, with all messages of every member, including public channels, group channels and direct messages living users still use.'},
  ]},
  {title:'⚠️ Knowledge Base Retention', fields:[
   {k:'delete_knowledge_bases_older_than_days',t:'num',label:'Delete knowledge bases older than',unit:'days',
