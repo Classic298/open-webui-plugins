@@ -7814,239 +7814,571 @@ _PAGE_HTML = """<!doctype html>
 <meta name="color-scheme" content="light dark">
 <title>Prune - Open WebUI</title>
 <style>
-:root{color-scheme:light dark;--bg:#f3f4f6;--surface:#fff;--text:#14171c;--muted:#666d78;
---border:rgba(18,22,28,.12);--accent:#1f242c;--fg-on-accent:#fff;
---danger:#c5413f;--danger-bg:rgba(197,65,63,.1);--ok:#15935f;
---warn:#8a6410;--warn-bg:rgba(180,120,10,.11);--r:12px}
-@media(prefers-color-scheme:dark){:root{--bg:#0c0e12;--surface:#15181e;--text:#e8eaef;
---muted:#a0a7b2;--border:rgba(255,255,255,.1);--accent:#e8eaef;--fg-on-accent:#14171c;
---danger:#f0726f;--danger-bg:rgba(240,114,111,.12);--ok:#46cf94;
---warn:#e8b765;--warn-bg:rgba(232,183,101,.13)}}
-*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);
-font:14px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif}
-.wrap{max-width:880px;margin:0 auto;padding:24px 16px 80px}
-h1{font-size:20px;margin:0 0 4px}h2{font-size:13px;text-transform:uppercase;
-letter-spacing:.05em;color:var(--muted);margin:24px 0 8px}
-.card{background:var(--surface);border:1px solid var(--border);border-radius:var(--r);
-padding:14px 16px;margin-bottom:12px}
-.sub{color:var(--muted);font-size:13px;margin:0 0 16px}
-label.row{display:flex;align-items:center;gap:8px;padding:4px 0;cursor:pointer}
-label.row.sub{margin-left:22px}
-.numrow{display:flex;align-items:center;gap:8px;padding:4px 0;flex-wrap:wrap}
-input[type=number]{width:90px;padding:4px 8px;border:1px solid var(--border);
-border-radius:8px;background:var(--bg);color:var(--text)}
-select{padding:4px 8px;border:1px solid var(--border);border-radius:8px;
-background:var(--bg);color:var(--text)}
-button{border:1px solid var(--border);border-radius:10px;padding:8px 16px;cursor:pointer;
-font-weight:600;background:var(--surface);color:var(--text)}
-button.primary{background:var(--accent);color:var(--fg-on-accent);border-color:transparent}
-button.danger{background:var(--danger);color:#fff;border-color:transparent}
-button.ghost{background:none;color:var(--danger);border-color:var(--danger)}
-button:disabled{opacity:.5;cursor:default}
-.actions{display:flex;gap:10px;margin-top:16px;align-items:center}
-table{width:100%;border-collapse:collapse;font-size:13px}
-td,th{padding:5px 8px;border-bottom:1px solid var(--border);text-align:left}
-td.n{text-align:right;font-variant-numeric:tabular-nums}
-.total{font-weight:700}
-.badge{display:inline-block;padding:2px 10px;border-radius:999px;font-size:12px;
-font-weight:600;background:var(--danger-bg);color:var(--danger)}
-.badge.ok{background:rgba(21,147,95,.12);color:var(--ok)}
-pre.log{background:var(--bg);border:1px solid var(--border);border-radius:8px;
-padding:10px;max-height:320px;overflow:auto;font-size:12px;white-space:pre-wrap;margin:8px 0 0}
-.prog{margin:14px 0 4px;display:none}
-.prog .bar{height:8px;border-radius:999px;background:var(--border);overflow:hidden}
-.prog .fill{height:100%;width:0%;background:var(--accent);border-radius:999px;
-transition:width .4s ease}
-.prog.indet .fill{width:30%;animation:pslide 1.2s linear infinite;transition:none}
+:root{color-scheme:light dark;
+--bg:#f9f9f9;--surface:#fff;--surface-2:#f9f9f9;--hover:#f3f3f3;--border:#ececec;--border-strong:#e3e3e3;
+--text:#171717;--text-2:#4e4e4e;--muted:#676767;--faint:#9b9b9b;
+--accent:#171717;
+--track-off:#cdcdcd;--track-on:#171717;--thumb:#fff;--thumb-on:#fff;
+--danger:#dc2626;--danger-bg:#fef2f2;--danger-border:#fecaca;--danger-solid:#dc2626;
+--ok:#15803d;--ok-bg:#f0fdf4;--warn:#92400e;--warn-bg:#fffbeb;--warn-border:#fde68a;
+--info-bg:#eff6ff;--info:#1d4ed8;
+--tip-bg:#171717;--tip-text:#ececec;--tip-muted:#b4b4b4;
+--shadow:0 1px 2px rgba(0,0,0,.04),0 4px 16px rgba(0,0,0,.06);
+--mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+@media(prefers-color-scheme:dark){:root{
+--bg:#171717;--surface:#1e1e1e;--surface-2:#262626;--hover:#262626;--border:#2b2b2b;--border-strong:#333;
+--text:#ececec;--text-2:#cdcdcd;--muted:#9b9b9b;--faint:#676767;
+--accent:#ececec;
+--track-off:#4e4e4e;--track-on:#ececec;--thumb:#9b9b9b;--thumb-on:#171717;
+--danger:#f87171;--danger-bg:rgba(239,68,68,.11);--danger-border:rgba(239,68,68,.38);
+--ok:#4ade80;--ok-bg:rgba(34,197,94,.12);--warn:#fbbf24;--warn-bg:rgba(245,158,11,.1);--warn-border:rgba(245,158,11,.32);
+--info-bg:rgba(59,130,246,.14);--info:#93c5fd;
+--tip-bg:#333;
+--shadow:0 1px 2px rgba(0,0,0,.3),0 8px 24px rgba(0,0,0,.35)}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--text);
+font:14px/1.5 -apple-system,BlinkMacSystemFont,Inter,ui-sans-serif,system-ui,"Segoe UI",Roboto,Ubuntu,Cantarell,"Noto Sans",sans-serif,"Apple Color Emoji","Segoe UI Emoji","Noto Color Emoji";
+-webkit-font-smoothing:antialiased}
+.wrap{max-width:820px;margin:0 auto;padding:32px 16px 48px}
+header.top{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;flex-wrap:wrap;margin-bottom:20px}
+h1{font-size:22px;font-weight:600;margin:0 0 4px;letter-spacing:-.01em}
+.sub{color:var(--muted);font-size:13px;margin:0;max-width:600px}
+.meta{display:flex;gap:6px;flex-wrap:wrap;margin-top:4px}
+.chip{font-size:11px;color:var(--muted);background:var(--surface);border:1px solid var(--border);
+border-radius:999px;padding:2px 9px;white-space:nowrap}
+.section{background:var(--surface);border:1px solid var(--border);border-radius:16px;margin-bottom:12px;overflow:hidden}
+.section-head{display:flex;align-items:center;gap:8px;padding:12px 16px 4px}
+.section-head h2{font-size:13px;font-weight:600;margin:0;color:var(--text)}
+.section-flag{display:none;align-items:center;gap:5px;font-size:11px;font-weight:600;color:var(--danger);
+background:var(--danger-bg);border:1px solid var(--danger-border);border-radius:999px;padding:1px 8px}
+.section-flag::before{content:"";width:6px;height:6px;border-radius:50%;background:var(--danger)}
+.section.has-danger .section-flag{display:inline-flex}
+.section-body{padding:4px 6px 6px}
+.row{display:flex;align-items:center;justify-content:space-between;gap:16px;padding:9px 10px;
+border-radius:10px;border:1px solid transparent;transition:background-color .15s,border-color .15s}
+.row+.row,.warn+.row{margin-top:1px}
+.row:hover{background:var(--hover)}
+.row.child{margin-left:18px;position:relative}
+.row.child::before{content:"";position:absolute;left:-9px;top:6px;bottom:6px;width:2px;border-radius:2px;background:var(--border-strong)}
+.row.is-disabled .row-text,.row.is-disabled .row-control{opacity:.45}
+.row.is-disabled label{cursor:not-allowed}
+.row-text{min-width:0;flex:1}
+.row-label{display:inline;font-size:14px;font-weight:500;color:var(--text);cursor:pointer}
+.row-desc{font-size:12px;color:var(--muted);margin-top:1px}
+.row-danger{display:none;font-size:12px;font-weight:600;color:var(--danger);margin-top:3px}
+.row-danger::before{content:"\\26A0\\FE0E  "}
+.row.danger{background:var(--danger-bg);border-color:var(--danger-border)}
+.row.danger .row-danger{display:block}
+.row.danger .row-desc{color:var(--text-2)}
+.row-control{flex:none;display:flex;align-items:center}
+.switch{position:relative;display:inline-flex;width:32px;height:18px;flex:none}
+.switch input{position:absolute;inset:0;margin:0;opacity:0;cursor:pointer;z-index:1}
+.switch input:disabled{cursor:not-allowed}
+.switch .track{width:100%;height:100%;border-radius:999px;background:var(--track-off);transition:background-color .15s}
+.switch .track::after{content:"";position:absolute;top:3px;left:3px;width:12px;height:12px;border-radius:50%;
+background:var(--thumb);transition:transform .15s,background-color .15s;box-shadow:0 1px 2px rgba(0,0,0,.2)}
+.switch input:checked+.track{background:var(--track-on)}
+.switch input:checked+.track::after{transform:translateX(14px);background:var(--thumb-on)}
+.switch input:focus-visible+.track{outline:2px solid #3b82f6;outline-offset:2px}
+.field{display:inline-flex;align-items:center;border:1px solid var(--border-strong);border-radius:10px;
+background:var(--surface-2);overflow:hidden;transition:border-color .15s}
+.field:focus-within{border-color:var(--muted)}
+.row.danger .field{border-color:var(--danger-border)}
+.field input{width:84px;border:0;background:transparent;color:var(--text);font:inherit;font-size:13px;
+padding:5px 4px 5px 10px;outline:none;text-align:right;font-variant-numeric:tabular-nums}
+.field input::placeholder{color:var(--faint)}
+.field .unit{font-size:12px;color:var(--muted);padding:0 10px 0 4px;white-space:nowrap}
+select{font:inherit;font-size:13px;color:var(--text);background:var(--surface-2);border:1px solid var(--border-strong);
+border-radius:10px;padding:5px 8px;outline:none;cursor:pointer}
+select:focus{border-color:var(--muted)}
+.tipi{display:inline-flex;align-items:center;justify-content:center;width:16px;height:16px;margin-left:5px;
+vertical-align:-2px;border-radius:50%;border:1px solid var(--border-strong);background:transparent;color:var(--faint);
+font:600 10px/1 var(--mono);cursor:help;padding:0;transition:color .15s,border-color .15s}
+.tipi:hover,.tipi:focus-visible,.tipi[aria-expanded="true"]{color:var(--text);border-color:var(--muted);outline:none}
+#tip{position:fixed;z-index:50;max-width:min(360px,calc(100vw - 16px));background:var(--tip-bg);color:var(--tip-text);
+border-radius:12px;padding:10px 12px;font-size:12px;line-height:1.5;box-shadow:var(--shadow);pointer-events:none;
+opacity:0;transform:translateY(2px);transition:opacity .12s,transform .12s;visibility:hidden}
+#tip.open{opacity:1;transform:none;visibility:visible}
+#tip .tip-line+.tip-line{margin-top:5px}
+#tip b{color:#fff;font-weight:600;margin-right:4px}
+#tip .tip-line.deletes b{color:#fca5a5}
+#tip .tip-line.keeps b{color:#86efac}
+#tip .tip-line.example{color:var(--tip-muted)}
+.warn{display:none;margin:4px 10px 6px 10px;padding:8px 12px;border-radius:10px;background:var(--warn-bg);
+border:1px solid var(--warn-border);color:var(--warn);font-size:12px;line-height:1.45}
+button{font:inherit;font-size:13px;font-weight:500;border:1px solid var(--border-strong);border-radius:999px;
+padding:6px 14px;cursor:pointer;background:var(--surface);color:var(--text);transition:background-color .15s,opacity .15s}
+button:hover:not(:disabled){background:var(--hover)}
+button.danger{background:var(--danger-solid);color:#fff;border-color:transparent}
+button.danger:hover:not(:disabled){background:#b91c1c}
+button.ghost{background:transparent;color:var(--danger);border-color:var(--danger-border)}
+button.ghost:hover:not(:disabled){background:var(--danger-bg)}
+button:disabled{opacity:.45;cursor:not-allowed}
+.actionbar{position:sticky;top:12px;bottom:12px;z-index:10;margin:16px 0;background:color-mix(in srgb,var(--surface) 88%,transparent);
+backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);border:1px solid var(--border);border-radius:16px;
+box-shadow:var(--shadow);padding:10px 12px}
+.actions{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.actions .spacer{flex:1;min-width:0}
+#status{font-size:12px;color:var(--muted)}
+.danger-summary{display:none;align-items:center;gap:6px;font-size:12px;font-weight:600;color:var(--danger);
+background:none;border:0;padding:0;border-radius:6px;text-align:left;cursor:pointer}
+.danger-summary.on{display:inline-flex;flex:1 1 0;min-width:0;overflow:hidden}
+#dangerCount{white-space:nowrap}
+.danger-summary .names{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0;font-weight:400;color:var(--text-2)}
+.danger-summary:hover:not(:disabled){background:none;text-decoration:underline}
+.danger-summary .dot{width:7px;height:7px;border-radius:50%;background:var(--danger);flex:none}
+.prog{margin:10px 2px 0;display:none}
+.prog .lbl{font-size:12px;color:var(--muted);margin-bottom:5px;display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap}
+#progStage{color:var(--text-2)}
+#progCount{font-variant-numeric:tabular-nums}
+.prog .bar{height:6px;border-radius:999px;background:var(--border-strong);overflow:hidden}
+.prog .fill{height:100%;width:0%;background:var(--accent);border-radius:999px;transition:width .4s ease}
+.prog.indet .fill{width:30%;animation:pslide 1.2s ease-in-out infinite;transition:none}
 @keyframes pslide{from{margin-left:-30%}to{margin-left:100%}}
-.prog .lbl{font-size:12px;color:var(--muted);margin-top:5px;display:flex;
-justify-content:space-between;gap:12px;flex-wrap:wrap}
-.msg{margin:10px 0;font-size:13px}
-.hint{color:var(--muted);font-size:12px}
-.tipi{cursor:help;border:1px solid var(--border);border-radius:50%;width:15px;height:15px;
-display:inline-flex;align-items:center;justify-content:center;font-size:10px;
-color:var(--muted);flex:none;user-select:none}
-.unit{color:var(--muted);font-size:12px}
-.warn{display:none;margin:-2px 0 8px 27px;padding:7px 11px;border-radius:8px;
-background:var(--warn-bg);border:1px solid var(--warn);color:var(--warn);
-font-size:12px;line-height:1.45}
-.detail-row td{padding:8px 10px;background:var(--bg)}
-.detail-toggle{font:inherit;color:var(--accent);background:none;border:0;padding:0;cursor:pointer;text-align:left}
-.detail-icon{color:var(--muted);padding:2px 0 2px 8px}
-.detail-chevron{display:inline-block;transition:transform .15s ease}
+.msg{font-size:12px;color:var(--text-2);margin:0 2px}
+.msg:not(:empty){margin-top:8px}
+.card{background:var(--surface);border:1px solid var(--border);border-radius:16px;padding:16px;margin-bottom:12px}
+.card-head{display:flex;align-items:center;gap:8px;margin:0 0 12px;flex-wrap:wrap}
+.card-head h2{font-size:15px;font-weight:600;margin:0}
+.card-head .grow{flex:1}
+.result-group{border:1px solid var(--border);border-radius:12px;overflow:hidden;margin-bottom:10px}
+.result-group table{width:100%;border-collapse:collapse;font-size:13px}
+.result-group th{font-size:12px;font-weight:600;color:var(--muted);text-align:left;padding:8px 12px;background:var(--surface-2)}
+.result-group td{padding:0;border-top:1px solid var(--border)}
+td.n{text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap;padding-right:6px}
+.result-row:hover td{background:var(--hover)}
+.detail-toggle{font:inherit;color:var(--text);background:none;border:0;border-radius:0;padding:8px 12px;cursor:pointer;
+text-align:left;width:100%;font-weight:400}
+.detail-toggle:hover:not(:disabled){background:none}
+.detail-icon{width:auto;padding:8px 10px 8px 6px;color:var(--muted)}
+.count{font-weight:600}
+.detail-chevron{display:inline-block;transition:transform .15s ease;font-size:13px}
 .detail-chevron.open{transform:rotate(180deg)}
+.detail-row td{padding:10px 12px;background:var(--surface-2)}
+.detail-controls{display:flex;align-items:center;gap:6px;margin:0 0 8px;flex-wrap:wrap;font-size:12px;color:var(--muted)}
+.detail-controls select{font-size:12px;padding:3px 6px}
+.detail-controls button{font-size:12px;padding:3px 10px}
 .detail-export{margin-left:auto}
-.detail-controls{display:flex;align-items:center;gap:8px;margin:4px 0 8px}
-.detail-list{margin:0;padding:0;list-style:none;max-height:260px;overflow:auto;font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:12px}
+.detail-list{margin:0;padding:0;list-style:none;max-height:280px;overflow:auto;font-family:var(--mono);font-size:11.5px;
+border:1px solid var(--border);border-radius:8px;background:var(--surface)}
+.detail-list li{padding:5px 10px;border-bottom:1px solid var(--border);word-break:break-all}
+.detail-list li:last-child{border-bottom:0}
+.total{display:flex;justify-content:space-between;align-items:baseline;font-weight:600;padding:4px 2px 0;margin:0;font-size:14px}
+.total span:last-child{font-variant-numeric:tabular-nums;font-size:18px}
+.empty{color:var(--muted);margin:0}
+.badge{display:inline-flex;align-items:center;gap:5px;padding:2px 10px;border-radius:999px;font-size:12px;font-weight:600;
+background:var(--danger-bg);color:var(--danger)}
+.badge.ok{background:var(--ok-bg);color:var(--ok)}
+.badge.running{background:var(--info-bg);color:var(--info)}
+.badge.running::before{content:"";width:6px;height:6px;border-radius:50%;background:currentColor;animation:pulse 1.2s ease-in-out infinite}
+.badge.cancelled{background:var(--warn-bg);color:var(--warn)}
+@keyframes pulse{50%{opacity:.3}}
+#runId{font-family:var(--mono);font-weight:500;color:var(--muted);font-size:13px}
+pre.log{background:#0d0d0d;color:#cdcdcd;border:1px solid var(--border);border-radius:12px;padding:12px 14px;max-height:340px;
+overflow:auto;font:12px/1.55 var(--mono);white-space:pre-wrap;margin:0}
+.modal-backdrop{position:fixed;inset:0;z-index:40;background:rgba(0,0,0,.55);backdrop-filter:blur(2px);
+display:flex;align-items:center;justify-content:center;padding:16px}
+.modal-backdrop[hidden]{display:none}
+.modal{background:var(--surface);border:1px solid var(--border);border-radius:20px;box-shadow:var(--shadow);width:100%;max-width:440px;padding:20px}
+.modal h3{margin:0 0 6px;font-size:16px;font-weight:600}
+.modal p{margin:0 0 12px;font-size:13px;color:var(--text-2)}
+.modal .confirm-danger{display:none;font-size:12px;color:var(--danger);background:var(--danger-bg);border:1px solid var(--danger-border);
+border-radius:10px;padding:8px 10px;margin:0 0 12px}
+.modal .confirm-danger.on{display:block}
+.modal input{width:100%;font:inherit;font-family:var(--mono);font-size:14px;padding:8px 12px;border-radius:10px;
+border:1px solid var(--border-strong);background:var(--surface-2);color:var(--text);outline:none}
+.modal input:focus{border-color:var(--danger)}
+.modal-actions{display:flex;justify-content:flex-end;gap:8px;margin-top:16px}
+@media(max-width:640px){
+.wrap{padding:20px 10px 32px}
+.row{flex-wrap:wrap;gap:8px 12px}
+.row.child{margin-left:12px}
+.row-text{flex-basis:calc(100% - 60px)}
+.row-control.wide{flex-basis:100%;justify-content:flex-end}
+.danger-summary.on{flex-basis:100%}
+.actionbar{bottom:8px;border-radius:14px}
+}
 </style>
 </head>
 <body data-prefix="__PREFIX__">
 <div class="wrap">
-<h1>Prune</h1>
-<p class="sub">Manual cleanup of old and orphaned Open WebUI data. Preview is always safe; Execute permanently deletes. Automatic pruning is configured separately in this function's Valves.</p>
+<header class="top">
+  <div>
+    <h1>Prune</h1>
+    <p class="sub">Manual cleanup of old and orphaned Open WebUI data. Preview is always safe; Execute permanently deletes. Automatic pruning is configured separately in this function's Valves.</p>
+  </div>
+  <div class="meta" id="meta"></div>
+</header>
 
 <div id="form"></div>
 
-<div class="actions">
-  <button class="primary" id="btnPreview">Preview</button>
-  <button class="danger" id="btnExecute">Execute…</button>
-  <button class="ghost" id="btnCancel" style="display:none">Cancel</button>
-  <span id="status"></span>
+<div class="actionbar">
+  <div class="actions">
+    <button type="button" class="danger-summary" id="dangerSummary"><span class="dot"></span><span id="dangerCount"></span><span class="names" id="dangerNames"></span></button>
+    <span id="status"></span>
+    <span class="spacer"></span>
+    <button type="button" class="ghost" id="btnCancel" style="display:none">Cancel</button>
+    <button type="button" id="btnPreview">Preview</button>
+    <button type="button" class="danger" id="btnExecute">Execute…</button>
+  </div>
+  <div class="prog" id="prog">
+    <div class="lbl"><span id="progStage"></span><span id="progCount"></span></div>
+    <div class="bar"><div class="fill" id="progFill"></div></div>
+  </div>
+  <div class="msg" id="msg"></div>
 </div>
-<div class="prog" id="prog">
-  <div class="bar"><div class="fill" id="progFill"></div></div>
-  <div class="lbl"><span id="progStage"></span><span id="progCount"></span></div>
-</div>
-<div class="msg" id="msg"></div>
 
 <div class="card" id="previewCard" style="display:none">
-  <h2 style="margin-top:0">Preview result</h2>
+  <div class="card-head"><h2>Preview result</h2></div>
   <div id="previewBody"></div>
 </div>
 
 <div class="card" id="runCard" style="display:none">
-  <h2 style="margin-top:0">Run <span id="runId"></span> <span class="badge" id="runStatus"></span></h2>
+  <div class="card-head"><h2>Run <span id="runId"></span></h2><span class="grow"></span><span class="badge" id="runStatus"></span></div>
   <pre class="log" id="runLog"></pre>
 </div>
+</div>
+
+<div id="tip" role="tooltip"></div>
+
+<div class="modal-backdrop" id="confirmModal" hidden>
+  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="confirmTitle">
+    <h3 id="confirmTitle">Delete data permanently?</h3>
+    <p>This will PERMANENTLY DELETE the selected data. Type DELETE to confirm.</p>
+    <div class="confirm-danger" id="confirmDanger"></div>
+    <input id="confirmInput" autocomplete="off" spellcheck="false" placeholder="DELETE" aria-label="Type DELETE to confirm">
+    <div class="modal-actions">
+      <button type="button" id="confirmCancel">Cancel</button>
+      <button type="button" class="danger" id="confirmOk" disabled>Delete permanently</button>
+    </div>
+  </div>
 </div>
 
 <script>
 const PREFIX = document.body.dataset.prefix;
 const token = localStorage.getItem('token');
 
+const KEEP_SHARED_TIP={keeps:'Kept when a living user, an existing group or a public grant can still access it.',
+ deletes:'With this off, it is deleted even while others still use it.'};
+
 const SECTIONS = [
  {title:'🛡️ Safety', fields:[
   {k:'orphan_file_grace_hours',t:'num',label:'Protect uploads younger than',unit:'hours',val:24,
-   tip:'Files and stored upload objects younger than this are never treated as orphaned. Uploading and attaching are separate steps in Open WebUI, so this protects uploads not yet attached to a chat or knowledge base, and uploads still being written. 0 disables the protection.'},
+   desc:'Uploads younger than this are never treated as orphaned. 0 = no protection.',
+   tip:{keeps:'Files and stored upload objects younger than this, even when nothing uses them yet, and the knowledge base embeddings of files updated inside the window.',
+    note:'Uploading and attaching are separate steps in Open WebUI, so this protects uploads not yet attached to a chat or knowledge base, and uploads still being written. An empty field counts as 0, which disables the protection.',
+    example:'24 means a file uploaded this morning and not attached yet survives a run today.'}},
  ]},
  {title:'🚦 Speed (this run only)', fields:[
   {k:'scan_rows_per_second',t:'num',label:'Scan speed',unit:'rows/s',val:50000,ph:'valve',
-   tip:'Read speed for THIS run only, overriding the valve. Applies to preview counts and orphan detection. Higher = faster preview/scan; lower = gentler on a live database. Seeded here at 50000/s for snappy on-demand runs — clear the field to fall back to the valve default (10000/s); 0 = no limit.'},
+   desc:'Read speed for this run’s database scans.',
+   tip:{note:'Caps every database scan of THIS run (preview counts, orphan detection and the scans Execute does while deleting), overriding the valve. Higher = faster, lower = gentler on a live database. Seeded at 50000/s for snappy on-demand runs. Clear the field to use the valve (default 10000/s). 0 = no limit.',
+    example:'5000 makes a preview on a busy server slower but lighter.'}},
   {k:'deletion_rows_per_second',t:'num',label:'Deletion speed',unit:'rows/s',val:500,ph:'valve',
-   tip:'Delete speed for THIS run only, overriding the valve (Execute only). Higher = faster cleanup; lower = gentler on a live instance. Seeded here at 500/s for hand-run cleanups — clear the field to fall back to the valve default (50/s); 0 = no limit.'},
+   desc:'Delete speed, Execute only.',
+   tip:{note:'Overrides the valve for THIS run only (Execute only). Higher = faster cleanup, lower = gentler on a live instance. Seeded at 500/s for hand-run cleanups. Clear the field to use the valve (default 50/s). 0 = no limit.',
+    example:'50 deletes about 50 rows a second, so 30,000 rows take about 10 minutes.'}},
  ]},
  {title:'🕒 Age Rules', fields:[
-  {k:'days',t:'num',label:'Delete chats older than',unit:'days',
-   tip:'Chats not updated or opened by their owner for this long are deleted. Empty = off.'},
+  {k:'days',t:'num',label:'Delete chats idle for',unit:'days',
+   desc:'Chats not updated or opened by their owner for this long. Empty = off.',
+   tip:{deletes:'Chats their owner has neither updated nor opened for this many days, admins’ chats included, with their messages. Files only these chats used go in the same run, once older than the grace window.',
+    keeps:'Archived and pinned chats while their toggles are on, and chats in folders when that toggle is on.',
+    example:'90 means a chat last opened in March is deleted in June.'}},
   {k:'exempt_archived_chats',t:'chk',def:true,label:'Keep archived chats',
-   tip:'Archived chats survive the age rule above.'},
+   desc:'Archived chats survive the age rule above.',
+   tip:{keeps:'Every archived chat, however old.',deletes:'With this off, old archived chats are deleted like any other chat.'}},
   {k:'exempt_pinned_chats',t:'chk',def:true,label:'Keep pinned chats',
-   tip:'Pinned chats survive the age rule above.'},
+   desc:'Pinned chats survive the age rule above.',
+   tip:{keeps:'Every pinned chat, however old.',deletes:'With this off, old pinned chats are deleted like any other chat.'}},
   {k:'exempt_chats_in_folders',t:'chk',def:false,label:'Keep chats in folders',
-   tip:'Chats organized into folders survive the age rule above.'},
+   desc:'Chats organized into folders survive the age rule above.',
+   tip:{keeps:'Every chat inside a folder, however old.',deletes:'With this off (the default), chats in folders age like any other chat.'}},
   {k:'audio_cache_max_age_days',t:'num',label:'Delete audio cache older than',unit:'days',
-   tip:'Cached text-to-speech and transcription audio files. Empty = keep forever.'},
+   desc:'Cached text-to-speech and transcription audio. Empty = keep forever.',
+   tip:{deletes:'Text-to-speech and transcription audio files in the cache whose file date is older than this many days.',
+    keeps:'Chats, file records and uploads. Only the audio cache folder is touched.',
+    example:'30 clears speech audio generated more than a month ago.'}},
  ]},
  {title:'👤 Inactive Users', fields:[
   {k:'delete_inactive_users_days',t:'num',label:'Delete users inactive for',unit:'days',
-   tip:'DESTRUCTIVE: deletes the account, its login, chats, automations, memories and OAuth sign-ins. Files they uploaded that other users still rely on are kept. Empty = off.'},
+   desc:'DESTRUCTIVE: deletes accounts. Empty = off.',
+   tip:{deletes:'Accounts whose last activity is older than this many days, with their login, chats, automations, memories, OAuth sign-ins and group memberships. Their notes, knowledge bases, prompts, models, folders, tools, functions, skills and channels go in the same run only when the matching orphaned option below is on.',
+    keeps:'Admins and pending users while their toggles are on. Their files stay while a chat (tool results included), knowledge base, note, folder, channel, model, saved model version or profile banner still uses them.',
+    example:'365 deletes an account last active more than a year ago, chats included.'}},
   {k:'exempt_admin_users',t:'chk',def:true,label:'Never delete admins',
-   tip:'Strongly recommended. Admin accounts are never deleted by the rule above.'},
+   desc:'Strongly recommended.',
+   tip:{keeps:'Every admin account, whatever its last activity.',
+    deletes:'With this off, inactive admins are deleted like any other user, the first admin and the one who installed Prune included, and the orphaned options then remove what they owned.'}},
   {k:'exempt_pending_users',t:'chk',def:true,label:'Never delete pending users',
-   tip:'Accounts still awaiting approval are never deleted by the rule above.'},
+   desc:'Accounts awaiting approval are never deleted.',
+   tip:{keeps:'Every account still awaiting approval.',deletes:'With this off, pending accounts past the inactivity limit are deleted.'}},
  ]},
  {title:'🧹 Orphaned: Chats & Messages', fields:[
   {k:'delete_orphaned_chats',t:'chk',def:true,label:'Chats of deleted users',
-   tip:'Chats whose owner account no longer exists.'},
+   desc:'Chats whose owner account no longer exists.',
+   tip:{deletes:'Chats whose owner account no longer exists.',keeps:'Every chat of an existing user.'}},
   {k:'delete_orphaned_chat_messages',t:'chk',def:true,label:'Leftover chat message rows',
-   tip:'Message rows whose parent chat no longer exists (left behind because SQLite does not enforce cascades).'},
+   desc:'Message rows whose chat no longer exists.',
+   tip:{deletes:'Message rows whose parent chat no longer exists (left behind because SQLite does not enforce cascades).',keeps:'Every message of an existing chat.'}},
  ]},
  {title:'📚 Orphaned: Knowledge Bases & Memories', fields:[
   {k:'delete_orphaned_knowledge_bases',t:'chk',def:true,label:'Knowledge bases of deleted users',
-   tip:'Knowledge bases whose owner account no longer exists. Unchecking preserves their files and vectors too.'},
+   desc:'Knowledge bases whose owner account no longer exists.',
+   tip:{deletes:'Knowledge bases whose owner account no longer exists, with their vectors. Their files go in the same run once nothing else uses them.',
+    keeps:'Shared ones while the toggle below is on. Turning this off keeps their files and vectors too.'}},
   {k:'exempt_shared_orphaned_knowledge_bases',t:'chk',def:true,parent:'delete_orphaned_knowledge_bases',label:'↳ Keep shared ones, files included',
-   tip:'A knowledge base still reachable by a living user, an existing group or a public grant is kept, with all its files and vectors.'},
+   desc:'Shared knowledge bases stay, with all their files.',
+   tip:{keeps:'A knowledge base a living user, an existing group or a public grant can still access, with all its files and vectors.',
+    deletes:'With this off, it is deleted even while others still use it.',
+    note:'Grants to deleted users or to groups that no longer exist do not count.',
+    example:'A team knowledge base created by someone who left stays while the team group can still open it.'}},
   {k:'delete_orphaned_kb_metadata',t:'chk',def:true,label:'Leftover search-index entries',
-   tip:'Every knowledge base has one hidden embedding used for searching across knowledge bases; this removes entries whose knowledge base is gone.'},
+   desc:'Search entries whose knowledge base is gone.',
+   tip:{deletes:'Every knowledge base has one hidden embedding used for searching across knowledge bases; this removes entries whose knowledge base is gone.',keeps:'Entries of every existing knowledge base.'}},
   {k:'delete_stale_kb_chunks',t:'chk',def:true,label:'Files with stale knowledge base embeddings',
-   tip:'Chunks of files a knowledge base no longer lists (left behind by a deleted folder, a bug or a crashed removal) keep getting cited; this removes them. Files touched inside the grace window are skipped. On Milvus and Qdrant the check loads each knowledge base\u2019s chunks.'},
+   desc:'Embeddings of files a knowledge base no longer lists.',
+   tip:{deletes:'Chunks of files a knowledge base no longer lists (left behind by a deleted folder, a bug or a crashed removal), which otherwise keep getting cited.',
+    keeps:'The files themselves (only their chunks go), and files touched inside the grace window.',
+    note:'On Milvus and Qdrant the check loads each knowledge base’s chunks.'}},
   {k:'delete_orphaned_memories',t:'chk',def:false,label:'Orphaned memories',
-   tip:'Leftover memory embeddings whose entry was deleted, and the stored memories of deleted users.',
+   desc:'Leftover memory embeddings and memories of deleted users.',
+   tip:{deletes:'Leftover memory embeddings whose entry was deleted, and the stored memories of deleted users.',keeps:'Memories of every existing user.'},
    warn:'Not recommended yet: memory scanning runs per-user (~1 min each without DB indexes), so ~1000 users can take 1000+ minutes on a constrained database.'},
  ]},
  {title:'🧰 Orphaned: Workspace', fields:[
-  {k:'delete_orphaned_prompts',t:'chk',def:true,label:'Prompts of deleted users',tip:'Prompts whose owner account no longer exists.'},
+  {k:'delete_orphaned_prompts',t:'chk',def:true,label:'Prompts of deleted users',desc:'Prompts whose owner account no longer exists.',
+   tip:{deletes:'Prompts whose owner account no longer exists.',keeps:'Shared ones while the toggle below is on.'}},
   {k:'exempt_shared_orphaned_prompts',t:'chk',def:true,parent:'delete_orphaned_prompts',label:'↳ Keep shared ones',
-   tip:'Kept when a living user, an existing group or a public grant can still access them.'},
-  {k:'delete_orphaned_models',t:'chk',def:true,label:'Models of deleted users',tip:'Workspace model presets whose owner account no longer exists.'},
+   desc:'Prompts others can still use stay.',tip:KEEP_SHARED_TIP},
+  {k:'delete_orphaned_models',t:'chk',def:true,label:'Models of deleted users',desc:'Workspace model presets whose owner account no longer exists.',
+   tip:{deletes:'Workspace models whose owner account no longer exists, including the settings an admin saved for a base model.',keeps:'Shared ones while the toggle below is on.'}},
   {k:'exempt_shared_orphaned_models',t:'chk',def:true,parent:'delete_orphaned_models',label:'↳ Keep shared ones',
-   tip:'Kept when a living user, an existing group or a public grant can still access them.'},
-  {k:'delete_orphaned_tools',t:'chk',def:false,label:'Tools of deleted users',tip:'Off by default: tools are server-side code.'},
+   desc:'Models others can still use stay.',tip:KEEP_SHARED_TIP},
+  {k:'delete_orphaned_tools',t:'chk',def:false,label:'Tools of deleted users',desc:'Off by default: tools are server-side code.',
+   tip:{deletes:'Tools whose owner account no longer exists. Tools are server-side code other users may depend on.',keeps:'Shared ones while the toggle below is on.'}},
   {k:'exempt_shared_orphaned_tools',t:'chk',def:true,parent:'delete_orphaned_tools',label:'↳ Keep shared ones',
-   tip:'Kept when a living user, an existing group or a public grant can still access them.'},
-  {k:'delete_orphaned_functions',t:'chk',def:false,label:'Functions of deleted users',tip:'Off by default. Deletes every function whose owner was deleted, active or not, including global filters, pipes, actions and Prune itself.'},
-  {k:'delete_orphaned_skills',t:'chk',def:false,label:'Skills of deleted users',tip:'Off by default.'},
+   desc:'Tools others can still use stay.',tip:KEEP_SHARED_TIP},
+  {k:'delete_orphaned_functions',t:'chk',def:false,label:'Functions of deleted users',desc:'Off by default. Includes global filters and Prune itself.',
+   tip:{deletes:'Every function whose owner was deleted, active or not, including global filters, pipes, actions and Prune itself.',keeps:'Nothing by sharing: functions have no shared exemption.'}},
+  {k:'delete_orphaned_skills',t:'chk',def:false,label:'Skills of deleted users',desc:'Off by default.',
+   tip:{deletes:'Skills whose owner account no longer exists.',keeps:'Shared ones while the toggle below is on.'}},
   {k:'exempt_shared_orphaned_skills',t:'chk',def:true,parent:'delete_orphaned_skills',label:'↳ Keep shared ones',
-   tip:'Kept when a living user, an existing group or a public grant can still access them.'},
+   desc:'Skills others can still use stay.',tip:KEEP_SHARED_TIP},
  ]},
  {title:'🗂️ Orphaned: Notes, Folders & Automations', fields:[
-  {k:'delete_orphaned_notes',t:'chk',def:true,label:'Notes of deleted users',tip:'Notes whose owner account no longer exists.'},
+  {k:'delete_orphaned_notes',t:'chk',def:true,label:'Notes of deleted users',desc:'Notes whose owner account no longer exists.',
+   tip:{deletes:'Notes whose owner account no longer exists.',keeps:'Shared ones while the toggle below is on, and notes inside a folder a living user owns or that is still shared with a living user, an existing group or everyone. A shared folder only keeps its notes while "Folders of deleted users" is off or its "Keep shared ones" is on.'}},
   {k:'exempt_shared_orphaned_notes',t:'chk',def:true,parent:'delete_orphaned_notes',label:'↳ Keep shared ones',
-   tip:'Kept when a living user, an existing group or a public grant can still access them.'},
-  {k:'delete_orphaned_folders',t:'chk',def:true,label:'Folders of deleted users',tip:'Chat folders whose owner account no longer exists.'},
+   desc:'Notes others can still read stay.',
+   tip:{keeps:'Kept when shared directly with a living user, an existing group or everyone.',deletes:'With this off, a note shared directly is deleted even while others still read it. Notes inside a kept folder stay either way.'}},
+  {k:'delete_orphaned_folders',t:'chk',def:true,label:'Folders of deleted users',desc:'Chat folders whose owner account no longer exists.',
+   tip:{deletes:'Chat folders whose owner account no longer exists.',keeps:'Folders below a folder a living user owns, and shared ones while the toggle below is on.'}},
   {k:'exempt_shared_orphaned_folders',t:'chk',def:true,parent:'delete_orphaned_folders',label:'↳ Keep shared ones',
-   tip:'Kept, subfolders included, when a living user, an existing group or a public grant can still access them.'},
-  {k:'delete_orphaned_automations',t:'chk',def:true,label:'Automations of deleted users',tip:'Automations and their run history.'},
+   desc:'Shared folders stay, with their subfolders and the notes inside.',
+   tip:{keeps:'Kept, subfolders included, when a living user, an existing group or a public grant can still access them, and so are deleted users’ notes inside them.',deletes:'With this off, they are deleted even while others still use them, and deleted users’ notes inside them are no longer kept.'}},
+  {k:'delete_orphaned_automations',t:'chk',def:true,label:'Automations of deleted users',desc:'Automations and their run history.',
+   tip:{deletes:'Automations whose owner account no longer exists, and their run history.',keeps:'Automations of every existing user.'}},
  ]},
  {title:'💬 Channels', fields:[
   {k:'channel_message_max_age_days',t:'num',label:'Delete channel messages older than',unit:'days',
-   tip:'Age-based cleanup of channel messages, replies of an old thread included; the channels themselves are kept. Empty = off.'},
+   desc:'Old channel messages; the channels stay. Empty = off.',
+   tip:{deletes:'Channel messages posted more than this many days ago by any member, admins included, and the replies of an old thread.',
+    keeps:'The channels themselves, and pinned messages while the toggle below is on.',
+    example:'30 keeps only the last month of channel history.'}},
   {k:'exempt_pinned_channel_messages',t:'chk',def:true,label:'↳ Keep pinned channel messages',
-   tip:'Pinned messages survive the age rule above; replies of a pinned thread parent are only deleted by their own age.'},
+   desc:'Pinned messages survive the age rule above.',
+   tip:{keeps:'Pinned messages, however old.',note:'Replies of a pinned thread parent are only deleted by their own age.'}},
   {k:'delete_orphaned_channel_messages',t:'chk',def:true,label:'Messages of deleted channels',
-   tip:'Channel messages whose channel no longer exists, and unpinned thread replies whose thread parent is gone.'},
+   desc:'Messages whose channel no longer exists.',
+   tip:{deletes:'Channel messages whose channel no longer exists, and unpinned thread replies whose thread parent is gone.',keeps:'Messages of every existing channel.'}},
   {k:'delete_orphaned_channels',t:'chk',def:false,label:'Channels of deleted users',
-   tip:'Off by default. Deletes every channel whose creator was deleted, with all messages of every member, including public channels, group channels and direct messages living users still use.'},
+   desc:'Off by default. Deletes whole channels with every message.',
+   tip:{deletes:'Every channel whose creator was deleted, with all messages of every member, including public channels, group channels and direct messages living users still use.',
+    keeps:'Nothing by sharing: channels have no shared exemption.'}},
  ]},
  {title:'⚠️ Knowledge Base Retention', fields:[
   {k:'delete_knowledge_bases_older_than_days',t:'num',label:'Delete knowledge bases older than',unit:'days',
-   tip:'RETENTION POLICY, NOT CLEANUP: permanently deletes knowledge bases past this age even when they are shared and actively in use. Empty = off.'},
+   desc:'RETENTION POLICY, NOT CLEANUP. Empty = off.',
+   tip:{deletes:'Every knowledge base past this age, whoever owns it (admins included), even when it is shared and actively in use, with its vectors. Its files go once nothing else uses them, and models lose their link to it.',
+    keeps:'Nothing by owner or sharing: this is a retention policy.',
+    example:'365 with created_at deletes every knowledge base created more than a year ago.'}},
   {k:'knowledge_bases_age_field',t:'sel',label:'Age measured by',options:['created_at','updated_at'],
-   tip:'created_at = time since the knowledge base was created; updated_at = time since it was last changed.'},
+   desc:'Which date the age above counts from.',
+   tip:{note:'created_at = time since the knowledge base was created; updated_at = time since it was last changed.'}},
  ]},
  {title:'🛠️ Maintenance', fields:[
   {k:'run_vacuum',t:'chk',def:false,label:'Run VACUUM afterwards',
-   tip:'Reclaims disk space from the main and vector databases after this run. LOCKS THE DATABASE while running; use during a maintenance window.'},
+   desc:'Reclaims disk space. Can lock the database while it runs.',
+   tip:{note:'Execute only. Reclaims disk space from the main database after this run, and from the vector database on local ChromaDB or PGVector. On SQLite it LOCKS THE DATABASE while running; use a maintenance window.'}},
  ]},
 ];
 
-function tipIcon(tip){return `<span class="tipi" title="${tip.replace(/"/g,'&quot;')}">i</span>`;}
+// Options an admin must deliberately move away from their safe default
+const isOff=value=>value===false, isOn=value=>value===true, isSet=value=>value!==null;
+const offWhileSet=ruleKey=>(value,values)=>isOff(value)&&isSet(values[ruleKey]);
+const DANGER={
+ orphan_file_grace_hours:{when:value=>value===0,reason:'Uploads not attached yet can be deleted'},
+ days:{when:value=>isSet(value)&&value<180,reason:'Chats get deleted after less than 6 months idle'},
+ delete_inactive_users_days:{when:isSet,reason:'Deletes accounts with their chats'},
+ exempt_admin_users:{when:offWhileSet('delete_inactive_users_days'),reason:'Admin accounts can be deleted'},
+ exempt_pending_users:{when:offWhileSet('delete_inactive_users_days'),reason:'Accounts awaiting approval can be deleted'},
+ exempt_archived_chats:{when:offWhileSet('days'),reason:'Old archived chats get deleted too'},
+ exempt_pinned_chats:{when:offWhileSet('days'),reason:'Old pinned chats get deleted too'},
+ exempt_shared_orphaned_knowledge_bases:{when:isOff,reason:'Deletes knowledge bases others still use'},
+ exempt_shared_orphaned_prompts:{when:isOff,reason:'Deletes prompts others still use'},
+ exempt_shared_orphaned_models:{when:isOff,reason:'Deletes models others still use'},
+ exempt_shared_orphaned_tools:{when:isOff,reason:'Deletes tools others still use'},
+ exempt_shared_orphaned_notes:{when:isOff,reason:'Deletes notes others still read'},
+ exempt_shared_orphaned_folders:{when:isOff,reason:'Deletes folders others still use, and stops keeping deleted users’ notes inside'},
+ exempt_shared_orphaned_skills:{when:isOff,reason:'Deletes skills others still use'},
+ delete_orphaned_tools:{when:isOn,reason:'Deletes server-side tool code'},
+ delete_orphaned_functions:{when:isOn,reason:'Deletes functions, global filters and Prune itself included'},
+ delete_orphaned_skills:{when:isOn,reason:'Deletes skills of deleted users'},
+ delete_orphaned_channels:{when:isOn,reason:"Deletes channels with all members' messages"},
+ delete_knowledge_bases_older_than_days:{when:isSet,reason:'Deletes knowledge bases in active use'},
+ run_vacuum:{when:isOn,reason:'Can lock the database while it runs'},
+ channel_message_max_age_days:{when:isSet,reason:'Deletes channel messages of every member, admins included'},
+ exempt_pinned_channel_messages:{when:offWhileSet('channel_message_max_age_days'),reason:'Old pinned channel messages get deleted too'},
+};
+
+const TIP_LABELS=[['deletes','Deletes'],['keeps','Keeps'],['example','Example'],['note','Note']];
+const tipText=tip=>TIP_LABELS.filter(([key])=>tip[key]).map(([key,label])=>label+': '+tip[key]).join(' ');
+function tipIcon(field){
+  return `<button type="button" class="tipi" data-key="${field.k}" aria-expanded="false">i</button>`;
+}
+const plainLabel=field=>field.label.startsWith('↳ ')?field.label.slice(2):field.label;
+const FIELDS={};
+
+function controlHtml(field){
+  if(field.t==='num'){
+    return `<span class="field"><input type="number" min="0" id="f_${field.k}" `+
+      `${field.val!==undefined?`value="${field.val}"`:''} placeholder="${field.ph||'off'}"><span class="unit">${field.unit}</span></span>`;
+  }
+  if(field.t==='sel'){
+    return `<select id="f_${field.k}">`+field.options.map(option=>`<option value="${option}">${option}</option>`).join('')+'</select>';
+  }
+  return `<span class="switch"><input type="checkbox" role="switch" id="f_${field.k}" ${field.def?'checked':''}><span class="track"></span></span>`;
+}
 
 function build(){
   const root=document.getElementById('form');
   for(const sec of SECTIONS){
-    const h=document.createElement('h2');h.textContent=sec.title;root.appendChild(h);
-    const card=document.createElement('div');card.className='card';root.appendChild(card);
-    for(const f of sec.fields){
-      if(f.t==='num'){
-        const d=document.createElement('div');d.className='numrow';
-        d.innerHTML=`<span>${f.label}</span><input type="number" min="0" id="f_${f.k}" `+
-          `${f.val!==undefined?`value="${f.val}"`:''} placeholder="${f.ph||'off'}"><span class="unit">${f.unit}</span> ${tipIcon(f.tip)}`;
-        card.appendChild(d);
-      }else if(f.t==='sel'){
-        const d=document.createElement('div');d.className='numrow';
-        d.innerHTML=`<span>${f.label}</span><select id="f_${f.k}">`+
-          f.options.map(o=>`<option value="${o}">${o}</option>`).join('')+`</select> ${tipIcon(f.tip)}`;
-        card.appendChild(d);
-      }else{
-        const l=document.createElement('label');l.className='row'+(f.parent?' sub':'');
-        l.innerHTML=`<input type="checkbox" id="f_${f.k}" ${f.def?'checked':''}><span>${f.label}</span> ${tipIcon(f.tip)}`;
-        card.appendChild(l);
-        if(f.warn){
-          const w=document.createElement('div');w.className='warn';w.textContent=f.warn;
-          card.appendChild(w);
-          const c=l.querySelector('input');
-          const syncWarn=()=>{w.style.display=c.checked?'block':'none';};
-          c.addEventListener('change',syncWarn);syncWarn();
-        }
-        if(f.parent){
-          const pEl=document.getElementById('f_'+f.parent),c=l.querySelector('input');
-          const sync=()=>{c.disabled=!pEl.checked;l.style.opacity=pEl.checked?'':'0.45';};
-          pEl.addEventListener('change',sync);sync();
-        }
+    const section=document.createElement('section');section.className='section';
+    section.innerHTML=`<div class="section-head"><h2></h2><span class="section-flag"></span></div><div class="section-body"></div>`;
+    section.querySelector('h2').textContent=sec.title;
+    const body=section.querySelector('.section-body');
+    root.appendChild(section);
+    for(const field of sec.fields){
+      FIELDS[field.k]=field;
+      const row=document.createElement('div');
+      row.className='row'+(field.parent?' child':'');
+      row.dataset.key=field.k;
+      row.innerHTML=`<div class="row-text"><label class="row-label" for="f_${field.k}"></label>${tipIcon(field)}`+
+        `<div class="row-desc"></div><div class="row-danger"></div></div>`+
+        `<div class="row-control${field.t==='chk'?'':' wide'}">${controlHtml(field)}</div>`;
+      row.querySelector('.row-label').textContent=plainLabel(field);
+      row.querySelector('.tipi').setAttribute('aria-label','About '+plainLabel(field)+': '+tipText(field.tip));
+      row.querySelector('.row-desc').textContent=field.desc;
+      body.appendChild(row);
+      if(field.warn){
+        const warning=document.createElement('div');warning.className='warn';warning.textContent=field.warn;
+        body.appendChild(warning);
+        const input=row.querySelector('input');
+        const syncWarn=()=>{warning.style.display=input.checked?'block':'none';};
+        input.addEventListener('change',syncWarn);syncWarn();
+      }
+      if(field.parent){
+        const parentInput=document.getElementById('f_'+field.parent),input=row.querySelector('input');
+        const sync=()=>{input.disabled=!parentInput.checked;row.classList.toggle('is-disabled',!parentInput.checked);};
+        parentInput.addEventListener('change',sync);sync();
       }
     }
   }
+  root.addEventListener('input',refreshDanger);
+  root.addEventListener('change',refreshDanger);
+  refreshDanger();
+}
+
+function dangerousRows(){
+  const values=form();
+  return [...document.querySelectorAll('#form .row')].filter(row=>{
+    const rule=DANGER[row.dataset.key];
+    // A disabled sub-option has no effect while its parent is off
+    return rule&&!document.getElementById('f_'+row.dataset.key).disabled&&rule.when(values[row.dataset.key],values);
+  });
+}
+
+function refreshDanger(){
+  const dangerous=new Set(dangerousRows());
+  document.querySelectorAll('#form .row').forEach(row=>{
+    const isDangerous=dangerous.has(row);
+    row.classList.toggle('danger',isDangerous);
+    row.querySelector('.row-danger').textContent=isDangerous?DANGER[row.dataset.key].reason:'';
+  });
+  document.querySelectorAll('#form .section').forEach(section=>{
+    const count=section.querySelectorAll('.row.danger').length;
+    section.classList.toggle('has-danger',count>0);
+    section.querySelector('.section-flag').textContent=count?count+' dangerous':'';
+  });
+  const names=[...dangerous].map(row=>plainLabel(FIELDS[row.dataset.key]));
+  const summary=document.getElementById('dangerSummary');
+  summary.classList.toggle('on',names.length>0);
+  document.getElementById('dangerCount').textContent=names.length===1?'1 dangerous option on':names.length+' dangerous options on';
+  document.getElementById('dangerNames').textContent=names.length?'· '+names.join(', '):'';
+  summary.title=names.join('\\n');
+}
+
+function scrollToFirstDanger(){
+  const row=document.querySelector('#form .row.danger');
+  if(row)row.scrollIntoView({behavior:'smooth',block:'center'});
+}
+
+let tipOwner=null,tipPinned=false;
+function showTip(button){
+  const tip=document.getElementById('tip'),field=FIELDS[button.dataset.key];
+  tip.textContent='';
+  for(const [key,label] of TIP_LABELS){
+    if(!field.tip[key])continue;
+    const line=document.createElement('div');line.className='tip-line '+key;
+    const strong=document.createElement('b');strong.textContent=label;
+    line.append(strong,field.tip[key]);tip.appendChild(line);
+  }
+  if(tipOwner&&tipOwner!==button)tipOwner.setAttribute('aria-expanded','false');
+  tipOwner=button;button.setAttribute('aria-expanded','true');
+  tip.classList.add('open');
+  positionTip(button);
+}
+function positionTip(button){
+  const tip=document.getElementById('tip');
+  const anchor=button.getBoundingClientRect(),box=tip.getBoundingClientRect(),gap=8,edge=8;
+  let top=anchor.bottom+gap;
+  if(top+box.height>window.innerHeight-edge&&anchor.top-gap-box.height>edge)top=anchor.top-gap-box.height;
+  const left=Math.min(Math.max(edge,anchor.left+anchor.width/2-box.width/2),window.innerWidth-box.width-edge);
+  tip.style.top=Math.max(edge,top)+'px';tip.style.left=left+'px';
+}
+function hideTip(){
+  document.getElementById('tip').classList.remove('open');
+  if(tipOwner)tipOwner.setAttribute('aria-expanded','false');
+  tipOwner=null;tipPinned=false;
+}
+function bindTips(){
+  const root=document.getElementById('form');
+  root.addEventListener('mouseover',event=>{const button=event.target.closest('.tipi');if(button&&!tipPinned)showTip(button);});
+  root.addEventListener('mouseout',event=>{const button=event.target.closest('.tipi');if(button&&!tipPinned&&!button.contains(event.relatedTarget))hideTip();});
+  root.addEventListener('focusin',event=>{const button=event.target.closest('.tipi');if(button)showTip(button);});
+  root.addEventListener('focusout',event=>{if(event.target.closest('.tipi')&&!tipPinned)hideTip();});
+  // Touch screens have no hover
+  root.addEventListener('click',event=>{
+    const button=event.target.closest('.tipi');if(!button)return;
+    event.preventDefault();
+    if(tipPinned&&tipOwner===button){hideTip();return;}
+    showTip(button);tipPinned=true;
+  });
+  document.addEventListener('click',event=>{if(tipPinned&&!event.target.closest('.tipi'))hideTip();});
+  document.addEventListener('keydown',event=>{if(event.key==='Escape')hideTip();});
+  window.addEventListener('scroll',()=>{if(tipOwner)positionTip(tipOwner);},{passive:true});
+  window.addEventListener('resize',()=>{if(tipOwner)positionTip(tipOwner);});
 }
 
 const ZERO_OK=new Set(['orphan_file_grace_hours','scan_rows_per_second','deletion_rows_per_second']);
@@ -8147,22 +8479,22 @@ function renderPreview(result,runId){
   for(const [group,items] of Object.entries(result.summary||{})){
     const rows=Object.entries(items).filter(([,v])=>v>0);
     if(!rows.length)continue;
-    html+=`<table><tr><th colspan="2">${group}</th></tr>`+
+    html+=`<div class="result-group"><table><tr><th colspan="2">${group}</th></tr>`+
       rows.map(([k,v])=>
-        `<tr><td><button class="detail-toggle" data-category="${SUMMARY_KEYS[k]}" data-total="${v}" aria-expanded="false">${k}</button></td>`+
-        `<td class="n">${fmt(v)} <button class="detail-toggle detail-icon" data-category="${SUMMARY_KEYS[k]}" data-total="${v}" aria-expanded="false" aria-label="Show details for ${k}">`+
-        `<span class="detail-chevron" aria-hidden="true">⌄</span></button></td></tr>`+
+        `<tr class="result-row"><td><button class="detail-toggle" data-category="${SUMMARY_KEYS[k]}" data-total="${v}" aria-expanded="false">${k}</button></td>`+
+        `<td class="n"><button class="detail-toggle detail-icon" data-category="${SUMMARY_KEYS[k]}" data-total="${v}" aria-expanded="false" aria-label="Show details for ${k}">`+
+        `<span class="count">${fmt(v)}</span> <span class="detail-chevron" aria-hidden="true">⌄</span></button></td></tr>`+
         `<tr class="detail-row" style="display:none"><td colspan="2"></td></tr>`
-      ).join('')+'</table>';
+      ).join('')+'</table></div>';
   }
-  html+=`<p class="total">Total items: ${fmt(result.total)}</p>`;
-  if(!result.total)html='<p>Nothing to delete — database is clean for the selected options.</p>';
+  html+=`<p class="total"><span>Total items</span><span>${fmt(result.total)}</span></p>`;
+  if(!result.total)html='<p class="empty">Nothing to delete — database is clean for the selected options.</p>';
   const body=document.getElementById('previewBody');body.innerHTML=html;
   body.querySelectorAll('.detail-toggle').forEach(button=>button.onclick=()=>toggleDetails(button));
 }
 
 async function toggleDetails(button){
-  const row=button.parentElement.parentElement.nextElementSibling;
+  const row=button.closest('tr').nextElementSibling;
   const controls=button.closest('tr').querySelectorAll('.detail-toggle');
   const chevron=button.closest('tr').querySelector('.detail-chevron');
   if(row.style.display!=='none'){row.style.display='none';controls.forEach(control=>control.setAttribute('aria-expanded','false'));chevron.classList.remove('open');return;}
@@ -8182,10 +8514,11 @@ async function loadDetails(button,cell,page,pageSize){
     const size=document.createElement('select');
     [50,100].forEach(value=>{const option=document.createElement('option');option.value=value;option.textContent=value+' per page';option.selected=value===pageSize;size.appendChild(option);});
     size.onchange=()=>loadDetails(button,cell,1,Number(size.value));controls.appendChild(size);
-    const exportButton=document.createElement('button');exportButton.className='detail-export';exportButton.textContent='Export JSON';exportButton.onclick=()=>exportDetails(button,exportButton);controls.appendChild(exportButton);
     const previous=document.createElement('button');previous.textContent='Previous';previous.disabled=page===1;previous.onclick=()=>loadDetails(button,cell,page-1,pageSize);controls.appendChild(previous);
     const next=document.createElement('button');next.textContent='Next';next.disabled=data.items.length<pageSize||page*pageSize>=Number(button.dataset.total);next.onclick=()=>loadDetails(button,cell,page+1,pageSize);controls.appendChild(next);
-    const label=document.createElement('span');label.textContent='Page '+page;controls.appendChild(label);cell.appendChild(controls);
+    const label=document.createElement('span');label.textContent='Page '+page;controls.appendChild(label);
+    const exportButton=document.createElement('button');exportButton.className='detail-export';exportButton.textContent='Export JSON';exportButton.onclick=()=>exportDetails(button,exportButton);controls.appendChild(exportButton);
+    cell.appendChild(controls);
     const list=document.createElement('ol');list.className='detail-list';
     for(const [index,item] of data.items.entries()){const entry=document.createElement('li');entry.textContent=((page-1)*pageSize+index+1)+'. '+Object.entries(item).map(([key,value])=>key+': '+value).join(' · ');list.appendChild(entry);}
     if(!data.items.length){const entry=document.createElement('li');entry.textContent='No matching items remain.';list.appendChild(entry);}
@@ -8223,7 +8556,6 @@ async function exportDetails(button,exportButton){
   finally{exportButton.disabled=false;exportButton.textContent=originalText;}
 }
 
-let pollTimer=null;
 async function pollRun(id){
   try{
     const r=await api('/api/runs/'+id);
@@ -8233,11 +8565,11 @@ async function pollRun(id){
       document.getElementById('runCard').style.display='';
       document.getElementById('runId').textContent=id;
       const b=document.getElementById('runStatus');
-      b.textContent=r.status;b.className='badge'+(r.status==='done'?' ok':'');
+      b.textContent=r.status;b.className='badge '+(r.status==='done'?'ok':r.status);
       const pre=document.getElementById('runLog');
       pre.textContent=r.log.join('\\n');pre.scrollTop=pre.scrollHeight;
     }
-    if(r.status==='running'){pollTimer=setTimeout(()=>pollRun(id),1000);return;}
+    if(r.status==='running'){setTimeout(()=>pollRun(id),1000);return;}
     setBusy(false);
     if(r.status==='cancelled'){
       msg(isPreview?'Preview cancelled.':'Run cancelled — anything already deleted was kept. Re-run to finish (safe, every write is idempotent).');
@@ -8269,14 +8601,41 @@ function doPreview(){
 }
 
 function doExecute(){
-  const answer=prompt('This will PERMANENTLY DELETE the selected data.\\nType DELETE to confirm.');
-  if(answer!=='DELETE')return;
+  const modal=document.getElementById('confirmModal'),input=document.getElementById('confirmInput');
+  const names=dangerousRows().map(row=>plainLabel(FIELDS[row.dataset.key]));
+  const dangerBox=document.getElementById('confirmDanger');
+  dangerBox.textContent=names.length?(names.length===1?'1 dangerous option is on: ':names.length+' dangerous options are on: ')+names.join(', ')+'.':'';
+  dangerBox.classList.toggle('on',names.length>0);
+  input.value='';document.getElementById('confirmOk').disabled=true;
+  modal.hidden=false;input.focus();
+}
+function closeConfirm(){document.getElementById('confirmModal').hidden=true;document.getElementById('btnExecute').focus();}
+function confirmExecute(){
+  if(document.getElementById('confirmInput').value!=='DELETE')return;
+  closeConfirm();
   startRun('/api/execute','Starting run…');
+}
+function bindConfirm(){
+  const input=document.getElementById('confirmInput');
+  input.addEventListener('input',()=>{document.getElementById('confirmOk').disabled=input.value!=='DELETE';});
+  input.addEventListener('keydown',event=>{if(event.key==='Enter')confirmExecute();});
+  document.getElementById('confirmOk').onclick=confirmExecute;
+  document.getElementById('confirmCancel').onclick=closeConfirm;
+  const modal=document.getElementById('confirmModal');
+  modal.addEventListener('click',event=>{if(event.target===modal)closeConfirm();});
+  document.addEventListener('keydown',event=>{if(event.key==='Escape'&&!modal.hidden)closeConfirm();});
+}
+
+function renderMeta(status){
+  const chips=['v'+status.version,'Vector DB: '+(status.vector_db||'none'),'Storage: '+status.storage_provider];
+  const meta=document.getElementById('meta');meta.textContent='';
+  for(const text of chips){const chip=document.createElement('span');chip.className='chip';chip.textContent=text;meta.appendChild(chip);}
 }
 
 async function initStatus(){
   try{
     const s=await api('/api/status');
+    renderMeta(s);
     if(s.running&&s.current){msg('A prune run is already in progress.');currentRunId=s.current.id;setBusy(true);pollRun(s.current.id);}
     else if(s.running){
       document.getElementById('status').textContent='An automatic prune pass is currently running.';
@@ -8290,9 +8649,12 @@ async function initStatus(){
 }
 
 build();
+bindTips();
+bindConfirm();
 document.getElementById('btnPreview').onclick=doPreview;
 document.getElementById('btnExecute').onclick=doExecute;
 document.getElementById('btnCancel').onclick=doCancel;
+document.getElementById('dangerSummary').onclick=scrollToFirstDanger;
 if(!token)msg('No session token found — log in to Open WebUI in this browser first.');
 else initStatus();
 </script>
