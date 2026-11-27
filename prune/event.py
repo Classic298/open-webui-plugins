@@ -3237,6 +3237,10 @@ try:
 except ImportError:
     ChannelWebhook = None
 try:
+    from open_webui.models.model_history import ModelHistory
+except ImportError:
+    ModelHistory = None
+try:
     from open_webui.models.access_grants import AccessGrant
 except ImportError:
     AccessGrant = None
@@ -5395,6 +5399,13 @@ async def get_active_file_ids(
             )
         else:
             log.debug("Model.params/meta attributes not present — skipping model scan")
+
+        # Older model versions can be restored, so their files stay in use
+        if ModelHistory is not None:
+            await scan_text_refs(
+                "Scanning model history", ModelHistory, ModelHistory.id,
+                [ModelHistory.snapshot],
+            )
 
         # Notes store attachments in note.data.files as {"id": ...} entries
         if hasattr(Note, "data"):
