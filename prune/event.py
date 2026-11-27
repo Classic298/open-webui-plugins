@@ -5408,13 +5408,26 @@ async def get_active_file_ids(
             "Scanning profile banners", User, User.id, [User.profile_banner_image_url]
         )
 
-        # chat_message mirror (v0.6.41+): redundant with Chat.chat today, cheap
-        # insurance should a future version stop mirroring into Chat.chat.
-        chat_message_cols = [c for c in (getattr(ChatMessage, "files", None),
-                                         getattr(ChatMessage, "content", None)) if c is not None]
+        # Tool results and cloned or forked chats link files only here
+        chat_message_cols = [
+            column
+            for column in (
+                getattr(ChatMessage, "files", None),
+                getattr(ChatMessage, "content", None),
+                getattr(ChatMessage, "output", None),
+                getattr(ChatMessage, "sources", None),
+                getattr(ChatMessage, "embeds", None),
+                getattr(ChatMessage, "data", None),
+            )
+            if column is not None
+        ]
         if chat_message_cols:
             await scan_text_refs(
-                "Scanning chat messages", ChatMessage, ChatMessage.id, chat_message_cols
+                "Scanning chat messages",
+                ChatMessage,
+                ChatMessage.id,
+                chat_message_cols,
+                batch_size=50,
             )
 
     except Exception:
