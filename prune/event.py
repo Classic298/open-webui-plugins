@@ -3,7 +3,7 @@ title: Prune
 author: classic298
 author_url: https://github.com/Classic298
 funding_url: https://github.com/Classic298/prune-open-webui
-version: 0.12.0
+version: 0.12.1
 required_open_webui_version: 0.11.3
 description: Automatic, throttled database and storage cleanup. Configure retention via Valves (0 = disabled); pruning runs event-driven on one worker only, slowly, so a live instance stays responsive.
 """
@@ -6409,7 +6409,7 @@ async def run_prune(form_data: PruneDataForm) -> dict:
 # manual admin UI + API (same deletion engine as the automatic passes)
 # ============================================================================
 
-PLUGIN_VERSION = "0.11.0"
+PLUGIN_VERSION = "0.12.1"
 MAX_RUN_LOG_LINES = 4000
 MAX_RUNS_KEPT = 20
 
