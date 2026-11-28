@@ -3,7 +3,7 @@ title: Vision Bridge
 author: Classic298
 author_url: https://github.com/Classic298
 funding_url: https://github.com/Classic298
-version: 1.1.0
+version: 1.1.1
 description: Let a text-only model inspect chat attachments (analyze_image) and Open Terminal files (analyze_terminal_image) on demand through a configured vision model; pair with the Vision Bridge filter so the image never reaches the text-only model.
 """
 
@@ -181,6 +181,12 @@ class Tools:
                 chain = get_message_list(history.get("messages", {}), history.get("currentId"))
                 for msg in reversed(chain or []):
                     if msg.get("role") != "user":
+                        # Tool and generated images are linked to the assistant reply.
+                        chat_files = await Chats.get_chat_files_by_chat_id_and_message_id(chat_id, msg["id"])
+                        for chat_file in reversed(chat_files):
+                            data_url = await get_image_base64_from_file_id(chat_file.file_id, user=user)
+                            if data_url:
+                                return data_url
                         continue
                     for f in msg.get("files") or []:
                         if isinstance(f, dict) and _is_image(f):

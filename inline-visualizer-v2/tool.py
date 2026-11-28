@@ -3,7 +3,7 @@ title: Inline Visualizer
 author: Classic298
 author_url: https://github.com/Classic298
 funding_url: https://github.com/Classic298
-version: 2.2.3
+version: 2.2.4
 required_open_webui_version: 0.10.2
 description: Renders interactive HTML/SVG visualizations inline in chat. Requires "iframe Sandbox Allow Same Origin" to be enabled in Open WebUI Settings -> Interface. For design instructions, the model should call view_skill("visualize").
 """
@@ -15,7 +15,7 @@ from typing import Literal
 # Build marker embedded into the rendered iframe so the running
 # version can be verified at runtime (search DevTools for
 # `data-iv-build` on <html>).  Keep in sync with the frontmatter version.
-_IV_BUILD = "2.2.3"
+_IV_BUILD = "2.2.4"
 
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field
@@ -1803,6 +1803,20 @@ function _ivDownload() {
     for (var i = 0; i < imported.length; i++) {
       bodyClone.appendChild(imported[i]);
     }
+  }
+  // A downloaded file runs from file://, so load root-relative assets from this instance.
+  var exportOrigin = window.origin;
+  var rootRelativeNodes = docClone.querySelectorAll('[src^="/"]:not([src^="//"]), [href^="/"]:not([href^="//"])');
+  if (rootRelativeNodes.length && exportOrigin !== 'null') {
+    rootRelativeNodes.forEach(function(node) {
+      ['src', 'href'].forEach(function(attr) {
+        var value = node.getAttribute(attr);
+        var isRootRelative = value && value[0] === '/' && value[1] !== '/';
+        if (isRootRelative) node.setAttribute(attr, exportOrigin + value);
+      });
+    });
+    var cspMeta = docClone.querySelector('meta[http-equiv="Content-Security-Policy"]');
+    if (cspMeta) cspMeta.setAttribute('content', cspMeta.getAttribute('content').replace(/'self'/g, "'self' " + exportOrigin));
   }
   var html = '<!DOCTYPE html>\\n' + docClone.outerHTML;
 
