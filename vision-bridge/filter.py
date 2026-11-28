@@ -3,7 +3,7 @@ title: Vision Bridge
 author: Classic298
 author_url: https://github.com/Classic298
 funding_url: https://github.com/Classic298
-version: 1.1.0
+version: 1.1.1
 description: Let a text-only model handle images without core changes: strips each image in the request to a file-id marker (pair with the Vision Bridge tool for chat and Open Terminal images), or in describe mode swaps it for a text description.
 """
 
@@ -128,7 +128,10 @@ class Filter:
         return body
 
     async def request(self, body: dict, __metadata__: Optional[dict] = None) -> dict:
-        """Runs after core resolved the tools: hide the terminal tool when core resolved no terminal."""
+        """Before every model call: strip tool images; hide the terminal tool when core resolved no terminal."""
+        for msg in body.get("messages") or []:
+            if _has_image(msg.get("content")):
+                msg["content"] = _strip_images(msg["content"], self.valves.strip_only)
         if body.get("tools") and not _has_terminal(__metadata__):
             body["tools"] = [
                 tool for tool in body["tools"] if (tool.get("function") or {}).get("name") != "analyze_terminal_image"
