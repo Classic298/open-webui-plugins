@@ -224,6 +224,8 @@ docker run -d ... -v /path/on/host/iv-libs:/app/backend/open_webui/static/iv-lib
 
 If Open WebUI runs under a sub-path (e.g. `https://example.com/webui/`), use `/webui/static/iv-libs/…` instead.
 
+A visualization downloaded as HTML loads these self-hosted libraries from the Open WebUI instance that generated it, so it only renders where that instance is reachable.
+
 ---
 
 ## 🧰 Troubleshooting
